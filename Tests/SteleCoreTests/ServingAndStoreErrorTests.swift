@@ -126,6 +126,27 @@ struct ServingAndStoreErrorTests {
         }
     }
 
+    /// Bytes that aren't UTF-8 are refused rather than decoded lossily: substituting
+    /// U+FFFD would publish mojibake at a permanent URL instead of telling the caller
+    /// their upload was not text.
+    @Test func nonUTF8BodyIs400() async throws {
+        try await TestFixture.makeApp().test(.router) { client in
+            try await client.execute(
+                uri: "/pages",
+                method: .post,
+                headers: [
+                    .authorization: "Bearer \(TestFixture.token)",
+                    .contentType: "text/html",
+                ],
+                body: ByteBuffer(bytes: [0xFF, 0xFE, 0xFD])
+            ) { response in
+                #expect(response.status == .badRequest)
+                let message = try TestFixture.errorMessage(response.body)
+                #expect(message.contains("UTF-8"))
+            }
+        }
+    }
+
     /// The size limit is enforced, and only the size limit produces this message — the
     /// route rethrows every other collection failure as itself so a dropped connection is
     /// never reported as a too-large page.

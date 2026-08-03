@@ -47,8 +47,9 @@ against an in-memory `PageStoring` fake, so no curl and no database are needed.
 
 The slug-retry and requested-slug policy is shared code in `PageStoring`'s extension, so
 the router tests exercise the real thing (the 503 test runs the retry loop to genuine
-exhaustion). The remaining gap is **`PageStore` itself** — the interpolated SQL and the
-atomicity of the `ON CONFLICT` insert are never exercised against Postgres. Closing that
+exhaustion). The remaining gap is **`PageStore` itself** — the interpolated SQL, the
+atomicity of the `ON CONFLICT` insert, and the `UPDATE … RETURNING` existence check are
+never exercised against Postgres. Closing that
 needs a real database; if such a suite is added, gate it on an env var so a plain
 `swift test` stays hermetic.
 

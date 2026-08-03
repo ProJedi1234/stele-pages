@@ -7,10 +7,10 @@ import Logging
 /// does so on the concrete `PageStore`, so schema bootstrap stays a database concern
 /// rather than something every conformer has to pretend to implement.
 ///
-/// The seam is a single storage primitive — insert-if-free — with the
+/// The seam is storage primitives only — insert-if-free and update-if-present — with the
 /// requested-vs-generated policy and the collision-retry loop living in the extension
 /// below, shared by every conformer. That keeps the policy written (and tested) once:
-/// a conformer that only implements `insert` cannot drift from the retry semantics.
+/// a conformer that only implements the primitives cannot drift from the retry semantics.
 public protocol PageStoring: Sendable {
     /// Fetches a page, or nil if no such slug exists.
     func fetch(slug: Slug) async throws -> Page?
@@ -20,6 +20,14 @@ public protocol PageStoring: Sendable {
     ///
     /// - Returns: true if the page was stored, false if the slug was already taken.
     func insert(slug: Slug, body: String, contentType: String) async throws -> Bool
+
+    /// Replaces the body and content type of an existing page, as one atomic step — the
+    /// existence check and the write must not leave a window where a concurrent delete
+    /// or insert changes what the update lands on. Never creates: a slug with no row
+    /// stays absent.
+    ///
+    /// - Returns: true if the page was replaced, false if no such slug exists.
+    func update(slug: Slug, body: String, contentType: String) async throws -> Bool
 }
 
 extension PageStoring {

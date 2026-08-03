@@ -87,6 +87,7 @@ happens to run the app, which is rarely the machine you chose for durable storag
 | `GET /healthz`     | none   | `ok`                                                   |
 | `GET /:slug`       | none   | The stored page, or a 404 page                         |
 | `POST /pages`      | bearer | Stores the request body, returns `{slug, url}` as `201` |
+| `PUT /pages/:slug` | bearer | Replaces a stored page's body and content type, returns `{slug, url}` as `200` |
 
 `POST /pages` takes the page as the raw request body, up to `STELE_MAX_PAGE_BYTES`
 (default 1 MiB; larger is `413`). Add `?slug=my-page` to choose the name yourself — it's
@@ -95,6 +96,14 @@ taken. Accepted content types are `text/html` (default), `text/plain`, `text/css
 `text/markdown`; anything else is `415`. An empty or non-UTF-8 body is `400`, a missing
 or wrong bearer token is `401`, and if five random draws in a row collide with existing
 slugs the server gives up with `503` rather than retrying forever.
+
+`PUT /pages/:slug` replaces an existing page's body and content type, and shares POST's
+request semantics exactly — the same size limit (`413`), content-type allowlist (`415`),
+empty or non-UTF-8 body (`400`), and bearer token (`401`). The slug in the path obeys the
+same grammar as a custom slug below; malformed or reserved is `400` rather than the
+public `404`, because this side of the API is behind the upload token and has nothing to
+hide from its caller. A well-formed slug with no page at it is `404`: `PUT` never
+creates, so publishing a new page is always `POST`.
 
 Custom slugs are lowercase letters, digits and single interior hyphens, 3–64 characters.
 Names the server uses for itself (`pages`, `healthz`, …) are rejected rather than
