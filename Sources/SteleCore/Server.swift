@@ -21,9 +21,9 @@ public enum PageContentType {
     ]
 
     /// Normalises a request `Content-Type` to its canonical stored form, or nil if it
-    /// isn't something we're willing to serve back.
-    static func normalize(_ raw: String?) -> String? {
-        guard let raw else { return `default` }
+    /// isn't something we're willing to serve back. An *absent* header never reaches
+    /// this — the write handlers decide what absence means for their verb.
+    static func normalize(_ raw: String) -> String? {
         let base = raw.split(separator: ";").first.map {
             $0.trimmingCharacters(in: .whitespaces).lowercased()
         } ?? ""
@@ -75,21 +75,15 @@ public func buildRouter(
 
             // A caller-supplied slug is validated with exactly the same rules as a
             // generated one, so nothing enters the table that couldn't be served back.
-            var requestedSlug: Slug?
-            if let raw = request.uri.queryParameters["slug"].map(String.init) {
-                do {
-                    requestedSlug = try Slug(custom: raw)
-                } catch let error as SlugError {
-                    throw HTTPError(.badRequest, message: "Invalid slug: \(error).")
-                }
-            }
+            let requestedSlug = try request.uri.queryParameters["slug"]
+                .map { try validatedSlug(String($0)) }
 
             let slug: Slug
             do {
                 slug = try await store.create(
                     requestedSlug: requestedSlug,
                     body: body,
-                    contentType: contentType,
+                    contentType: contentType ?? PageContentType.default,
                     generator: generator,
                     logger: context.logger
                 )
@@ -112,15 +106,7 @@ public func buildRouter(
         // rejecting a nonsense address before streaming a megabyte to it is the cheaper
         // order. Precedence is auth, then slug, then the body checks.
         .put(":slug") { request, context -> Response in
-            guard let raw = context.parameters.get("slug") else {
-                throw HTTPError(.badRequest, message: "Missing slug.")
-            }
-            let slug: Slug
-            do {
-                slug = try Slug(custom: raw)
-            } catch let error as SlugError {
-                throw HTTPError(.badRequest, message: "Invalid slug: \(error).")
-            }
+            let slug = try validatedSlug(context.parameters.require("slug"))
 
             let (body, contentType) = try await readValidatedPage(
                 request: request,
@@ -170,6 +156,10 @@ public func buildRouter(
                 // Stops a browser content-sniffing a stored page into something we
                 // didn't agree to serve it as.
                 .xContentTypeOptions: "nosniff",
+                // Pages are mutable (PUT replaces them in place) and carry no validator,
+                // so without this a cache may heuristically keep serving pre-update
+                // bytes with nothing for the caller to bust it with.
+                .cacheControl: "no-cache",
             ],
             body: .init(byteBuffer: ByteBuffer(string: page.body))
         )
@@ -178,21 +168,42 @@ public func buildRouter(
     return router
 }
 
+/// Runs a raw path or query slug through the `Slug(custom:)` chokepoint, reporting a
+/// rejection the same way for every write route.
+private func validatedSlug(_ raw: String) throws -> Slug {
+    do {
+        return try Slug(custom: raw)
+    } catch let error as SlugError {
+        throw HTTPError(.badRequest, message: "Invalid slug: \(error).")
+    }
+}
+
 /// The request checks every write shares: an allowed content type, and a body that fits,
 /// isn't empty, and is text. Shared by POST and PUT so the two cannot drift into
 /// accepting different things into the same table.
+///
+/// `contentType` is nil when the request carried no `Content-Type` header at all — the
+/// caller expressed no opinion. What that means differs by verb: POST picks the HTML
+/// default (a new page has no prior type), PUT preserves the stored one (silently
+/// re-typing a stylesheet to HTML would break every page linking it, behind a 200).
 private func readValidatedPage(
     request: Request,
     configuration: Configuration
-) async throws -> (body: String, contentType: String) {
-    guard let contentType = PageContentType.normalize(request.headers[.contentType]) else {
-        throw HTTPError(
-            .unsupportedMediaType,
-            message: """
-                Unsupported Content-Type. Allowed: \
-                \(PageContentType.allowed.keys.sorted().joined(separator: ", ")).
-                """
-        )
+) async throws -> (body: String, contentType: String?) {
+    let contentType: String?
+    if let raw = request.headers[.contentType] {
+        guard let normalized = PageContentType.normalize(raw) else {
+            throw HTTPError(
+                .unsupportedMediaType,
+                message: """
+                    Unsupported Content-Type. Allowed: \
+                    \(PageContentType.allowed.keys.sorted().joined(separator: ", ")).
+                    """
+            )
+        }
+        contentType = normalized
+    } else {
+        contentType = nil
     }
 
     let buffer: ByteBuffer
@@ -210,12 +221,19 @@ private func readValidatedPage(
     guard buffer.readableBytes > 0 else {
         throw HTTPError(.badRequest, message: "Request body is empty.")
     }
-    // Decoded through Foundation rather than `ByteBuffer.getString`, which is `String?`
-    // but never actually returns nil: it decodes with `String(decoding:)`, which
-    // substitutes U+FFFD for invalid bytes. That would store mojibake at a permanent URL
-    // instead of telling the caller their upload was not text.
-    guard let body = String(bytes: buffer.readableBytesView, encoding: .utf8) else {
+    // A validating decode straight out of the buffer, not `ByteBuffer.getString`: that
+    // one is `String?` but never actually returns nil — it decodes with
+    // `String(decoding:)`, which substitutes U+FFFD for invalid bytes and would store
+    // mojibake at a permanent URL instead of telling the caller their upload wasn't text.
+    guard let body = buffer.withUnsafeReadableBytes({
+        String(validating: $0, as: Unicode.UTF8.self)
+    }) else {
         throw HTTPError(.badRequest, message: "Request body is not valid UTF-8.")
+    }
+    // Valid UTF-8, but Postgres `text` cannot hold it — without this check a NUL
+    // surfaces as a database error and a 500 instead of a complaint about the body.
+    guard !body.contains("\0") else {
+        throw HTTPError(.badRequest, message: "Request body contains a NUL byte.")
     }
 
     return (body, contentType)

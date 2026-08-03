@@ -21,13 +21,14 @@ public protocol PageStoring: Sendable {
     /// - Returns: true if the page was stored, false if the slug was already taken.
     func insert(slug: Slug, body: String, contentType: String) async throws -> Bool
 
-    /// Replaces the body and content type of an existing page, as one atomic step — the
-    /// existence check and the write must not leave a window where a concurrent delete
-    /// or insert changes what the update lands on. Never creates: a slug with no row
-    /// stays absent.
+    /// Replaces the body — and, when `contentType` is non-nil, the content type — of an
+    /// existing page, as one atomic step: the existence check and the write must not
+    /// leave a window where a concurrent delete or insert changes what the update lands
+    /// on. A nil `contentType` preserves the stored one. Never creates: a slug with no
+    /// row stays absent.
     ///
     /// - Returns: true if the page was replaced, false if no such slug exists.
-    func update(slug: Slug, body: String, contentType: String) async throws -> Bool
+    func update(slug: Slug, body: String, contentType: String?) async throws -> Bool
 }
 
 extension PageStoring {

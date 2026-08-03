@@ -44,14 +44,12 @@ actor InMemoryPageStore: PageStoring {
         return true
     }
 
-    func update(slug: Slug, body: String, contentType: String) async throws -> Bool {
+    func update(slug: Slug, body: String, contentType: String?) async throws -> Bool {
         guard let existing = pages[slug] else { return false }
-        pages[slug] = Page(
-            slug: slug,
-            body: body,
-            contentType: contentType,
-            createdAt: existing.createdAt
-        )
+        // No `createdAt` theater: `page` stamps every entry with the same fixed date, so
+        // "preserved" and "reset" are indistinguishable here — the real created_at
+        // guarantee lives in `PageStore`'s SQL and only a Postgres test can check it.
+        pages[slug] = page(slug: slug, body: body, contentType: contentType ?? existing.contentType)
         return true
     }
 

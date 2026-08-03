@@ -98,8 +98,11 @@ or wrong bearer token is `401`, and if five random draws in a row collide with e
 slugs the server gives up with `503` rather than retrying forever.
 
 `PUT /pages/:slug` replaces an existing page's body and content type, and shares POST's
-request semantics exactly — the same size limit (`413`), content-type allowlist (`415`),
-empty or non-UTF-8 body (`400`), and bearer token (`401`). The slug in the path obeys the
+request semantics — the same size limit (`413`), content-type allowlist (`415`), empty or
+non-UTF-8 body (`400`), and bearer token (`401`) — with one deliberate difference:
+omitting `Content-Type` keeps the page's stored type instead of defaulting to HTML, so a
+re-upload that forgets the header can't silently turn a stylesheet into a page browsers
+refuse to apply. The slug in the path obeys the
 same grammar as a custom slug below; malformed or reserved is `400` rather than the
 public `404`, because this side of the API is behind the upload token and has nothing to
 hide from its caller. A well-formed slug with no page at it is `404`: `PUT` never

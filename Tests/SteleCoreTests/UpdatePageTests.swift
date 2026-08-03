@@ -44,6 +44,7 @@ struct UpdatePageTests {
             #expect(response.status == .ok)
             #expect(String(buffer: response.body) == original)
             #expect(response.headers[.contentType] == contentType)
+            #expect(response.headers[.xContentTypeOptions] == "nosniff")
         }
     }
 
@@ -291,12 +292,13 @@ struct UpdatePageTests {
         }
     }
 
-    /// A replacement with no `Content-Type` takes the default rather than inheriting the
-    /// stored one — the header's absence means the same thing on both writes. Seeded as
-    /// markdown so the default is a visible change.
-    @Test func updateWithoutContentTypeDefaults() async throws {
+    /// A replacement with no `Content-Type` keeps the stored type — the caller expressed
+    /// no opinion, and defaulting to HTML here would silently re-type a stylesheet into
+    /// something browsers refuse under `nosniff`, behind a 200. Seeded as markdown so
+    /// inheritance is distinguishable from POST's HTML default.
+    @Test func updateWithoutContentTypePreservesStoredType() async throws {
         let store = try await Self.seededStore(contentType: "text/markdown; charset=utf-8")
-        let replacement = "<h1>replaced</h1>"
+        let replacement = "# replaced"
 
         try await TestFixture.makeApp(store: store).test(.router) { client in
             try await client.execute(
@@ -311,8 +313,28 @@ struct UpdatePageTests {
             try await client.execute(uri: "/\(Self.slugName)", method: .get) { response in
                 #expect(response.status == .ok)
                 #expect(String(buffer: response.body) == replacement)
-                #expect(response.headers[.contentType] == PageContentType.default)
+                #expect(response.headers[.contentType] == "text/markdown; charset=utf-8")
             }
+        }
+    }
+
+    /// NUL is well-formed UTF-8 that Postgres `text` cannot store; without an explicit
+    /// check it would surface as a database error and a 500. The fake accepts NUL
+    /// happily, so this pins the router-level guard, not the store.
+    @Test func nulByteInBodyIs400() async throws {
+        try await TestFixture.makeApp(store: try await Self.seededStore()).test(.router) { client in
+            try await client.execute(
+                uri: "/pages/\(Self.slugName)",
+                method: .put,
+                headers: Self.authorized(),
+                body: ByteBuffer(bytes: [0x61, 0x00, 0x62])
+            ) { response in
+                #expect(response.status == .badRequest)
+                let message = try TestFixture.errorMessage(response.body)
+                #expect(message.contains("NUL"))
+            }
+
+            try await Self.expectOriginalIntact(client)
         }
     }
 

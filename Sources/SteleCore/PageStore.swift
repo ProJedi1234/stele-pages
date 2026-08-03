@@ -92,13 +92,14 @@ public struct PageStore: Sendable {
     }
 
     /// - Returns: true if the row was replaced, false if no such slug exists.
-    public func update(slug: Slug, body: String, contentType: String) async throws -> Bool {
+    public func update(slug: Slug, body: String, contentType: String?) async throws -> Bool {
         // A single UPDATE is its own existence check: the WHERE clause and the write are
         // one statement, and RETURNING tells us whether a row matched. `created_at` is
-        // left alone, so a replaced page keeps the moment it was first published.
+        // left alone, so a replaced page keeps the moment it was first published, and a
+        // nil content type COALESCEs to the stored value rather than overwriting it.
         let rows = try await client.query(
             """
-            UPDATE pages SET body = \(body), content_type = \(contentType)
+            UPDATE pages SET body = \(body), content_type = COALESCE(\(contentType), content_type)
             WHERE slug = \(slug.value)
             RETURNING slug
             """,
@@ -113,6 +114,7 @@ public struct PageStore: Sendable {
 }
 
 /// `PageStore` is the database-backed conformer of the seam the router talks to. Only
-/// the insert-if-free primitive lives here — the retry and requested-slug policy come
-/// from `PageStoring`'s extension, shared with every other conformer.
+/// the storage primitives — insert-if-free and update-if-present — live here; the retry
+/// and requested-slug policy come from `PageStoring`'s extension, shared with every
+/// other conformer.
 extension PageStore: PageStoring {}
