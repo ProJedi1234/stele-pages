@@ -17,9 +17,11 @@ struct NotFoundTests {
         let store = InMemoryPageStore()
         await store.seed(slug: try Slug(custom: "amber-willow-heron"), body: "<h1>here</h1>")
 
-        // Malformed (too short), reserved but with no GET route, and well-formed but
-        // never published.
-        let paths = ["/x", "/admin", "/quiet-cedar-otter"]
+        // Malformed (too short), reserved but with no GET route, well-formed but never
+        // published, and a routed path whose only responder is POST — `/pages` needs its
+        // own GET responder because the trie matches the literal node without
+        // backtracking to `/:slug`.
+        let paths = ["/x", "/admin", "/quiet-cedar-otter", "/\(ServerRoute.pages)"]
         // Collected inside the test closure and returned out of it: the closure is
         // `@Sendable`, so it cannot mutate a captured local.
         let bodies = try await TestFixture.makeApp(store: store).test(.router) { client -> [[UInt8]] in
@@ -43,8 +45,9 @@ struct NotFoundTests {
 
         #expect(bodies.count == paths.count)
         // Byte-identical, not merely "both a 404 page": any divergence at all is a signal.
-        #expect(bodies[0] == bodies[1])
-        #expect(bodies[1] == bodies[2])
+        for pair in bodies.indices.dropFirst() {
+            #expect(bodies[pair - 1] == bodies[pair], "\(paths[pair - 1]) vs \(paths[pair])")
+        }
         // And identical to the page we mean to serve — three copies of some *other*
         // uniform body (the framework default, an empty body) would still be a bug.
         #expect(bodies[0] == Array(notFoundPage().utf8))
@@ -61,18 +64,14 @@ struct NotFoundTests {
         }
     }
 
-    /// KNOWN INVARIANT EXCEPTION — documenting current behaviour, not endorsing it.
-    ///
-    /// `/pages` has a POST responder, so Hummingbird's trie matches the literal `pages`
-    /// node and stops; it does not backtrack to `/:slug`. The result is the framework's
-    /// own 404 rather than `notFoundPage()`, which makes `GET /pages` distinguishable
-    /// from every other 404 — the one crack in the uniformity above. Flagged for a
-    /// decision in the PR; routing is deliberately left alone in this change.
-    @Test func getPagesReturnsFrameworkDefault404() async throws {
+    /// The GET responder on `/pages` exists only to keep 404s uniform — it must not sit
+    /// behind the upload group's bearer-token middleware, or an unauthenticated probe
+    /// would get a 401 there and a 404 everywhere else, which is the same leak with a
+    /// different status code.
+    @Test func getPagesNeedsNoAuth() async throws {
         try await TestFixture.makeApp().test(.router) { client in
             try await client.execute(uri: "/\(ServerRoute.pages)", method: .get) { response in
                 #expect(response.status == .notFound)
-                #expect(String(buffer: response.body) != notFoundPage())
             }
         }
     }
