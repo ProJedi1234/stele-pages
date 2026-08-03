@@ -127,3 +127,7 @@ public struct PageStore: Sendable {
         return false
     }
 }
+
+/// The signatures already match, so this is a declaration of intent and nothing more:
+/// `PageStore` is the database-backed conformer of the seam the router talks to.
+extension PageStore: PageStoring {}

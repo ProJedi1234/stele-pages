@@ -40,12 +40,15 @@ step — `PageStore.migrate()` runs on boot and is idempotent.
 
 ## Testing gap
 
-Every test is pure logic: slug validation and generation, wordlist invariants,
-`DATABASE_URL` parsing. There is **no HTTP-level test coverage** — routing, auth, status
-codes, and the content-type allowlist have only been checked by hand with curl.
-`buildRouter` is split out from `buildApplication` so it can be tested without a
-listening socket, but nothing does that yet. Closing this needs the `HummingbirdTesting`
-product (available, not yet a dependency) and a Postgres for `PageStore`.
+Router behavior — routing, auth, status codes, the content-type allowlist, 404
+uniformity, and the headers pages are served with — is covered by HTTP-level tests. They
+run `buildRouter` through `HummingbirdTesting`'s `.router` mode (no listening socket)
+against an in-memory `PageStoring` fake, so no curl and no database are needed.
+
+The remaining gap is **`PageStore` itself** — the interpolated SQL, the `ON CONFLICT`
+race, and the slug-retry loop are only exercised against the fake, never against
+Postgres. Closing that needs a real database; if such a suite is added, gate it on an env
+var so a plain `swift test` stays hermetic.
 
 ## Conventions
 
@@ -57,6 +60,9 @@ product (available, not yet a dependency) and a Postgres for `PageStore`.
   `ServerRoute`, and a test asserts the reserved set covers `ServerRoute.names`, so a
   route added any other way escapes the reservation check.
 - **`PageStore` is the only file that touches the database.** Keep it that way.
+- **Routes take `some PageStoring`, not a concrete store.** That seam is what lets the
+  HTTP tests run without Postgres. `PageStore` is the only conformer that talks to a
+  database; keep new persistence behind the protocol rather than reaching past it.
 
 ## Decisions that look like bugs
 

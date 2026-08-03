@@ -56,7 +56,7 @@ public enum ServerRoute {
 /// without standing up a listening socket.
 public func buildRouter(
     configuration: Configuration,
-    store: PageStore
+    store: some PageStoring
 ) -> Router<BasicRequestContext> {
     let generator = SlugGenerator(wordCount: configuration.slugWords)
     let router = Router()

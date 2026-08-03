@@ -33,7 +33,10 @@ let package = Package(
         ),
         .testTarget(
             name: "SteleCoreTests",
-            dependencies: ["SteleCore"]
+            dependencies: [
+                "SteleCore",
+                .product(name: "HummingbirdTesting", package: "hummingbird"),
+            ]
         ),
     ]
 )
