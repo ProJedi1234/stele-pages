@@ -1,0 +1,38 @@
+# Build and test on every push to main and every pull request.
+#
+# Runs inside the official Swift container for Ubuntu 24.04 (noble) rather than on the
+# runner's own OS: Swift toolchains are built against noble's libraries (libxml2.so.2,
+# ICU 74), and newer Ubuntu images ship incompatible sonames. The container pins the
+# whole userland to what the toolchain expects.
+#
+# The test suite is pure logic (slug validation/generation, wordlist invariants,
+# DATABASE_URL parsing) — no Postgres service is needed. If HTTP-level tests land via
+# HummingbirdTesting, a postgres service container belongs here too.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    container: swift:6.3-noble
+    steps:
+      - uses: actions/checkout@v4
+
+      # Keyed on Package.resolved so dependency bumps rebuild from scratch while
+      # source-only changes reuse the compiled dependency graph.
+      - uses: actions/cache@v4
+        with:
+          path: .build
+          key: swiftpm-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
+          restore-keys: swiftpm-${{ runner.os }}-
+
+      - name: Build
+        run: swift build --build-tests
+
+      - name: Test
+        run: swift test
