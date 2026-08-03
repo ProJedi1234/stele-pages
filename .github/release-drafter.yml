@@ -1,0 +1,73 @@
+name-template: 'v$RESOLVED_VERSION'
+tag-template: 'v$RESOLVED_VERSION'
+tag-prefix: v
+commitish: main
+filter-by-commitish: true
+prerelease: true
+
+categories:
+  - title: 'Enhancements'
+    labels:
+      - 'enhancement'
+  - title: 'Bug Fixes'
+    labels:
+      - 'bug'
+  - title: 'Documentation'
+    labels:
+      - 'documentation'
+  - title: 'Maintenance'
+    labels:
+      - 'maintenance'
+  - title: 'Other Changes'
+    labels:
+      - '*'
+
+exclude-labels:
+  - 'skip-changelog'
+
+version-resolver:
+  major:
+    labels:
+      - 'major'
+  minor:
+    labels:
+      - 'enhancement'
+  patch:
+    labels:
+      - 'bug'
+      - 'maintenance'
+      - 'documentation'
+  default: patch
+
+change-template: '- $TITLE (#$NUMBER) @$AUTHOR'
+change-title-escapes: '\<*_&`'
+sort-by: merged_at
+sort-direction: descending
+no-changes-template: 'No changes'
+no-contributors-template: 'No contributors'
+
+template: |
+  ## What Changed
+
+  $CHANGES
+
+  ## Contributors
+
+  $CONTRIBUTORS
+
+autolabeler:
+  - label: 'major'
+    title:
+      - '/^[a-z]+(\(.+\))?!:/i'
+  - label: 'enhancement'
+    title:
+      - '/^feat(\(.+\))?:/i'
+  - label: 'bug'
+    title:
+      - '/^fix(\(.+\))?!?:/i'
+  - label: 'documentation'
+    title:
+      - '/^docs(\(.+\))?!?:/i'
+  - label: 'maintenance'
+    title:
+      - '/^(chore|refactor|ci|build|perf|style|test)(\(.+\))?!?:/i'
