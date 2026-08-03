@@ -40,6 +40,18 @@ struct CreatedPageResponse: Encodable {
     let url: String
 }
 
+/// First path segments the server claims for itself.
+///
+/// `buildRouter` builds its routes from these constants and a test asserts that
+/// `Slug.reserved` covers `ServerRoute.names`, so a new route that forgets its
+/// reservation fails the suite instead of silently shadowing a stored page.
+public enum ServerRoute {
+    public static let healthz = "healthz"
+    public static let pages = "pages"
+
+    public static let names: Set<String> = [healthz, pages]
+}
+
 /// Wires up the router. Split out from `buildApplication` so tests can exercise routes
 /// without standing up a listening socket.
 public func buildRouter(
@@ -51,13 +63,13 @@ public func buildRouter(
 
     router.add(middleware: LogRequestsMiddleware(.info))
 
-    router.get("/healthz") { _, _ -> String in "ok" }
+    router.get(RouterPath("/\(ServerRoute.healthz)")) { _, _ -> String in "ok" }
 
     router.get("/") { _, _ -> Response in
         htmlResponse(status: .ok, html: landingPage(baseURL: configuration.baseURL))
     }
 
-    router.group("pages")
+    router.group(RouterPath(ServerRoute.pages))
         .add(middleware: BearerTokenMiddleware(token: configuration.uploadToken))
         .post("") { request, context -> Response in
             guard let contentType = PageContentType.normalize(request.headers[.contentType]) else {
@@ -73,7 +85,10 @@ public func buildRouter(
             let buffer: ByteBuffer
             do {
                 buffer = try await request.body.collect(upTo: configuration.maxPageBytes)
-            } catch {
+            } catch is NIOTooManyBytesError {
+                // Only the size limit gets this message. Anything else — a dropped
+                // connection, cancellation during shutdown — rethrows as itself, so a
+                // transport fault is never reported as a too-large page.
                 throw HTTPError(
                     .contentTooLarge,
                     message: "Page exceeds the \(configuration.maxPageBytes) byte limit."

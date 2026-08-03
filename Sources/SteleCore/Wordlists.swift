@@ -8,7 +8,8 @@
 ///   - concrete, picturable, and pronounceable on the first try
 ///   - neutral in tone; nothing violent, medical, political, or bodily
 ///   - safe next to *every* word in the neighbouring pools, since all combinations occur
-///   - lowercase ASCII letters only (`Slug.isValid` rejects anything else)
+///   - lowercase ASCII letters only (`Slug(custom:)` rejects anything else, and the
+///     generator tests re-validate every emitted slug through it)
 public enum Wordlists {
     /// Slot one. Attributive nouns (`summer`, `granite`) are welcome — they read as
     /// adjectives in this position.

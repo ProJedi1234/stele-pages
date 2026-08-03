@@ -19,8 +19,10 @@ public struct BearerTokenMiddleware<Context: RequestContext>: RouterMiddleware {
         guard let header = request.headers[.authorization] else {
             throw HTTPError(.unauthorized, message: "Missing Authorization header.")
         }
-        guard let presented = header.split(separator: " ", maxSplits: 1).last.map(String.init),
-              header.lowercased().hasPrefix("bearer "),
+        // RFC 7235 allows any run of spaces between the scheme and the credential
+        // (`auth-scheme 1*SP token68`), so trim rather than split on the first space.
+        let presented = header.dropFirst("bearer ".count).trimmingCharacters(in: .whitespaces)
+        guard header.lowercased().hasPrefix("bearer "),
               constantTimeEquals(presented, token)
         else {
             throw HTTPError(.unauthorized, message: "Invalid upload token.")

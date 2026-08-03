@@ -33,6 +33,9 @@ services:
       interval: 2s
       timeout: 3s
       retries: 15
+    # Matches the app's policy. Without it, a host reboot brings back the app but not
+    # the database, and the app crash-loops against a connection that never appears.
+    restart: unless-stopped
 
   stele:
     build:

@@ -58,10 +58,13 @@ struct SlugValidationTests {
     }
 
     /// Every route the server defines itself must be unreachable as a custom slug,
-    /// otherwise a caller could claim a name that then 404s forever.
+    /// otherwise a caller could claim a name that then 404s forever. `buildRouter`
+    /// registers its routes from `ServerRoute`, so checking against that set means a
+    /// new route can't be added without either updating `Slug.reserved` or failing here.
     @Test func reservedListCoversServerRoutes() {
-        for route in ["pages", "healthz"] {
-            #expect(Slug.reserved.contains(route))
+        #expect(!ServerRoute.names.isEmpty)
+        for route in ServerRoute.names {
+            #expect(Slug.reserved.contains(route), "route '\(route)' is not in Slug.reserved")
         }
     }
 }
@@ -111,20 +114,27 @@ struct SlugGenerationTests {
 
     /// Generated slugs go into the database without passing through `Slug(custom:)`,
     /// so this is the only thing standing between a bad wordlist entry and a page that
-    /// can never be fetched back.
+    /// can never be fetched back. Both word counts run: the four-word shape is the one
+    /// with the least length headroom, so it's the one a long compound word breaks first.
     @Test func everyGeneratedSlugPassesValidation() throws {
         for seed in UInt64(0)..<2_000 {
             var rng = SeededGenerator(seed: seed)
-            let generated = SlugGenerator().generate(using: &rng)
-            let revalidated = try Slug(custom: generated.value)
-            #expect(revalidated == generated)
+            for wordCount in [3, 4] {
+                let generated = SlugGenerator(wordCount: wordCount).generate(using: &rng)
+                let revalidated = try Slug(custom: generated.value)
+                #expect(revalidated == generated)
+            }
         }
     }
 
-    @Test func keyspaceMatchesPoolSizes() {
-        #expect(SlugGenerator(wordCount: 3).keyspace == Wordlists.keyspace)
-        #expect(SlugGenerator(wordCount: 4).keyspace
-            == Wordlists.keyspace * Wordlists.adjectives.count)
+    /// Pins the exact figures the README advertises (pool sizes and keyspace), so a
+    /// wordlist edit has to update the documentation in the same change or fail here.
+    @Test func keyspaceMatchesAdvertisedFigures() {
+        #expect(Wordlists.adjectives.count == 253)
+        #expect(Wordlists.natureNouns.count == 208)
+        #expect(Wordlists.creatureNouns.count == 224)
+        #expect(SlugGenerator(wordCount: 3).keyspace == 11_787_776)
+        #expect(SlugGenerator(wordCount: 4).keyspace == 2_982_307_328)
     }
 }
 

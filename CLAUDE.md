@@ -52,8 +52,10 @@ product (available, not yet a dependency) and a Postgres for `PageStore`.
 - **`Slug` is the validation chokepoint.** Every slug reaches the database through
   `Slug(custom:)`; `Slug(unchecked:)` is internal and only for values read back out. If
   you hold a `Slug`, it is already safe in a URL path.
-- **Adding a route means adding its name to `Slug.reserved`** — a test asserts the
-  reserved set covers the real routes, and it will fail if you forget.
+- **Adding a route means registering its first path segment in `ServerRoute`
+  (Server.swift) and adding it to `Slug.reserved`.** `buildRouter` builds its paths from
+  `ServerRoute`, and a test asserts the reserved set covers `ServerRoute.names`, so a
+  route added any other way escapes the reservation check.
 - **`PageStore` is the only file that touches the database.** Keep it that way.
 
 ## Decisions that look like bugs

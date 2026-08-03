@@ -142,7 +142,17 @@ public struct Configuration: Sendable {
             )
         }
 
-        // `sslmode` follows libpq naming so existing connection strings work unchanged.
+        // `sslmode` follows libpq naming *and* libpq semantics so existing connection
+        // strings work unchanged: `require` means encrypt without verifying the
+        // certificate, and only the verify-* modes check it. NIOSSL's client default is
+        // full verification, so each mode sets the verification level explicitly — a
+        // self-signed or IP-addressed Postgres must work under `require`, exactly as it
+        // does with psql.
+        func tlsConfiguration(_ verification: CertificateVerification) -> TLSConfiguration {
+            var tls = TLSConfiguration.makeClientConfiguration()
+            tls.certificateVerification = verification
+            return tls
+        }
         let sslmode = components.queryItems?
             .first { $0.name.lowercased() == "sslmode" }?.value?.lowercased() ?? "disable"
         let tls: PostgresClient.Configuration.TLS
@@ -150,9 +160,13 @@ public struct Configuration: Sendable {
         case "disable":
             tls = .disable
         case "prefer", "allow":
-            tls = .prefer(.makeClientConfiguration())
-        case "require", "verify-ca", "verify-full":
-            tls = .require(.makeClientConfiguration())
+            tls = .prefer(tlsConfiguration(.none))
+        case "require":
+            tls = .require(tlsConfiguration(.none))
+        case "verify-ca":
+            tls = .require(tlsConfiguration(.noHostnameVerification))
+        case "verify-full":
+            tls = .require(tlsConfiguration(.fullVerification))
         default:
             throw ConfigurationError.invalid(
                 "DATABASE_URL", value: "sslmode=\(sslmode)",
@@ -169,8 +183,9 @@ public struct Configuration: Sendable {
             database: database,
             tls: tls
         )
-        // The default is 1, which serialises every request behind a single connection.
-        configuration.options.minimumConnections = 0
+        // PostgresNIO's default ceiling is 20. Ten is a deliberate reduction: this
+        // serves single-row reads off one table, and it shouldn't be able to crowd out
+        // other tenants of a shared Postgres host.
         configuration.options.maximumConnections = 10
 
         return (configuration, "\(username)@\(host):\(port)/\(database) (sslmode=\(sslmode))")
@@ -178,10 +193,16 @@ public struct Configuration: Sendable {
 
     /// Strips the password so a malformed `DATABASE_URL` can be echoed in an error
     /// without writing the credential to the logs.
+    ///
+    /// This is only ever called on input that already failed to parse, so it cannot
+    /// assume the `://` and `@` markers are present — a dropped slash is exactly the
+    /// kind of typo that gets here. When the shape isn't recognised the value is
+    /// withheld entirely rather than echoed on the hope that it holds no secret.
     static func redact(_ raw: String) -> String {
         guard let atIndex = raw.lastIndex(of: "@"),
-              let schemeRange = raw.range(of: "://")
-        else { return raw }
+              let schemeRange = raw.range(of: "://"),
+              schemeRange.upperBound <= atIndex
+        else { return "<unparseable value withheld in case it contains a credential>" }
         return raw[..<schemeRange.upperBound] + "***" + raw[atIndex...]
     }
 }

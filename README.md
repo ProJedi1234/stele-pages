@@ -88,10 +88,13 @@ happens to run the app, which is rarely the machine you chose for durable storag
 | `GET /:slug`       | none   | The stored page, or a 404 page                         |
 | `POST /pages`      | bearer | Stores the request body, returns `{slug, url}` as `201` |
 
-`POST /pages` takes the page as the raw request body. Add `?slug=my-page` to choose the
-name yourself — it's validated by the same rules as a generated one and returns `409` if
+`POST /pages` takes the page as the raw request body, up to `STELE_MAX_PAGE_BYTES`
+(default 1 MiB; larger is `413`). Add `?slug=my-page` to choose the name yourself — it's
+validated by the same rules as a generated one, returning `400` if invalid and `409` if
 taken. Accepted content types are `text/html` (default), `text/plain`, `text/css`, and
-`text/markdown`; anything else is `415`.
+`text/markdown`; anything else is `415`. An empty or non-UTF-8 body is `400`, a missing
+or wrong bearer token is `401`, and if five random draws in a row collide with existing
+slugs the server gives up with `503` rather than retrying forever.
 
 Custom slugs are lowercase letters, digits and single interior hyphens, 3–64 characters.
 Names the server uses for itself (`pages`, `healthz`, …) are rejected rather than
@@ -103,8 +106,10 @@ Everything is environment variables, read once at startup — see `.env.example`
 annotated list. A bad value stops the process immediately with a message naming the
 variable, rather than surfacing later as a connection error.
 
-`DATABASE_URL` is a standard libpq URL, including `?sslmode=`, so switching databases is
-a one-line change.
+`DATABASE_URL` is a standard libpq URL, including `?sslmode=` with libpq's semantics:
+`require` encrypts without verifying the certificate (so a self-signed or IP-addressed
+Postgres works, exactly as it does with psql), and only `verify-ca` / `verify-full`
+check the chain and hostname. Switching databases is a one-line change.
 
 ## Deploying
 

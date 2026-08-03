@@ -37,7 +37,13 @@ struct ConfigurationTests {
         }
     }
 
-    @Test func treatsBlankValuesAsUnset() {
+    /// Blank must mean "unset", not "a value that happens to be whitespace". Checked on
+    /// a variable with a default, where the two behaviours diverge: blank-as-unset falls
+    /// back to 8080, while blank-as-value would fail port validation.
+    @Test func treatsBlankValuesAsUnset() throws {
+        let configuration = try Configuration(environment: Self.environment(["STELE_PORT": "   "]))
+        #expect(configuration.port == 8080)
+        // For a required variable, blank means missing, and missing throws.
         #expect(throws: ConfigurationError.self) {
             try Configuration(environment: Self.environment(["STELE_UPLOAD_TOKEN": "   "]))
         }
@@ -137,5 +143,17 @@ struct DatabaseURLTests {
         let redacted = Configuration.redact("postgres://stele:s3cret@db.example.com:5432/stele")
         #expect(!redacted.contains("s3cret"))
         #expect(redacted.contains("db.example.com"))
+    }
+
+    /// The only values `redact` ever sees are ones that already failed to parse, so it
+    /// must not leak the password when the `://` or `@` markers are mangled or missing.
+    @Test("redaction survives malformed URLs", arguments: [
+        "stele:s3cret@db.example.com:5432/stele",
+        "postgres:/stele:s3cret@db.example.com:5432/stele",
+        "postgres//stele:s3cret@db.example.com/stele",
+        "s3cret@://",
+    ])
+    func redactionSurvivesMalformedURLs(_ raw: String) {
+        #expect(!Configuration.redact(raw).contains("s3cret"))
     }
 }
