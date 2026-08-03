@@ -31,10 +31,6 @@ public enum PageContentType {
     }
 }
 
-extension HTTPField.Name {
-    static let xContentTypeOptions = HTTPField.Name("X-Content-Type-Options")!
-}
-
 struct CreatedPageResponse: Encodable {
     let slug: String
     let url: String
@@ -56,7 +52,7 @@ public enum ServerRoute {
 /// without standing up a listening socket.
 public func buildRouter(
     configuration: Configuration,
-    store: PageStore
+    store: some PageStoring
 ) -> Router<BasicRequestContext> {
     let generator = SlugGenerator(wordCount: configuration.slugWords)
     let router = Router()
@@ -118,7 +114,8 @@ public func buildRouter(
                     requestedSlug: requestedSlug,
                     body: body,
                     contentType: contentType,
-                    generator: generator
+                    generator: generator,
+                    logger: context.logger
                 )
             } catch PageStoreError.slugTaken(let taken) {
                 throw HTTPError(.conflict, message: "The slug '\(taken)' is already taken.")
