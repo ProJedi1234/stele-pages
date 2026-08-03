@@ -114,7 +114,8 @@ public func buildRouter(
                     requestedSlug: requestedSlug,
                     body: body,
                     contentType: contentType,
-                    generator: generator
+                    generator: generator,
+                    logger: context.logger
                 )
             } catch PageStoreError.slugTaken(let taken) {
                 throw HTTPError(.conflict, message: "The slug '\(taken)' is already taken.")

@@ -45,10 +45,12 @@ uniformity, and the headers pages are served with — is covered by HTTP-level t
 run `buildRouter` through `HummingbirdTesting`'s `.router` mode (no listening socket)
 against an in-memory `PageStoring` fake, so no curl and no database are needed.
 
-The remaining gap is **`PageStore` itself** — the interpolated SQL, the `ON CONFLICT`
-race, and the slug-retry loop are only exercised against the fake, never against
-Postgres. Closing that needs a real database; if such a suite is added, gate it on an env
-var so a plain `swift test` stays hermetic.
+The slug-retry and requested-slug policy is shared code in `PageStoring`'s extension, so
+the router tests exercise the real thing (the 503 test runs the retry loop to genuine
+exhaustion). The remaining gap is **`PageStore` itself** — the interpolated SQL and the
+atomicity of the `ON CONFLICT` insert are never exercised against Postgres. Closing that
+needs a real database; if such a suite is added, gate it on an env var so a plain
+`swift test` stays hermetic.
 
 ## Conventions
 
@@ -61,8 +63,11 @@ var so a plain `swift test` stays hermetic.
   route added any other way escapes the reservation check.
 - **`PageStore` is the only file that touches the database.** Keep it that way.
 - **Routes take `some PageStoring`, not a concrete store.** That seam is what lets the
-  HTTP tests run without Postgres. `PageStore` is the only conformer that talks to a
-  database; keep new persistence behind the protocol rather than reaching past it.
+  HTTP tests run without Postgres. A conformer implements only `fetch` and the atomic
+  insert-if-free primitive; `create`'s retry and requested-slug policy lives in the
+  protocol extension and must stay there, shared. `PageStore` is the only conformer that
+  talks to a database; keep new persistence behind the protocol rather than reaching
+  past it.
 
 ## Decisions that look like bugs
 

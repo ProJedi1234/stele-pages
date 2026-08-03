@@ -21,11 +21,6 @@ public enum PageStoreError: Error, Equatable {
 /// All database access. Every statement here is parameterised via PostgresNIO's
 /// interpolation, which binds values rather than splicing them into SQL text.
 public struct PageStore: Sendable {
-    /// How many times to redraw a generated slug before giving up. Each attempt is a
-    /// fresh random draw, so the odds compound: with a keyspace of ~11.8M, five
-    /// attempts fail only if the table is very full.
-    static let maxSlugAttempts = 5
-
     private let client: PostgresClient
     private let logger: Logger
 
@@ -75,39 +70,8 @@ public struct PageStore: Sendable {
         return nil
     }
 
-    /// Stores a page.
-    ///
-    /// - Parameter requestedSlug: pass a slug to claim it, or nil to have one generated.
-    ///   The two cases fail differently on purpose: a caller who picked a name wants to
-    ///   hear that it's taken, whereas a generated collision is the server's problem to
-    ///   retry silently.
-    public func create(
-        requestedSlug: Slug?,
-        body: String,
-        contentType: String,
-        generator: SlugGenerator
-    ) async throws -> Slug {
-        if let requestedSlug {
-            guard try await insert(slug: requestedSlug, body: body, contentType: contentType)
-            else { throw PageStoreError.slugTaken(requestedSlug) }
-            return requestedSlug
-        }
-
-        for attempt in 1...Self.maxSlugAttempts {
-            let candidate = generator.generate()
-            if try await insert(slug: candidate, body: body, contentType: contentType) {
-                return candidate
-            }
-            logger.warning(
-                "slug collision, retrying",
-                metadata: ["slug": "\(candidate)", "attempt": "\(attempt)"]
-            )
-        }
-        throw PageStoreError.couldNotAllocateSlug(attempts: Self.maxSlugAttempts)
-    }
-
     /// - Returns: true if the row was inserted, false if the slug was already taken.
-    private func insert(slug: Slug, body: String, contentType: String) async throws -> Bool {
+    public func insert(slug: Slug, body: String, contentType: String) async throws -> Bool {
         // ON CONFLICT DO NOTHING makes the uniqueness check and the insert one atomic
         // step. Checking first and then inserting would leave a window where two
         // concurrent uploads both see the slug as free.
@@ -128,6 +92,7 @@ public struct PageStore: Sendable {
     }
 }
 
-/// The signatures already match, so this is a declaration of intent and nothing more:
-/// `PageStore` is the database-backed conformer of the seam the router talks to.
+/// `PageStore` is the database-backed conformer of the seam the router talks to. Only
+/// the insert-if-free primitive lives here — the retry and requested-slug policy come
+/// from `PageStoring`'s extension, shared with every other conformer.
 extension PageStore: PageStoring {}

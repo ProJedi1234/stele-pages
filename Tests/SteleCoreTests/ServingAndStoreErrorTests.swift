@@ -66,9 +66,10 @@ struct ServingAndStoreErrorTests {
     }
 
     /// When the generator can't find a free slug the server says so with a retryable
-    /// status: this is a capacity problem on our side, not a bad request.
+    /// status: this is a capacity problem on our side, not a bad request. The fake makes
+    /// every insert report "taken", so the real shared retry loop runs to exhaustion.
     @Test func allocationExhaustionIs503() async throws {
-        let app = try TestFixture.makeApp(store: InMemoryPageStore(failAllocation: true))
+        let app = try TestFixture.makeApp(store: InMemoryPageStore(failInserts: true))
         try await app.test(.router) { client in
             try await client.execute(
                 uri: "/pages",

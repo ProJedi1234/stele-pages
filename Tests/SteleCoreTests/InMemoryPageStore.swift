@@ -7,69 +7,44 @@ import Foundation
 /// so an actor conforms directly, and `Mutex` would need macOS 15 while the manifest
 /// declares macOS 14.
 ///
+/// Only the seam's insert-if-free primitive is implemented here, so the
+/// requested-vs-generated policy and the collision-retry loop the router tests exercise
+/// are the real shared ones from `PageStoring`'s extension, not a reimplementation.
+///
 /// Every test should build its own instance — swift-testing runs suites in parallel and
 /// nothing here is meant to be shared.
 actor InMemoryPageStore: PageStoring {
-    /// How many generated candidates to try before giving up — `PageStore`'s own limit,
-    /// referenced rather than re-declared so the fake can't drift from the store it mirrors.
-    static let maxSlugAttempts = PageStore.maxSlugAttempts
-
     private var pages: [Slug: Page] = [:]
 
-    /// When true, `create(requestedSlug: nil, …)` always fails allocation — the 503 path.
-    private let failAllocation: Bool
+    /// When true, every insert reports the slug as taken, so the shared retry loop runs
+    /// to genuine exhaustion — this is how the 503 path is driven.
+    private let failInserts: Bool
 
-    init(failAllocation: Bool = false) {
-        self.failAllocation = failAllocation
+    init(failInserts: Bool = false) {
+        self.failInserts = failInserts
     }
 
     /// Arranges a page for fetch/conflict tests, with a synthesised `createdAt`.
-    @discardableResult
     func seed(
         slug: Slug,
         body: String,
-        contentType: String = PageContentType.default,
-        createdAt: Date = Date(timeIntervalSince1970: 0)
-    ) -> Page {
-        let page = Page(slug: slug, body: body, contentType: contentType, createdAt: createdAt)
-        pages[slug] = page
-        return page
+        contentType: String = PageContentType.default
+    ) {
+        pages[slug] = page(slug: slug, body: body, contentType: contentType)
     }
 
     func fetch(slug: Slug) async throws -> Page? {
         pages[slug]
     }
 
-    func create(
-        requestedSlug: Slug?,
-        body: String,
-        contentType: String,
-        generator: SlugGenerator
-    ) async throws -> Slug {
-        if let requestedSlug {
-            guard pages[requestedSlug] == nil else {
-                throw PageStoreError.slugTaken(requestedSlug)
-            }
-            insert(slug: requestedSlug, body: body, contentType: contentType)
-            return requestedSlug
-        }
-
-        guard !failAllocation else {
-            throw PageStoreError.couldNotAllocateSlug(attempts: Self.maxSlugAttempts)
-        }
-
-        for _ in 1...Self.maxSlugAttempts {
-            let candidate = generator.generate()
-            if pages[candidate] == nil {
-                insert(slug: candidate, body: body, contentType: contentType)
-                return candidate
-            }
-        }
-        throw PageStoreError.couldNotAllocateSlug(attempts: Self.maxSlugAttempts)
+    func insert(slug: Slug, body: String, contentType: String) async throws -> Bool {
+        guard !failInserts, pages[slug] == nil else { return false }
+        pages[slug] = page(slug: slug, body: body, contentType: contentType)
+        return true
     }
 
-    private func insert(slug: Slug, body: String, contentType: String) {
-        pages[slug] = Page(
+    private func page(slug: Slug, body: String, contentType: String) -> Page {
+        Page(
             slug: slug,
             body: body,
             contentType: contentType,
