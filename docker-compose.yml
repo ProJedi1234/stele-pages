@@ -1,0 +1,65 @@
+# Local development stack: the app plus a throwaway Postgres.
+#
+#   docker compose up              -> both; the whole thing works at localhost:8080
+#   docker compose up postgres     -> database only, then `swift run stele` on the host
+#
+# The second form is what you want while actually writing code: a Swift change is a
+# ~10s rebuild, versus rebuilding the image on every edit.
+#
+# This is NOT the deployment stack — see docker-compose.deploy.yml. The volume below is
+# scratch data: use a real database host for anything you intend to keep.
+
+# Pinned so the project name doesn't follow the directory name. Without this, renaming
+# or cloning the folder elsewhere starts a fresh project with an empty volume, and every
+# page published so far appears to vanish.
+name: stele
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: stele-postgres
+    environment:
+      POSTGRES_USER: stele
+      POSTGRES_PASSWORD: stele_dev_password
+      POSTGRES_DB: stele
+    ports:
+      # Loopback rather than 0.0.0.0 — this has a hardcoded password and has no business
+      # being reachable from the rest of the LAN.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - stele-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stele -d stele"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  stele:
+    build:
+      context: .
+    image: stele:dev
+    container_name: stele
+    environment:
+      # Overrides the .env value on purpose: inside the network the database is reached
+      # at the service name, not at localhost.
+      DATABASE_URL: postgres://stele:stele_dev_password@postgres:5432/stele
+      # Read from .env, which Compose loads automatically. Fails loudly rather than
+      # starting an unauthenticated upload endpoint.
+      STELE_UPLOAD_TOKEN: "${STELE_UPLOAD_TOKEN:?not set — copy .env.example to .env, then generate one with openssl rand -hex 32}"
+      STELE_BASE_URL: ${STELE_BASE_URL:-http://localhost:8080}
+      STELE_SLUG_WORDS: ${STELE_SLUG_WORDS:-3}
+      STELE_MAX_PAGE_BYTES: ${STELE_MAX_PAGE_BYTES:-1048576}
+      STELE_LOG_LEVEL: ${STELE_LOG_LEVEL:-info}
+    ports:
+      # Exposed on the LAN so other hosts can reach published pages. Reads are
+      # unauthenticated by design; POST /pages stays token-gated.
+      - "8080:8080"
+    depends_on:
+      postgres:
+        # Waits for pg_isready, not just for the container to exist, so the first boot
+        # doesn't race the schema bootstrap against a database still starting up.
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  stele-pgdata:
