@@ -95,7 +95,7 @@ struct UploadAuthTests {
             ) { response -> String in
                 #expect(response.status == .created)
 
-                // Decoded loosely rather than through a mirror of `CreatedPageResponse`:
+                // Decoded loosely rather than through a mirror of `PageLocationResponse`:
                 // the wire shape is what this test is about.
                 let payload = try #require(
                     try JSONSerialization.jsonObject(with: Data(buffer: response.body))

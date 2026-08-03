@@ -32,6 +32,9 @@ struct ServingAndStoreErrorTests {
                 #expect(String(buffer: response.body) == body)
                 #expect(response.headers[.contentType] == contentType)
                 #expect(response.headers[.xContentTypeOptions] == "nosniff")
+                // Pages are replaceable in place and carry no validator, so the read
+                // must tell caches to revalidate or stale bytes outlive an update.
+                #expect(response.headers[.cacheControl] == "no-cache")
             }
         }
     }
@@ -122,6 +125,47 @@ struct ServingAndStoreErrorTests {
                 #expect(response.status == .badRequest)
                 let message = try TestFixture.errorMessage(response.body)
                 #expect(message.contains("empty"))
+            }
+        }
+    }
+
+    /// Bytes that aren't UTF-8 are refused rather than decoded lossily: substituting
+    /// U+FFFD would publish mojibake at a permanent URL instead of telling the caller
+    /// their upload was not text.
+    @Test func nonUTF8BodyIs400() async throws {
+        try await TestFixture.makeApp().test(.router) { client in
+            try await client.execute(
+                uri: "/pages",
+                method: .post,
+                headers: [
+                    .authorization: "Bearer \(TestFixture.token)",
+                    .contentType: "text/html",
+                ],
+                body: ByteBuffer(bytes: [0xFF, 0xFE, 0xFD])
+            ) { response in
+                #expect(response.status == .badRequest)
+                let message = try TestFixture.errorMessage(response.body)
+                #expect(message.contains("UTF-8"))
+            }
+        }
+    }
+
+    /// NUL is valid UTF-8 that Postgres `text` cannot store — without the explicit
+    /// router-level check it would come back as a database error and a 500.
+    @Test func nulByteInBodyIs400() async throws {
+        try await TestFixture.makeApp().test(.router) { client in
+            try await client.execute(
+                uri: "/pages",
+                method: .post,
+                headers: [
+                    .authorization: "Bearer \(TestFixture.token)",
+                    .contentType: "text/html",
+                ],
+                body: ByteBuffer(bytes: [0x61, 0x00, 0x62])
+            ) { response in
+                #expect(response.status == .badRequest)
+                let message = try TestFixture.errorMessage(response.body)
+                #expect(message.contains("NUL"))
             }
         }
     }

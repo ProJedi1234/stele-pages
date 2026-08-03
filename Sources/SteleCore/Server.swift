@@ -21,9 +21,9 @@ public enum PageContentType {
     ]
 
     /// Normalises a request `Content-Type` to its canonical stored form, or nil if it
-    /// isn't something we're willing to serve back.
-    static func normalize(_ raw: String?) -> String? {
-        guard let raw else { return `default` }
+    /// isn't something we're willing to serve back. An *absent* header never reaches
+    /// this — the write handlers decide what absence means for their verb.
+    static func normalize(_ raw: String) -> String? {
         let base = raw.split(separator: ";").first.map {
             $0.trimmingCharacters(in: .whitespaces).lowercased()
         } ?? ""
@@ -31,7 +31,7 @@ public enum PageContentType {
     }
 }
 
-struct CreatedPageResponse: Encodable {
+struct PageLocationResponse: Encodable {
     let slug: String
     let url: String
 }
@@ -68,52 +68,22 @@ public func buildRouter(
     router.group(RouterPath(ServerRoute.pages))
         .add(middleware: BearerTokenMiddleware(token: configuration.uploadToken))
         .post("") { request, context -> Response in
-            guard let contentType = PageContentType.normalize(request.headers[.contentType]) else {
-                throw HTTPError(
-                    .unsupportedMediaType,
-                    message: """
-                        Unsupported Content-Type. Allowed: \
-                        \(PageContentType.allowed.keys.sorted().joined(separator: ", ")).
-                        """
-                )
-            }
-
-            let buffer: ByteBuffer
-            do {
-                buffer = try await request.body.collect(upTo: configuration.maxPageBytes)
-            } catch is NIOTooManyBytesError {
-                // Only the size limit gets this message. Anything else — a dropped
-                // connection, cancellation during shutdown — rethrows as itself, so a
-                // transport fault is never reported as a too-large page.
-                throw HTTPError(
-                    .contentTooLarge,
-                    message: "Page exceeds the \(configuration.maxPageBytes) byte limit."
-                )
-            }
-            guard buffer.readableBytes > 0 else {
-                throw HTTPError(.badRequest, message: "Request body is empty.")
-            }
-            guard let body = buffer.getString(at: 0, length: buffer.readableBytes) else {
-                throw HTTPError(.badRequest, message: "Request body is not valid UTF-8.")
-            }
+            let (body, contentType) = try await readValidatedPage(
+                request: request,
+                configuration: configuration
+            )
 
             // A caller-supplied slug is validated with exactly the same rules as a
             // generated one, so nothing enters the table that couldn't be served back.
-            var requestedSlug: Slug?
-            if let raw = request.uri.queryParameters["slug"].map(String.init) {
-                do {
-                    requestedSlug = try Slug(custom: raw)
-                } catch let error as SlugError {
-                    throw HTTPError(.badRequest, message: "Invalid slug: \(error).")
-                }
-            }
+            let requestedSlug = try request.uri.queryParameters["slug"]
+                .map { try validatedSlug(String($0)) }
 
             let slug: Slug
             do {
                 slug = try await store.create(
                     requestedSlug: requestedSlug,
                     body: body,
-                    contentType: contentType,
+                    contentType: contentType ?? PageContentType.default,
                     generator: generator,
                     logger: context.logger
                 )
@@ -124,23 +94,38 @@ public func buildRouter(
                 throw HTTPError(.serviceUnavailable, message: "Could not allocate a slug.")
             }
 
-            let payload = CreatedPageResponse(
-                slug: slug.value,
-                url: "\(configuration.baseURL)/\(slug.value)"
-            )
-            let encoder = JSONEncoder()
-            // Without this, Foundation emits "http:\/\/host\/slug". Legal JSON, but the
-            // URL is the thing the caller reads off the terminal.
-            encoder.outputFormatting = [.withoutEscapingSlashes]
-            var body_ = ByteBuffer()
-            body_.writeBytes(try encoder.encode(payload))
-            return Response(
+            return try pageResponse(
+                slug: slug,
+                configuration: configuration,
                 status: .created,
-                headers: [
-                    .contentType: "application/json; charset=utf-8",
-                    .location: payload.url,
-                ],
-                body: .init(byteBuffer: body_)
+                includeLocation: true
+            )
+        }
+        // Unlike POST, the slug is validated before the body is read: POST's slug is an
+        // optional query parameter, whereas here it is the address being written to, and
+        // rejecting a nonsense address before streaming a megabyte to it is the cheaper
+        // order. Precedence is auth, then slug, then the body checks.
+        .put(":slug") { request, context -> Response in
+            let slug = try validatedSlug(context.parameters.require("slug"))
+
+            let (body, contentType) = try await readValidatedPage(
+                request: request,
+                configuration: configuration
+            )
+
+            // Update-only: an absent slug is a 404, never an implicit create. A PUT that
+            // could create would hand the caller a way to claim names without going
+            // through the generator's — and POST's — collision reporting.
+            guard try await store.update(slug: slug, body: body, contentType: contentType) else {
+                throw HTTPError(.notFound, message: "No page exists at \(slug.value).")
+            }
+
+            // No Location header: the resource is where the caller already addressed it.
+            return try pageResponse(
+                slug: slug,
+                configuration: configuration,
+                status: .ok,
+                includeLocation: false
             )
         }
 
@@ -171,12 +156,112 @@ public func buildRouter(
                 // Stops a browser content-sniffing a stored page into something we
                 // didn't agree to serve it as.
                 .xContentTypeOptions: "nosniff",
+                // Pages are mutable (PUT replaces them in place) and carry no validator,
+                // so without this a cache may heuristically keep serving pre-update
+                // bytes with nothing for the caller to bust it with.
+                .cacheControl: "no-cache",
             ],
             body: .init(byteBuffer: ByteBuffer(string: page.body))
         )
     }
 
     return router
+}
+
+/// Runs a raw path or query slug through the `Slug(custom:)` chokepoint, reporting a
+/// rejection the same way for every write route.
+private func validatedSlug(_ raw: String) throws -> Slug {
+    do {
+        return try Slug(custom: raw)
+    } catch let error as SlugError {
+        throw HTTPError(.badRequest, message: "Invalid slug: \(error).")
+    }
+}
+
+/// The request checks every write shares: an allowed content type, and a body that fits,
+/// isn't empty, and is text. Shared by POST and PUT so the two cannot drift into
+/// accepting different things into the same table.
+///
+/// `contentType` is nil when the request carried no `Content-Type` header at all — the
+/// caller expressed no opinion. What that means differs by verb: POST picks the HTML
+/// default (a new page has no prior type), PUT preserves the stored one (silently
+/// re-typing a stylesheet to HTML would break every page linking it, behind a 200).
+private func readValidatedPage(
+    request: Request,
+    configuration: Configuration
+) async throws -> (body: String, contentType: String?) {
+    let contentType: String?
+    if let raw = request.headers[.contentType] {
+        guard let normalized = PageContentType.normalize(raw) else {
+            throw HTTPError(
+                .unsupportedMediaType,
+                message: """
+                    Unsupported Content-Type. Allowed: \
+                    \(PageContentType.allowed.keys.sorted().joined(separator: ", ")).
+                    """
+            )
+        }
+        contentType = normalized
+    } else {
+        contentType = nil
+    }
+
+    let buffer: ByteBuffer
+    do {
+        buffer = try await request.body.collect(upTo: configuration.maxPageBytes)
+    } catch is NIOTooManyBytesError {
+        // Only the size limit gets this message. Anything else — a dropped connection,
+        // cancellation during shutdown — rethrows as itself, so a transport fault is
+        // never reported as a too-large page.
+        throw HTTPError(
+            .contentTooLarge,
+            message: "Page exceeds the \(configuration.maxPageBytes) byte limit."
+        )
+    }
+    guard buffer.readableBytes > 0 else {
+        throw HTTPError(.badRequest, message: "Request body is empty.")
+    }
+    // A validating decode straight out of the buffer, not `ByteBuffer.getString`: that
+    // one is `String?` but never actually returns nil — it decodes with
+    // `String(decoding:)`, which substitutes U+FFFD for invalid bytes and would store
+    // mojibake at a permanent URL instead of telling the caller their upload wasn't text.
+    guard let body = buffer.withUnsafeReadableBytes({
+        String(validating: $0, as: Unicode.UTF8.self)
+    }) else {
+        throw HTTPError(.badRequest, message: "Request body is not valid UTF-8.")
+    }
+    // Valid UTF-8, but Postgres `text` cannot hold it — without this check a NUL
+    // surfaces as a database error and a 500 instead of a complaint about the body.
+    guard !body.contains("\0") else {
+        throw HTTPError(.badRequest, message: "Request body contains a NUL byte.")
+    }
+
+    return (body, contentType)
+}
+
+/// The `{slug, url}` body both writes answer with. POST adds `Location` and a `201`; PUT
+/// returns `200` without one, since the caller already knows the address.
+private func pageResponse(
+    slug: Slug,
+    configuration: Configuration,
+    status: HTTPResponse.Status,
+    includeLocation: Bool
+) throws -> Response {
+    let payload = PageLocationResponse(
+        slug: slug.value,
+        url: "\(configuration.baseURL)/\(slug.value)"
+    )
+    let encoder = JSONEncoder()
+    // Without this, Foundation emits "http:\/\/host\/slug". Legal JSON, but the URL is
+    // the thing the caller reads off the terminal.
+    encoder.outputFormatting = [.withoutEscapingSlashes]
+    var body = ByteBuffer()
+    body.writeBytes(try encoder.encode(payload))
+
+    var headers: HTTPFields = [.contentType: "application/json; charset=utf-8"]
+    if includeLocation { headers[.location] = payload.url }
+
+    return Response(status: status, headers: headers, body: .init(byteBuffer: body))
 }
 
 /// Builds the full application: Postgres client, schema bootstrap, and HTTP server.

@@ -47,8 +47,9 @@ against an in-memory `PageStoring` fake, so no curl and no database are needed.
 
 The slug-retry and requested-slug policy is shared code in `PageStoring`'s extension, so
 the router tests exercise the real thing (the 503 test runs the retry loop to genuine
-exhaustion). The remaining gap is **`PageStore` itself** — the interpolated SQL and the
-atomicity of the `ON CONFLICT` insert are never exercised against Postgres. Closing that
+exhaustion). The remaining gap is **`PageStore` itself** — the interpolated SQL, the
+atomicity of the `ON CONFLICT` insert, and the `UPDATE … RETURNING` existence check are
+never exercised against Postgres. Closing that
 needs a real database; if such a suite is added, gate it on an env var so a plain
 `swift test` stays hermetic.
 
@@ -64,7 +65,8 @@ needs a real database; if such a suite is added, gate it on an env var so a plai
 - **`PageStore` is the only file that touches the database.** Keep it that way.
 - **Routes take `some PageStoring`, not a concrete store.** That seam is what lets the
   HTTP tests run without Postgres. A conformer implements only `fetch` and the atomic
-  insert-if-free primitive; `create`'s retry and requested-slug policy lives in the
+  storage primitives — insert-if-free and update-if-present; `create`'s retry and
+  requested-slug policy lives in the
   protocol extension and must stay there, shared. `PageStore` is the only conformer that
   talks to a database; keep new persistence behind the protocol rather than reaching
   past it.
@@ -75,8 +77,10 @@ Don't "fix" these without a reason; the README argues them out in full.
 
 - **Reads are unauthenticated.** Slugs are pretty, not secret — an 11.8M keyspace is
   scannable. Access control would need a real auth check, not a longer slug.
-- **Every 404 is identical.** Malformed, reserved, and absent slugs return the same page
-  so a scanner can't map the namespace faster than guessing.
+- **Every 404 on the public read surface is identical.** Malformed, reserved, and absent
+  slugs return the same page so a scanner can't map the namespace faster than guessing.
+  This is deliberately *not* true behind the upload token: `PUT /pages/:slug` returns
+  distinguishing `400`/`404` errors, because that caller has nothing left to leak to.
 - **`STELE_UPLOAD_TOKEN` has no default.** A default would be a published credential; an
   absent one would silently open the upload endpoint.
 

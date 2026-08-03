@@ -7,7 +7,8 @@ import Foundation
 /// so an actor conforms directly, and `Mutex` would need macOS 15 while the manifest
 /// declares macOS 14.
 ///
-/// Only the seam's insert-if-free primitive is implemented here, so the
+/// Only the seam's primitives — insert-if-free and update-if-present — are implemented
+/// here, so the
 /// requested-vs-generated policy and the collision-retry loop the router tests exercise
 /// are the real shared ones from `PageStoring`'s extension, not a reimplementation.
 ///
@@ -40,6 +41,15 @@ actor InMemoryPageStore: PageStoring {
     func insert(slug: Slug, body: String, contentType: String) async throws -> Bool {
         guard !failInserts, pages[slug] == nil else { return false }
         pages[slug] = page(slug: slug, body: body, contentType: contentType)
+        return true
+    }
+
+    func update(slug: Slug, body: String, contentType: String?) async throws -> Bool {
+        guard let existing = pages[slug] else { return false }
+        // No `createdAt` theater: `page` stamps every entry with the same fixed date, so
+        // "preserved" and "reset" are indistinguishable here — the real created_at
+        // guarantee lives in `PageStore`'s SQL and only a Postgres test can check it.
+        pages[slug] = page(slug: slug, body: body, contentType: contentType ?? existing.contentType)
         return true
     }
 
