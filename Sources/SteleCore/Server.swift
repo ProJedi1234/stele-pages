@@ -144,6 +144,15 @@ public func buildRouter(
             )
         }
 
+    // The trie matches the literal `pages` node for `GET /pages` and does not backtrack
+    // to `/:slug`, so without this the framework's own plain-text 404 would leak out —
+    // the one response that would distinguish a routed-but-methodless path from every
+    // other miss. Registered outside the bearer-token group: a 404 must not demand auth,
+    // or its 401 becomes the distinguishing signal instead.
+    router.get(RouterPath("/\(ServerRoute.pages)")) { _, _ -> Response in
+        htmlResponse(status: .notFound, html: notFoundPage())
+    }
+
     router.get("/:slug") { _, context -> Response in
         guard let raw = context.parameters.get("slug"),
               let slug = try? Slug(custom: raw),
