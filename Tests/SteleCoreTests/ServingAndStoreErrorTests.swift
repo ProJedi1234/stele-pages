@@ -17,40 +17,22 @@ import Testing
 @Suite("Serving and store errors")
 struct ServingAndStoreErrorTests {
     /// A stored page comes back byte-for-byte, under its stored type, with the sniffing
-    /// opt-out attached.
-    @Test func storedPageServedWithHeaders() async throws {
+    /// opt-out attached. Serving is driven by what the row says, not by a fixed HTML
+    /// assumption — hence one argument per stored type, HTML and markdown alike.
+    @Test(arguments: [
+        ("quiet-cedar-otter", "<h1>hello</h1>\n<p>stored page</p>", PageContentType.default),
+        ("brisk-maple-heron", "# heading\n\nbody text\n", "text/markdown; charset=utf-8"),
+    ])
+    func storedPageServedWithHeaders(name: String, body: String, contentType: String) async throws {
         let store = InMemoryPageStore()
-        let slug = try Slug(custom: "quiet-cedar-otter")
-        let uploaded = "<h1>hello</h1>\n<p>stored page</p>"
-        await store.seed(slug: slug, body: uploaded)
+        let slug = try Slug(custom: name)
+        await store.seed(slug: slug, body: body, contentType: contentType)
 
         try await TestFixture.makeApp(store: store).test(.router) { client in
             try await client.execute(uri: "/\(slug.value)", method: .get) { response in
                 #expect(response.status == .ok)
-                #expect(String(buffer: response.body) == uploaded)
-                #expect(response.headers[.contentType] == PageContentType.default)
-                #expect(response.headers[.xContentTypeOptions] == "nosniff")
-            }
-        }
-    }
-
-    /// Serving is driven by what the row says, not by a fixed HTML assumption — a page
-    /// stored as markdown is served as markdown.
-    @Test func markdownPageServedWithStoredType() async throws {
-        let store = InMemoryPageStore()
-        let slug = try Slug(custom: "brisk-maple-heron")
-        let uploaded = "# heading\n\nbody text\n"
-        await store.seed(
-            slug: slug,
-            body: uploaded,
-            contentType: "text/markdown; charset=utf-8"
-        )
-
-        try await TestFixture.makeApp(store: store).test(.router) { client in
-            try await client.execute(uri: "/\(slug.value)", method: .get) { response in
-                #expect(response.status == .ok)
-                #expect(String(buffer: response.body) == uploaded)
-                #expect(response.headers[.contentType] == "text/markdown; charset=utf-8")
+                #expect(String(buffer: response.body) == body)
+                #expect(response.headers[.contentType] == contentType)
                 #expect(response.headers[.xContentTypeOptions] == "nosniff")
             }
         }

@@ -77,21 +77,29 @@ struct UploadContentTypeTests {
     }
 
     /// The stored type is the canonical form of the allowlisted base type, not whatever
-    /// parameters the client attached — a page uploaded as latin1 is still served utf-8.
-    @Test func contentTypeParametersAreNormalized() async throws {
-        let uploaded = "plain text page"
+    /// the client attached: parameters are dropped, case and whitespace are forgiven,
+    /// and a bare type gains its charset. One argument pair per normalisation rule,
+    /// covering every allowlisted type.
+    @Test(arguments: [
+        ("text/plain; charset=latin1", "text/plain; charset=utf-8"),
+        ("TEXT/HTML", "text/html; charset=utf-8"),
+        (" text/css ; media=screen", "text/css; charset=utf-8"),
+        ("text/markdown", "text/markdown; charset=utf-8"),
+    ])
+    func contentTypeIsNormalized(uploadedType: String, servedType: String) async throws {
+        let uploaded = "page body"
 
         try await TestFixture.makeApp().test(.router) { client in
             let slug = try await Self.upload(
                 client: client,
-                headers: [.contentType: "text/plain; charset=latin1"],
+                headers: [.contentType: uploadedType],
                 body: uploaded
             )
 
             try await client.execute(uri: "/\(slug)", method: .get) { response in
                 #expect(response.status == .ok)
                 #expect(String(buffer: response.body) == uploaded)
-                #expect(response.headers[.contentType] == "text/plain; charset=utf-8")
+                #expect(response.headers[.contentType] == servedType)
                 #expect(response.headers[.xContentTypeOptions] == "nosniff")
             }
         }
