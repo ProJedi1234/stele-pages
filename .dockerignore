@@ -1,0 +1,10 @@
+# Local build products — copying these in would both bloat the context and let a
+# host-built artifact shadow the one built in the image.
+.build/
+.swiftpm/
+
+.git/
+.env
+
+README.md
+docker-compose*.yml

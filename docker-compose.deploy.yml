@@ -1,0 +1,45 @@
+# Deployment stack.
+#
+#   docker compose -f docker-compose.deploy.yml up -d --build
+#
+# Deliberately has no postgres service. The database is expected to already exist on a
+# host built to hold it; a postgres service here would put production data in a
+# container volume on whichever machine happens to run the app, which is rarely the
+# machine you chose for durable storage.
+#
+# Create the role and database on that host first (see README), then put its connection
+# string in a .env file next to this one.
+
+# Deliberately distinct from docker-compose.yml's project and container names. Compose
+# addresses containers by project name, not by which file created them: if both stacks
+# were `stele`, a bare `docker compose up -d` on the deploy host would silently recreate
+# the production container from the dev file, pointed at a throwaway dev database. With
+# distinct names that slip either starts a separate stack or fails loudly on the port.
+name: stele-deploy
+
+services:
+  stele:
+    build:
+      context: .
+    image: stele:latest
+    container_name: stele-deploy
+    environment:
+      # postgres://stele:PASSWORD@DB_HOST:5432/stele
+      DATABASE_URL: "${DATABASE_URL:?not set — point this at your Postgres host, see README}"
+      STELE_UPLOAD_TOKEN: "${STELE_UPLOAD_TOKEN:?not set — generate one with openssl rand -hex 32}"
+      # The origin this is reached on. Only affects the URL echoed back by POST /pages.
+      STELE_BASE_URL: "${STELE_BASE_URL:?not set — for example https://stele.example.com}"
+      STELE_SLUG_WORDS: ${STELE_SLUG_WORDS:-3}
+      STELE_MAX_PAGE_BYTES: ${STELE_MAX_PAGE_BYTES:-1048576}
+      STELE_LOG_LEVEL: ${STELE_LOG_LEVEL:-info}
+    ports:
+      # Bound to the LAN so other hosts can reach it. If a TLS terminator ends up in
+      # front of this, narrow it back to "127.0.0.1:8080:8080" and let that proxy it.
+      - "8080:8080"
+    restart: unless-stopped
+    logging:
+      # Without this the JSON log file grows without bound until it fills the disk.
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
