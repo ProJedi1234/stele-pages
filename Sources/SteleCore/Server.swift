@@ -31,10 +31,6 @@ public enum PageContentType {
     }
 }
 
-extension HTTPField.Name {
-    static let xContentTypeOptions = HTTPField.Name("X-Content-Type-Options")!
-}
-
 struct CreatedPageResponse: Encodable {
     let slug: String
     let url: String

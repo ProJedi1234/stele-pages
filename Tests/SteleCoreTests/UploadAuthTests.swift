@@ -1,6 +1,4 @@
 import Foundation
-// Deliberately no `import HTTPTypes`: HTTPTypes ships its own `xContentTypeOptions`, and
-// importing it directly makes `.xContentTypeOptions` ambiguous against SteleCore's.
 import Hummingbird
 import HummingbirdTesting
 import Testing
