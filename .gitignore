@@ -1,0 +1,11 @@
+.build/
+.swiftpm/
+*.o
+*.dSYM
+
+# Holds the upload token and the database password.
+.env
+
+# Environment-specific notes: real host names and addresses. The tracked docs stay
+# generic so this repo can be shared without describing anyone's network.
+*.local.md
