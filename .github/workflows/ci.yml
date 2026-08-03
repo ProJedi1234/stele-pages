@@ -7,7 +7,8 @@
 #
 # The test suite is pure logic (slug validation/generation, wordlist invariants,
 # DATABASE_URL parsing) — no Postgres service is needed. If HTTP-level tests land via
-# HummingbirdTesting, a postgres service container belongs here too.
+# HummingbirdTesting, a postgres service container belongs here, with the suite gated
+# on the presence of a test-database env var so plain local `swift test` skips it.
 
 name: CI
 
@@ -16,23 +17,39 @@ on:
     branches: [main]
   pull_request:
 
+# A force-push or rapid follow-up commit obsoletes the running build; finish only the
+# newest one per ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
+  build-test:
+    name: build and test
     runs-on: ubuntu-latest
     container: swift:6.3-noble
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+
+      # The container runs as root while the checkout is owned by another uid, so git
+      # refuses to touch the repo until it is marked safe — and SwiftPM shells out to
+      # git during dependency resolution.
+      - name: Trust the workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       # Keyed on Package.resolved so dependency bumps rebuild from scratch while
       # source-only changes reuse the compiled dependency graph.
-      - uses: actions/cache@v4
+      - name: Cache dependencies
+        uses: actions/cache@v6
         with:
           path: .build
-          key: swiftpm-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
-          restore-keys: swiftpm-${{ runner.os }}-
+          key: spm-${{ hashFiles('Package.resolved') }}
+          restore-keys: spm-
 
+      # Split from the test run so a compile failure is distinguishable from a failing
+      # assertion in the job summary.
       - name: Build
         run: swift build --build-tests
 
       - name: Test
-        run: swift test
+        run: swift test --skip-build
