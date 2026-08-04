@@ -47,6 +47,12 @@ uniformity, and the headers pages are served with — is covered by HTTP-level t
 run `buildRouter` through `HummingbirdTesting`'s `.router` mode (no listening socket)
 against an in-memory `PageStoring` fake, so no curl and no database are needed.
 
+`PublishSkillTests` is the odd one out: alongside the usual route assertions it reads the
+rendered SKILL.md as data and pins its prose to the constants it documents — the component
+and tone tables against `Stylesheet`, the accepted types against `PageContentType.allowed`,
+the example slugs through `Slug(custom:)` — so changing the contract without changing the
+document fails the build rather than shipping stale instructions.
+
 The slug-retry and requested-slug policy is shared code in `PageStoring`'s extension, so
 the router tests exercise the real thing (the 503 test runs the retry loop to genuine
 exhaustion).
@@ -82,6 +88,19 @@ asserted today only against the in-memory fake.
   backtrack to `/:slug`, so `GET /assets` would otherwise answer with the framework's own
   plain-text 404 — the one distinguishable response on the public read surface. That path
   belongs in `NotFoundTests.all404sAreIdentical`, which is what makes the regression loud.
+  A first segment that *carries its own value* (`/skill`) is the other case: the trie
+  resolves it, so it needs no stub and must stay **out** of `all404sAreIdentical` — that
+  test asserts a 404, and a route that answers 200 there would either fail or, worse, be
+  "fixed" by deleting the route's content. The distinction is whether the bare segment is
+  a real endpoint, not whether it has children.
+- **A generated document that quotes the code belongs in the same module as the code, and
+  quotes it by interpolation.** `PublishSkill` renders the SKILL.md served at `GET /skill`
+  from `Slug.reserved`, `PageContentType.allowed`, `Stylesheet.componentClasses`,
+  `Stylesheet.toneClasses`, the configured base URL and the byte limit. Never retype one
+  of those values into the prose: interpolation removes the chance of drift, where a test
+  can only notice it later. For the prose that has no constant behind it, `PublishSkillTests`
+  pins what it can — extend those tests rather than adding a second source of truth, and
+  change the document in the same commit that changes the contract it describes.
 - **`PageStore` is the only file that touches the database.** Keep it that way.
 - **`PageStore.migrations` is append-only.** Change the schema by adding the next
   version, never by editing a shipped one; `schema_migrations` is the record of what
@@ -109,13 +128,16 @@ Don't "fix" these without a reason; the README argues them out in full.
   distinguishing `400`/`404` errors, because that caller has nothing left to leak to.
 - **`STELE_UPLOAD_TOKEN` has no default.** A default would be a published credential; an
   absent one would silently open the upload endpoint.
-- **The shared stylesheet is a Swift string, not a SwiftPM resource.** It lives as a raw
-  literal in `Sources/SteleCore/Stylesheet.swift`. The Dockerfile's runtime stage copies
+- **The shared stylesheet and the publish skill are Swift strings, not SwiftPM
+  resources.** They live as raw literals in `Sources/SteleCore/Stylesheet.swift` and
+  `Sources/SteleCore/PublishSkill.swift`. The Dockerfile's runtime stage copies
   only the built executable, and SwiftPM emits a resource bundle as a *sibling directory*
   of that executable which `--static-swift-stdlib` does not embed — so a `Bundle.module`
   lookup would pass `swift test` on a dev machine and 500 in production, the worst
-  failure shape available. Moving the CSS to a top-level `Resources/` would also drop it
-  out of CI's `Sources/**` path filter.
+  failure shape available. Moving either to a top-level `Resources/` would also drop it
+  out of CI's `Sources/**` path filter. The skill is not a page in Postgres for a further
+  reason: it changes by deploy, not by upload, so a stored copy would let a deployment
+  serve one version's documentation while running another's API.
 
 ## Deployment
 
