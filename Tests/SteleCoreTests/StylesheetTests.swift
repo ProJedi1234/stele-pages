@@ -128,9 +128,6 @@ struct StylesheetTests {
         #expect(Stylesheet.css.contains("/* .\(name)"), "\(name)")
     }
 
-    /// The drift guard that matters: a class renamed in the CSS leaves the built-in pages
-    /// silently unstyled — still valid HTML, still a 200, just wrong-looking, which no
-    /// status assertion anywhere would catch.
     /// The tone vocabulary the publish skill hands an agent, pinned the same way
     /// `stylesheetDefinesEveryDocumentedClass` pins the component names — and for the same
     /// reason: a tone the sheet does not define renders as valid, unstyled markup that no
@@ -145,6 +142,9 @@ struct StylesheetTests {
         #expect(Stylesheet.css.contains(".badge.\(name) {"), "\(name)")
     }
 
+    /// The drift guard that matters: a class renamed in the CSS leaves the built-in pages
+    /// silently unstyled — still valid HTML, still a 200, just wrong-looking, which no
+    /// status assertion anywhere would catch.
     @Test func builtInPagesOnlyUseDefinedClasses() {
         let used = TestFixture.classNames(in: landingPage(baseURL: TestFixture.baseURL))
             + TestFixture.classNames(in: notFoundPage())

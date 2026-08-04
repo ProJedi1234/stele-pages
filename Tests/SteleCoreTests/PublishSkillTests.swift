@@ -225,9 +225,21 @@ struct PublishSkillTests {
     /// same way the component names do. `StylesheetTests.stylesheetDefinesEveryToneClass` is
     /// the other half: this asserts the document teaches them, that asserts the sheet has
     /// them.
+    ///
+    /// Backticked, and then set-equal against the one line that carries the whole list, for
+    /// the same reason `listsEveryAllowedContentType` is: the tone names are ordinary English
+    /// words, so a bare `contains` for `note`, `ok` or `warn` passes on unrelated prose
+    /// elsewhere in the document — deleting the Tones section outright would have left only
+    /// `danger` failing. Set equality also catches the reverse direction, a tone dropped from
+    /// the sheet but still taught here.
     @Test(arguments: Stylesheet.toneClasses)
-    func documentsEveryToneClass(name: String) {
-        #expect(skillDocument.markdown.contains(name), "\(name)")
+    func documentsEveryToneClass(name: String) throws {
+        #expect(skillDocument.markdown.contains("`\(name)`"), "\(name)")
+
+        let line = try #require(
+            skillDocument.markdown.split(separator: "\n").first { $0.contains("`danger`") }
+        )
+        #expect(Set(Self.backtickedTokens(in: line)) == Set(Stylesheet.toneClasses))
     }
 
     /// An agent that sends a type the server rejects gets a `415` with no idea why, so the

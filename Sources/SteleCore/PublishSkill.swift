@@ -148,8 +148,12 @@ struct PublishSkill: Sendable {
 
         ### Tones
 
-        `.callout` and `.badge` each take a second class: \#(tones). Write
-        `<div class="callout warn">` or `<span class="badge ok">`. Nothing else takes a tone.
+        `.callout` and `.badge` each take a second class, one of exactly these:
+
+        \#(tones)
+
+        Write `<div class="callout warn">` or `<span class="badge ok">`. Nothing else takes
+        a tone.
 
         ### `.narrow` / `.wide`
 
@@ -210,7 +214,8 @@ struct PublishSkill: Sendable {
           \#(contentTypes)
         - Do not link stylesheets, fonts or scripts from other hosts.
         - Do not invent sub-paths. The API is exactly the routes in the table below.
-        - A `503` means five random slugs collided in a row. Retry once, or pass `?slug=`.
+        - A `503` means \#(PageStore.maxSlugAttempts) random slugs collided in a row. Retry
+          once, or pass `?slug=`.
 
         ## Status codes
 
