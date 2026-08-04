@@ -5,10 +5,11 @@
 # ICU 74), and newer Ubuntu images ship incompatible sonames. The container pins the
 # whole userland to what the toolchain expects.
 #
-# The test suite is pure logic (slug validation/generation, wordlist invariants,
-# DATABASE_URL parsing) — no Postgres service is needed. If HTTP-level tests land via
-# HummingbirdTesting, a postgres service container belongs here, with the suite gated
-# on the presence of a test-database env var so plain local `swift test` skips it.
+# Most of the suite is pure logic (slug rules, wordlist invariants, DATABASE_URL parsing)
+# or HTTP-level tests against an in-memory store, and needs nothing but the toolchain. The
+# postgres service below exists for the one suite that cannot be faked: the migration
+# runner's claims are claims about Postgres. That suite is gated on
+# STELE_TEST_DATABASE_URL, so it runs here and a plain local `swift test` stays hermetic.
 
 name: CI
 
@@ -44,6 +45,22 @@ jobs:
     name: build and test
     runs-on: ubuntu-latest
     container: swift:6.3-noble
+    # The job runs in a container on the services network, so Postgres is reachable at
+    # its service alias rather than on a mapped localhost port.
+    services:
+      postgres:
+        image: postgres:17-alpine  # same pin as docker-compose.yml
+        env:
+          POSTGRES_USER: stele
+          POSTGRES_PASSWORD: stele_test_password
+          # The maintenance database. The suite creates and drops a throwaway schema per
+          # test and never wants a database of its own to be the one it is dropping in.
+          POSTGRES_DB: postgres
+        # Without a healthcheck the job starts querying a Postgres that is still
+        # initialising, and the first test fails on a refused connection.
+        options: >-
+          --health-cmd "pg_isready -U stele" --health-interval 2s
+          --health-timeout 5s --health-retries 15
     steps:
       - uses: actions/checkout@v7
 
@@ -67,5 +84,9 @@ jobs:
       - name: Build
         run: swift build --build-tests
 
+      # Only this step gets the variable: it is what switches the Postgres suite on, and
+      # scoping it here keeps the build step honest about needing no database.
       - name: Test
         run: swift test --skip-build
+        env:
+          STELE_TEST_DATABASE_URL: postgres://stele:stele_test_password@postgres:5432/postgres

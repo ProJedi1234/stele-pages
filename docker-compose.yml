@@ -60,7 +60,7 @@ services:
     depends_on:
       postgres:
         # Waits for pg_isready, not just for the container to exist, so the first boot
-        # doesn't race the schema bootstrap against a database still starting up.
+        # doesn't race the migrations against a database still starting up.
         condition: service_healthy
     restart: unless-stopped
 

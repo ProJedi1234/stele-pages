@@ -64,8 +64,53 @@ set -a && . ./.env && set +a
 swift run stele
 ```
 
-The schema is created on boot; there's no separate migrate step. Run the tests with
-`swift test`.
+The schema is an ordered, append-only list of migrations in code. Whatever a database
+hasn't applied yet runs on boot, under a Postgres advisory lock — so there's still no
+separate migrate step, and two instances starting at once are safe. See "Changing the
+schema" below.
+
+Run the tests with `swift test`. That run is hermetic and needs no database. The suite
+that exercises the migration runner against a real Postgres is gated on a separate
+variable:
+
+```sh
+docker compose up -d postgres
+STELE_TEST_DATABASE_URL=postgres://stele:stele_dev_password@localhost:5432/postgres swift test
+```
+
+It creates and drops a throwaway schema per test on whichever cluster you point it at.
+The variable is deliberately not `DATABASE_URL`, so pointing the server at a database
+never points a suite that drops things at it too.
+
+### Changing the schema
+
+`PageStore.migrations` is an ordered, append-only list. To change the schema, append a
+`Migration` with the next version and its statements; never edit a version that has
+shipped, because it has already run on databases you don't control and nothing would
+detect the divergence. On boot the runner reads `schema_migrations`, applies whatever is
+missing in version order, and commits each migration together with the row recording it —
+so a step is either fully applied and recorded, or not applied at all.
+
+One SQL command per array element, literal text only: an interpolation becomes a bind
+parameter, and DDL can't take binds. Statements aren't limited to DDL — because a version
+runs exactly once, a data backfill belongs in a migration too. `CREATE INDEX CONCURRENTLY`
+doesn't, because each migration runs inside a transaction.
+
+The TTL column (issue #6) would ship as:
+
+```swift
+Migration(version: 2, statements: [
+    "ALTER TABLE pages ADD COLUMN expires_at timestamptz",
+    "CREATE INDEX pages_expires_at_idx ON pages (expires_at) WHERE expires_at IS NOT NULL",
+])
+```
+
+— a versioned step, not another idempotent `ALTER` accumulating in a bootstrap function.
+Nullable with no default, so it's a catalog-only change with no table rewrite.
+
+Version 1 is the original schema written with `IF NOT EXISTS`, so a database created
+before there was a version table simply records version 1 and carries on. Nothing is
+dumped or restored.
 
 ### The two compose files
 
@@ -144,8 +189,10 @@ EOF
 docker compose -f docker-compose.deploy.yml up -d --build
 ```
 
-Nothing else changes — the schema bootstraps on first boot exactly as it does locally.
-All three of those variables are required and the stack refuses to start without them,
+Nothing else changes — any unapplied migrations run on boot, exactly as they do locally.
+An existing deployment needs no dump and restore: version 1 describes the schema it
+already has, so the first boot after a version table exists records version 1 and does
+nothing else. All three of those variables are required and the stack refuses to start without them,
 rather than defaulting to something that would quietly be wrong.
 
 **Point `DATABASE_URL` at a host whose storage you trust.** Development machines often
