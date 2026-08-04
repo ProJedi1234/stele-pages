@@ -55,6 +55,7 @@ struct SlugValidationTests {
     @Test func rejectsReservedNames() {
         #expect(throws: SlugError.reserved("pages")) { try Slug(custom: "pages") }
         #expect(throws: SlugError.reserved("healthz")) { try Slug(custom: "healthz") }
+        #expect(throws: SlugError.reserved("assets")) { try Slug(custom: "assets") }
     }
 
     /// Every route the server defines itself must be unreachable as a custom slug,
