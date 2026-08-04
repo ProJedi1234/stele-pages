@@ -142,6 +142,16 @@ struct StylesheetTests {
         #expect(Stylesheet.css.contains(".badge.\(name) {"), "\(name)")
     }
 
+    /// The syntax token vocabulary the publish skill teaches, pinned the same way the
+    /// tones are and for the same reason: a token class the sheet does not define renders
+    /// as valid, uncoloured markup that no status assertion anywhere would catch. The
+    /// opening brace is load-bearing here too — a bare `.tok-kw` also matches the skill's
+    /// example markup quoted in the section comment above the rules.
+    @Test(arguments: Stylesheet.syntaxTokenClasses)
+    func stylesheetDefinesEverySyntaxTokenClass(name: String) {
+        #expect(Stylesheet.css.contains(".\(name) {"), "\(name)")
+    }
+
     /// The drift guard that matters: a class renamed in the CSS leaves the built-in pages
     /// silently unstyled — still valid HTML, still a 200, just wrong-looking, which no
     /// status assertion anywhere would catch.

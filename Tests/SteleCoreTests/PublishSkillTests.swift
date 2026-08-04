@@ -229,11 +229,14 @@ struct PublishSkillTests {
 
     /// Every class the document's own snippets use has to exist. The snippets are what an
     /// agent copies verbatim, so a typo here ships as unstyled markup on somebody's page.
-    /// Tone modifiers are legal in a snippet even though they are not `componentClasses` —
-    /// that list is what the built-in pages are held to, and this document teaches more.
+    /// Tone modifiers and syntax tokens are legal in a snippet even though they are not
+    /// `componentClasses` — that list is what the built-in pages are held to, and this
+    /// document teaches more.
     @Test func documentsOnlyDefinedClasses() {
         let used = TestFixture.classNames(in: skillDocument.markdown)
-        let defined = Set(Stylesheet.componentClasses).union(Stylesheet.toneClasses)
+        let defined = Set(Stylesheet.componentClasses)
+            .union(Stylesheet.toneClasses)
+            .union(Stylesheet.syntaxTokenClasses)
 
         #expect(!used.isEmpty)
         for name in used {
@@ -256,6 +259,34 @@ struct PublishSkillTests {
     @Test func documentsEveryToneClass() throws {
         let line = try Self.line(after: "one of exactly these:", in: skillDocument.markdown)
         #expect(Set(Self.backtickedTokens(in: line)) == Set(Stylesheet.toneClasses))
+    }
+
+    /// The syntax-token list is the skill's second hand-typed vocabulary, and it drifts
+    /// exactly the way the component table does: each row carries prose no list of names
+    /// could generate, so the names cannot be interpolated and set equality in both
+    /// directions stands in for it. The direction presence alone would miss is the worse
+    /// one here too — a token class deleted from the sheet but still taught produces
+    /// markup that is valid, serves a `200`, and renders uncoloured. Parsed off the list's
+    /// own rows rather than an anchor line, because unlike the tones the list *is* the
+    /// rendering — there is no one-line summary elsewhere to read it from.
+    @Test func documentsEverySyntaxTokenClass() {
+        let documented = skillDocument.markdown.split(separator: "\n").compactMap { line -> String? in
+            guard line.hasPrefix("- `tok-") else { return nil }
+            return Self.backtickedTokens(in: line).first
+        }
+
+        #expect(!documented.isEmpty)
+        #expect(Set(documented) == Set(Stylesheet.syntaxTokenClasses))
+    }
+
+    /// The example the token list teaches by is what an agent will pattern-match against,
+    /// so it must demonstrate the whole vocabulary — a token class the snippet never shows
+    /// is one the agent has seen named but never used, which is how a plausible-looking
+    /// `tok-string` gets invented. `documentsOnlyDefinedClasses` already holds the snippet
+    /// to defined classes; this is the other direction.
+    @Test(arguments: Stylesheet.syntaxTokenClasses)
+    func codeExampleUsesEverySyntaxToken(name: String) {
+        #expect(skillDocument.markdown.contains("class=\"\(name)\""), "\(name)")
     }
 
     /// An agent that sends a type the server rejects gets a `415` with no idea why, so the
