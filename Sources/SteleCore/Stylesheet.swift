@@ -28,6 +28,13 @@ enum Stylesheet {
     /// a class renamed in the CSS cannot quietly leave this list — or the skill — lying.
     static let componentClasses = ["card", "grid", "scroll", "callout", "badge", "muted", "narrow", "wide"]
 
+    /// The tone modifiers `.callout` and `.badge` accept as a second class. Deliberately not
+    /// part of `componentClasses` — the built-in pages use only the bare forms, and the drift
+    /// test that enforces that reads `componentClasses` — but the publish skill teaches the
+    /// tones, so they need a source of truth of their own rather than a hard-coded list in
+    /// two test suites.
+    static let toneClasses = ["note", "ok", "warn", "danger"]
+
     /// A raw literal because CSS legitimately contains backslashes (`content: "\201C"`,
     /// escaped selectors) and this string is fully static: raw removes an entire class of
     /// escaping bug at zero cost. Interpolation, if it were ever needed, is `\#(...)`.

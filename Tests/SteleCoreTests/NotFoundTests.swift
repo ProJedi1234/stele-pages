@@ -21,6 +21,11 @@ struct NotFoundTests {
         // published, a routed path whose only responder is POST, and the bare parent of
         // the stylesheet — `/pages` and `/assets` each need their own GET responder
         // because the trie matches the literal node without backtracking to `/:slug`.
+        //
+        // `/skill` is deliberately absent, even though this list otherwise mirrors
+        // `ServerRoute.names`: it answers with the publish document, not a 404, so it has
+        // no uniform-404 responder to compare. Adding it here is the instinctive "fix" and
+        // is wrong — `PublishSkillTests.servesTheSkill` is what covers that path.
         let paths = [
             "/x", "/admin", "/quiet-cedar-otter", "/\(ServerRoute.pages)",
             "/\(ServerRoute.assets)",
@@ -56,13 +61,19 @@ struct NotFoundTests {
         #expect(bodies[0] == Array(notFoundPage().utf8))
     }
 
-    /// `healthz` is in `Slug.reserved`, but reservation only keeps it out of the table —
-    /// the route itself still has to answer, rather than being swallowed by `/:slug`.
+    /// `healthz` and `skill` are in `Slug.reserved`, but reservation only keeps them out of
+    /// the table — the routes themselves still have to answer, rather than being swallowed
+    /// by `/:slug` and turned into the uniform 404 along with everything else.
     @Test func reservedRoutedPathsHitTheirRoutes() async throws {
         try await TestFixture.makeApp().test(.router) { client in
             try await client.execute(uri: "/\(ServerRoute.healthz)", method: .get) { response in
                 #expect(response.status == .ok)
                 #expect(String(buffer: response.body) == "ok")
+            }
+
+            try await client.execute(uri: "/\(ServerRoute.skill)", method: .get) { response in
+                #expect(response.status == .ok)
+                #expect(response.body.readableBytes > 0)
             }
         }
     }

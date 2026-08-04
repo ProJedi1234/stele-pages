@@ -173,6 +173,39 @@ public func buildRouter(
         )
     }
 
+    // Rendered once here rather than per request: it interpolates this deployment's own base
+    // URL and byte limit, so it is configuration-shaped rather than a compile-time constant —
+    // but it is fixed for the life of the process, and so is its ETag. Unauthenticated for the
+    // same reason every other read is, and because an agent bootstrapping from this document
+    // has no token yet: the token is for writing.
+    //
+    // No bare-segment 404 stub, unlike `/pages` and `/assets`: `/skill` is a terminal node
+    // that carries its own value, so the trie resolves it. It therefore must NOT appear in
+    // `NotFoundTests.all404sAreIdentical`.
+    let skill = PublishSkill(baseURL: configuration.baseURL, maxPageBytes: configuration.maxPageBytes)
+
+    router.get(RouterPath(PublishSkill.path)) { request, _ -> Response in
+        if ifNoneMatchHits(request.headers[.ifNoneMatch], etag: skill.etag) {
+            return Response(
+                status: .notModified,
+                headers: [.eTag: skill.etag, .cacheControl: "no-cache"]
+            )
+        }
+
+        return Response(
+            status: .ok,
+            headers: [
+                .contentType: PublishSkill.contentType,
+                .eTag: skill.etag,
+                // Same bargain as the stylesheet: the document ships with the deployment and
+                // changes with it, so a cache must always come back and ask — and the ETag
+                // makes that ask a bodyless round trip rather than a re-download.
+                .cacheControl: "no-cache",
+            ],
+            body: .init(byteBuffer: ByteBuffer(string: skill.markdown))
+        )
+    }
+
     // Same trap as `GET /pages`: adding the literal `assets` node means `/assets` matches
     // it instead of falling through to `/:slug`, and `Trie.resolve` does not backtrack to a
     // sibling when the final component lands on a node with no value. Without this,
@@ -439,6 +472,9 @@ func landingPage(baseURL: String) -> String {
     <code>&lt;head&gt;</code>:
     <code>&lt;link rel="stylesheet" href="\(Stylesheet.path)"&gt;</code> — plain HTML needs
     no classes, and dark mode follows the reader's system setting.</p>
+    <p>Publishing from an agent? <a href="\(PublishSkill.path)"><code>\(PublishSkill.path)</code></a>
+    is a skill document that teaches the whole contract — the page rules, the component
+    classes and the curl above — served by this server, so it cannot drift from it.</p>
     </div>
     </body></html>
     """

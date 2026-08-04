@@ -19,31 +19,6 @@ struct StylesheetTests {
     /// breaking change and has to be seen here as one.
     static let uri = "/assets/stele.css"
 
-    /// Every whitespace-separated name inside a `class="…"` attribute of `html`.
-    ///
-    /// Hand-scanned rather than regex-matched so the test pulls in nothing beyond the
-    /// stdlib, and deliberately naive: the built-in pages are the only input, and a parser
-    /// clever enough to handle arbitrary HTML would be the thing under test instead.
-    static func classNames(in html: String) -> [String] {
-        let attribute = "class=\""
-        var names: [String] = []
-        var index = html.startIndex
-        while index < html.endIndex {
-            guard html[index...].hasPrefix(attribute) else {
-                index = html.index(after: index)
-                continue
-            }
-            let start = html.index(index, offsetBy: attribute.count)
-            var end = start
-            while end < html.endIndex, html[end] != "\"" {
-                end = html.index(after: end)
-            }
-            names.append(contentsOf: html[start..<end].split(separator: " ").map(String.init))
-            index = end
-        }
-        return names
-    }
-
     // MARK: - The wire contract
 
     /// The whole point of the feature is a *stable* URL: pages published months apart link
@@ -156,9 +131,23 @@ struct StylesheetTests {
     /// The drift guard that matters: a class renamed in the CSS leaves the built-in pages
     /// silently unstyled — still valid HTML, still a 200, just wrong-looking, which no
     /// status assertion anywhere would catch.
+    /// The tone vocabulary the publish skill hands an agent, pinned the same way
+    /// `stylesheetDefinesEveryDocumentedClass` pins the component names — and for the same
+    /// reason: a tone the sheet does not define renders as valid, unstyled markup that no
+    /// status assertion anywhere would catch.
+    ///
+    /// Both shapes are asserted because both are taught as taking a tone. The opening brace
+    /// is load-bearing here too: `.callout.warn` on its own also matches the comment above
+    /// the rule, so a deleted rule with a surviving comment would pass.
+    @Test(arguments: Stylesheet.toneClasses)
+    func stylesheetDefinesEveryToneClass(name: String) {
+        #expect(Stylesheet.css.contains(".callout.\(name) {"), "\(name)")
+        #expect(Stylesheet.css.contains(".badge.\(name) {"), "\(name)")
+    }
+
     @Test func builtInPagesOnlyUseDefinedClasses() {
-        let used = Self.classNames(in: landingPage(baseURL: TestFixture.baseURL))
-            + Self.classNames(in: notFoundPage())
+        let used = TestFixture.classNames(in: landingPage(baseURL: TestFixture.baseURL))
+            + TestFixture.classNames(in: notFoundPage())
 
         // Both halves of the non-vacuity check: pages that used no classes would pass the
         // loop below without exercising anything, and an empty `componentClasses` would
