@@ -48,8 +48,8 @@ run `buildRouter` through `HummingbirdTesting`'s `.router` mode (no listening so
 against an in-memory `PageStoring` fake, so no curl and no database are needed.
 
 `PublishSkillTests` is the odd one out: alongside the usual route assertions it reads the
-rendered SKILL.md as data and pins its prose to the constants it documents — the component
-and tone tables against `Stylesheet`, the accepted types against `PageContentType.allowed`,
+rendered SKILL.md as data and pins its prose to the constants it documents — the component,
+tone and syntax-token vocabularies against `Stylesheet`, the accepted types against `PageContentType.allowed`,
 the example slugs through `Slug(custom:)` — so changing the contract without changing the
 document fails the build rather than shipping stale instructions.
 
@@ -98,10 +98,11 @@ asserted today only against the in-memory fake.
   from `Slug.reserved`, `PageContentType.allowed`, `Stylesheet.toneClasses`, the
   configured base URL and the byte limit. Never retype one of those values into the
   prose: interpolation removes the chance of drift, where a test can only notice it
-  later. The one deliberate exception is the component-class table — each row carries
-  hand-written prose no constant could generate, so its class names are typed out and
-  `PublishSkillTests.componentTableMatchesTheStylesheet` holds them set-equal to
-  `Stylesheet.componentClasses` in both directions. For the rest of the prose that has no
+  later. The deliberate exceptions are the component-class table and the syntax-token
+  list — each row carries hand-written prose no constant could generate, so the class
+  names are typed out and `PublishSkillTests.componentTableMatchesTheStylesheet` /
+  `.documentsEverySyntaxTokenClass` hold them set-equal to `Stylesheet.componentClasses`
+  / `.syntaxTokenClasses` in both directions. For the rest of the prose that has no
   constant behind it, `PublishSkillTests` pins what it can — extend those tests rather
   than adding a second source of truth, and change the document in the same commit that
   changes the contract it describes.

@@ -23,8 +23,9 @@
 /// Said out loud so nobody "improves" it into a styled page later.
 ///
 /// Maintenance: the prose is pinned to the code it documents by
-/// `PublishSkillTests.componentTableMatchesTheStylesheet`, `.documentsOnlyDefinedClasses`,
-/// `.listsEveryAllowedContentType` and `.exampleSlugsAreValid`. Those tests can only pin
+/// `PublishSkillTests.componentTableMatchesTheStylesheet`, `.documentsEverySyntaxTokenClass`,
+/// `.documentsOnlyDefinedClasses`, `.listsEveryAllowedContentType` and
+/// `.exampleSlugsAreValid`. Those tests can only pin
 /// what has a constant behind it; the rest of the prose is a human responsibility, and
 /// changing the publish contract means changing this document in the same commit.
 struct PublishSkill: Sendable {
@@ -50,11 +51,12 @@ struct PublishSkill: Sendable {
     ///
     /// Every value with exactly one constant behind it is interpolated rather than typed
     /// out. That is a stronger accuracy mechanism than any test, because it removes the
-    /// opportunity for drift instead of detecting it after the fact. The one deliberate
-    /// exception is the component-class table: each row carries prose no list of names
-    /// could generate, so the names are hand-typed and held set-equal to
-    /// `Stylesheet.componentClasses` — in both directions — by
-    /// `PublishSkillTests.componentTableMatchesTheStylesheet`.
+    /// opportunity for drift instead of detecting it after the fact. The deliberate
+    /// exceptions are the component-class table and the syntax-token list: each row
+    /// carries prose no list of names could generate, so the names are hand-typed and
+    /// held set-equal to `Stylesheet.componentClasses` / `.syntaxTokenClasses` — in both
+    /// directions — by `PublishSkillTests.componentTableMatchesTheStylesheet` and
+    /// `.documentsEverySyntaxTokenClass`.
     private static func render(baseURL: String, maxPageBytes: Int) -> String {
         let reserved = Slug.reserved.sorted().map { "`\($0)`" }.joined(separator: ", ")
         let contentTypes = PageContentType.allowed.keys.sorted()
@@ -158,6 +160,33 @@ struct PublishSkill: Sendable {
 
         Write `<div class="callout warn">` or `<span class="badge ok">`. Nothing else takes
         a tone.
+
+        ### Highlighting code
+
+        Plain `<pre><code>` already has its surface, border and horizontal scrollbar.
+        Colour is yours to add: this server runs no highlighter and serves no JavaScript —
+        **you are the highlighter**. Wrap tokens in spans as you write the snippet, using
+        exactly these classes:
+
+        - `tok-kw` — keywords and reserved words.
+        - `tok-str` — string literals, quotes included.
+        - `tok-num` — numeric literals.
+        - `tok-fn` — function and method names, at definition and call sites alike.
+        - `tok-type` — type names.
+        - `tok-com` — comments; rendered muted and italic.
+
+        ```html
+        <pre><code><span class="tok-com">// Three attempts, then give up.</span>
+        <span class="tok-kw">func</span> <span class="tok-fn">fetch</span>(attempts: <span class="tok-type">Int</span> = <span class="tok-num">3</span>) <span class="tok-kw">throws</span> -> <span class="tok-type">Data</span> {
+          <span class="tok-kw">try</span> <span class="tok-fn">request</span>(<span class="tok-str">"GET"</span>, retries: attempts)
+        }</code></pre>
+        ```
+
+        Leave punctuation, operators and plain identifiers unwrapped — the default text
+        colour is theirs, and a snippet you only partially mark up degrades to plain code,
+        not to a broken page. Any language works, because you are doing the parsing. The
+        colours follow dark mode on their own; do not add `style` attributes or colour
+        rules of your own to code.
 
         ### `.narrow` / `.wide`
 

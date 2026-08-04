@@ -196,6 +196,13 @@ its natural width and scroll inside the frame instead. Scrolling genuinely needs
 extra element: one box has to stay pinned to the page width while the other is free to be
 wider than it, and a lone `<table>` cannot be both.
 
+Code blocks get their colour the same opt-in way, and with no highlighter: the server
+runs no parser and serves no JavaScript. The author wraps tokens in spans while writing
+the snippet — `tok-kw`, `tok-str`, `tok-num`, `tok-fn`, `tok-type`, `tok-com` — which an
+agent, the usual author here, does more reliably than a regex-based highlighter would
+have. Anything left unwrapped keeps the default text colour, so a partially marked-up
+snippet degrades to plain code rather than to anything broken.
+
 Dark mode needs nothing from an author. Every colour comes from a `--stele-*` custom
 property and a single `prefers-color-scheme` block reassigns those properties, so a page
 that uses the classes is dark-mode-correct for free rather than carrying a second copy of

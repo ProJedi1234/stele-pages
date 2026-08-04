@@ -35,6 +35,14 @@ enum Stylesheet {
     /// two test suites.
     static let toneClasses = ["note", "ok", "warn", "danger"]
 
+    /// The syntax token classes for hand-highlighted code. There is no highlighter on this
+    /// server and no JavaScript to run one — the publishing agent wraps tokens in spans as
+    /// it writes a snippet, and these classes only colour what was wrapped. Like
+    /// `toneClasses`, deliberately not part of `componentClasses` — the built-in pages
+    /// carry no code samples — but the publish skill teaches them, so they need a source
+    /// of truth its drift tests can hold on to.
+    static let syntaxTokenClasses = ["tok-kw", "tok-str", "tok-num", "tok-fn", "tok-type", "tok-com"]
+
     /// A raw literal because CSS legitimately contains backslashes (`content: "\201C"`,
     /// escaped selectors) and this string is fully static: raw removes an entire class of
     /// escaping bug at zero cost. Interpolation, if it were ever needed, is `\#(...)`.
@@ -102,6 +110,20 @@ enum Stylesheet {
       --stele-tone-warn: #92400e;
       --stele-tone-danger: #b91c1c;
 
+      /* Syntax token colours for hand-highlighted code — the .tok-* classes below. Their
+         own tokens rather than aliases of the status tones above, even where the values
+         coincide: retheming a callout must not recolour every code block on the page.
+         Comments are the exception — a comment *is* secondary text, so it takes
+         --stele-muted by reference and follows it through the dark block with no
+         reassignment of its own. The rest hold >= 4.5:1 on --stele-code-bg, the deepest
+         surface code sits on. */
+      --stele-code-kw: #7e22ce;
+      --stele-code-str: #166534;
+      --stele-code-num: #92400e;
+      --stele-code-fn: #1d4ed8;
+      --stele-code-type: #0f766e;
+      --stele-code-com: var(--stele-muted);
+
       --stele-measure: 40rem;
       --stele-radius: .5rem;
     }
@@ -124,6 +146,14 @@ enum Stylesheet {
         --stele-tone-ok: #86efac;
         --stele-tone-warn: #fcd34d;
         --stele-tone-danger: #fca5a5;
+
+        /* --stele-code-com is absent on purpose: it reads --stele-muted by reference, and
+           the reassignment above already carried it. */
+        --stele-code-kw: #d8b4fe;
+        --stele-code-str: #86efac;
+        --stele-code-num: #fcd34d;
+        --stele-code-fn: #93c5fd;
+        --stele-code-type: #5eead4;
       }
     }
 
@@ -339,6 +369,21 @@ enum Stylesheet {
     .badge.ok { --stele-tone: var(--stele-tone-ok); }
     .badge.warn { --stele-tone: var(--stele-tone-warn); }
     .badge.danger { --stele-tone: var(--stele-tone-danger); }
+
+    /* .tok-* — syntax colouring for code, with no highlighter to run. The server ships no
+       JavaScript and parses nothing; the *author* wraps each token in a span while writing
+       the snippet, and these classes only colour what was wrapped. Anything left bare
+       keeps --stele-fg, which is the right colour for punctuation, operators and plain
+       identifiers — so partial markup degrades to plain code, never to a broken page.
+       <pre><code><span class="tok-kw">let</span> n = <span class="tok-num">3</span></code></pre> */
+    .tok-kw { color: var(--stele-code-kw); }
+    .tok-str { color: var(--stele-code-str); }
+    .tok-num { color: var(--stele-code-num); }
+    .tok-fn { color: var(--stele-code-fn); }
+    .tok-type { color: var(--stele-code-type); }
+    /* Italic as well as muted, so a comment still reads as an aside beside token colours
+       that are fighting for the same attention. */
+    .tok-com { color: var(--stele-code-com); font-style: italic; }
 
     /* ---------------------------------------------------------------------------
      * Utilities
