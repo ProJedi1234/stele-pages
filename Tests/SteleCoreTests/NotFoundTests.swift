@@ -18,10 +18,13 @@ struct NotFoundTests {
         await store.seed(slug: try Slug(custom: "amber-willow-heron"), body: "<h1>here</h1>")
 
         // Malformed (too short), reserved but with no GET route, well-formed but never
-        // published, and a routed path whose only responder is POST — `/pages` needs its
-        // own GET responder because the trie matches the literal node without
-        // backtracking to `/:slug`.
-        let paths = ["/x", "/admin", "/quiet-cedar-otter", "/\(ServerRoute.pages)"]
+        // published, a routed path whose only responder is POST, and the bare parent of
+        // the stylesheet — `/pages` and `/assets` each need their own GET responder
+        // because the trie matches the literal node without backtracking to `/:slug`.
+        let paths = [
+            "/x", "/admin", "/quiet-cedar-otter", "/\(ServerRoute.pages)",
+            "/\(ServerRoute.assets)",
+        ]
         // Collected inside the test closure and returned out of it: the closure is
         // `@Sendable`, so it cannot mutate a captured local.
         let bodies = try await TestFixture.makeApp(store: store).test(.router) { client -> [[UInt8]] in

@@ -44,8 +44,13 @@ struct PageLocationResponse: Encodable {
 public enum ServerRoute {
     public static let healthz = "healthz"
     public static let pages = "pages"
+    /// Only the first segment. The stylesheet's full path lives on `Stylesheet.path`,
+    /// because `names` is exactly the set `Slug.reserved` has to cover and `stele.css` is
+    /// not a first segment — nor a slug anyone could claim — so putting it here would make
+    /// this set mean two different things at once.
+    public static let assets = "assets"
 
-    public static let names: Set<String> = [healthz, pages]
+    public static let names: Set<String> = [healthz, pages, assets]
 }
 
 /// Wires up the router. Split out from `buildApplication` so tests can exercise routes
@@ -138,6 +143,41 @@ public func buildRouter(
         htmlResponse(status: .notFound, html: notFoundPage())
     }
 
+    // The stylesheet ships with the binary, so it is served from a constant rather than
+    // the store: it is code, and it changes by deploy, not by upload. Unauthenticated like
+    // every other read — it is linked as a subresource by every published page.
+    router.get(RouterPath(Stylesheet.path)) { request, _ -> Response in
+        if ifNoneMatchHits(request.headers[.ifNoneMatch], etag: Stylesheet.etag) {
+            return Response(
+                status: .notModified,
+                headers: [.eTag: Stylesheet.etag, .cacheControl: "no-cache"]
+            )
+        }
+
+        return Response(
+            status: .ok,
+            headers: [
+                .contentType: Stylesheet.contentType,
+                .eTag: Stylesheet.etag,
+                // Mutating in place is the feature — an edit restyles every page at once —
+                // so a cache must always come back and ask. The ETag makes that ask a
+                // bodyless round trip rather than a re-download.
+                .cacheControl: "no-cache",
+            ],
+            body: .init(byteBuffer: ByteBuffer(string: Stylesheet.css))
+        )
+    }
+
+    // Same trap as `GET /pages`: adding the literal `assets` node means `/assets` matches
+    // it instead of falling through to `/:slug`, and `Trie.resolve` does not backtrack to a
+    // sibling when the final component lands on a node with no value. Without this,
+    // `/assets` answers with the framework's own 404 while every other miss answers with
+    // the page — the one distinguishable response on the public read surface. Outside any
+    // auth group, for the same reason `/pages`' guard is.
+    router.get(RouterPath("/\(ServerRoute.assets)")) { _, _ -> Response in
+        htmlResponse(status: .notFound, html: notFoundPage())
+    }
+
     router.get("/:slug") { _, context -> Response in
         guard let raw = context.parameters.get("slug"),
               let slug = try? Slug(custom: raw),
@@ -166,6 +206,28 @@ public func buildRouter(
     }
 
     return router
+}
+
+/// Whether an `If-None-Match` header says the caller already holds `etag`.
+///
+/// Not string equality, which is what this started as. RFC 9110 §13.1.2 defines the header
+/// as a *list* of entity-tags or `*`, compared with the **weak** function — `W/"abc"` and
+/// `"abc"` match. Exact equality looks safe when the server only ever emits one strong tag,
+/// but it fails the moment anything sits in front: nginx's gzip module rewrites a strong
+/// `ETag` into `W/"…"`, so the browser revalidates with a weak tag, nothing matches, and
+/// every conditional request re-sends the whole sheet — precisely the download the ETag was
+/// added to avoid, and invisible from both ends because a 200 is still a correct answer.
+private func ifNoneMatchHits(_ rawHeader: String?, etag: String) -> Bool {
+    guard let rawHeader else { return false }
+    let header = rawHeader.trimmingCharacters(in: .whitespaces)
+    // `*` means "any current representation", and serving this route means we have one.
+    if header == "*" { return true }
+    return header.split(separator: ",").contains { candidate in
+        let tag = candidate.trimmingCharacters(in: .whitespaces)
+        // Weak comparison: the weakness prefix is stripped before the opaque tags are
+        // compared. Only the candidate can carry one — ours is always strong.
+        return tag == etag || (tag.hasPrefix("W/") && String(tag.dropFirst(2)) == etag)
+    }
 }
 
 /// Runs a raw path or query slug through the `Slug(custom:)` chokepoint, reporting a
@@ -313,46 +375,46 @@ func htmlResponse(status: HTTPResponse.Status, html: String) -> Response {
     )
 }
 
+/// The one 404 body every miss on the public read surface answers with.
+///
+/// It has to stay a compile-time constant — no echoed path, no nonce, no timestamp. The
+/// byte-identity across malformed, reserved and absent slugs is the whole point, and a
+/// single per-request detail would hand a scanner the distinction back. Interpolating
+/// `Stylesheet.path` is safe precisely because it is a constant.
+///
+/// Deliberately plain: base typography plus the `.narrow` body modifier, which restates
+/// the geometry this page used to carry inline.
 func notFoundPage() -> String {
     """
     <!doctype html>
     <html lang="en"><head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Not found</title>
-    <style>
-      body { font: 16px/1.6 system-ui, sans-serif; max-width: 32rem; margin: 20vh auto;
-             padding: 0 1.5rem; color: #1c1917; background: #fafaf9; }
-      code { background: #f5f5f4; padding: .15em .4em; border-radius: .25rem; }
-      @media (prefers-color-scheme: dark) {
-        body { color: #e7e5e4; background: #1c1917; }
-        code { background: #292524; }
-      }
-    </style></head>
-    <body><h1>Nothing here</h1>
+    <link rel="stylesheet" href="\(Stylesheet.path)"></head>
+    <body class="narrow"><h1>Nothing here</h1>
     <p>No page is published at this address. Check the link, or publish one with
     <code>POST /pages</code>.</p></body></html>
     """
 }
 
+/// The landing page, and the server's own showcase for the shared stylesheet: whatever it
+/// demonstrates here is what an author can copy. It uses only names listed in
+/// `Stylesheet.componentClasses`, and only their bare forms — the tone modifiers
+/// (`.badge.ok`, `.callout.warn`, …) are real CSS but not part of that list, so reaching
+/// for one here would fail the drift test that keeps the list honest.
+///
+/// The curl line's `\(baseURL)/pages` adjacency is asserted by a test. Do not reformat it
+/// or break the interpolation away from the path.
 func landingPage(baseURL: String) -> String {
     """
     <!doctype html>
     <html lang="en"><head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>stele</title>
-    <style>
-      body { font: 16px/1.6 system-ui, sans-serif; max-width: 40rem; margin: 12vh auto;
-             padding: 0 1.5rem; color: #1c1917; background: #fafaf9; }
-      pre { background: #f5f5f4; padding: 1rem; border-radius: .5rem; overflow-x: auto; }
-      code { font-size: .9em; }
-      @media (prefers-color-scheme: dark) {
-        body { color: #e7e5e4; background: #1c1917; }
-        pre { background: #292524; }
-      }
-    </style></head>
+    <link rel="stylesheet" href="\(Stylesheet.path)"></head>
     <body>
     <h1>stele</h1>
-    <p>Publish an HTML file, get a readable link back.</p>
+    <p class="muted">Publish an HTML file, get a readable link back.</p>
     <pre><code>curl -X POST \(baseURL)/pages \\
       -H "Authorization: Bearer $STELE_UPLOAD_TOKEN" \\
       -H "Content-Type: text/html" \\
@@ -360,6 +422,19 @@ func landingPage(baseURL: String) -> String {
     <p>Returns a slug like <code>quiet-cedar-otter</code>, served at
     <code>\(baseURL)/quiet-cedar-otter</code>. Add <code>?slug=my-page</code> to choose
     your own.</p>
+    <div class="grid">
+    <div class="card"><h3><span class="badge">POST</span> /pages</h3>
+    <p>Publish a page and get a fresh slug back, or ask for one with
+    <code>?slug=</code>.</p></div>
+    <div class="card"><h3><span class="badge">PUT</span> /pages/:slug</h3>
+    <p>Replace the page already published at a slug. Never creates one.</p></div>
+    </div>
+    <div class="callout">
+    <p>Pages you publish can share this server's look. Link the stylesheet from your
+    <code>&lt;head&gt;</code>:
+    <code>&lt;link rel="stylesheet" href="\(Stylesheet.path)"&gt;</code> — plain HTML needs
+    no classes, and dark mode follows the reader's system setting.</p>
+    </div>
     </body></html>
     """
 }

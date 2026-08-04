@@ -76,7 +76,12 @@ asserted today only against the in-memory fake.
 - **Adding a route means registering its first path segment in `ServerRoute`
   (Server.swift) and adding it to `Slug.reserved`.** `buildRouter` builds its paths from
   `ServerRoute`, and a test asserts the reserved set covers `ServerRoute.names`, so a
-  route added any other way escapes the reservation check.
+  route added any other way escapes the reservation check. A route whose first segment
+  has only deeper children (`/assets/stele.css`) still needs its own bare-segment `GET`
+  returning the uniform 404: the trie matches the literal `assets` node and does not
+  backtrack to `/:slug`, so `GET /assets` would otherwise answer with the framework's own
+  plain-text 404 — the one distinguishable response on the public read surface. That path
+  belongs in `NotFoundTests.all404sAreIdentical`, which is what makes the regression loud.
 - **`PageStore` is the only file that touches the database.** Keep it that way.
 - **`PageStore.migrations` is append-only.** Change the schema by adding the next
   version, never by editing a shipped one; `schema_migrations` is the record of what
@@ -104,6 +109,13 @@ Don't "fix" these without a reason; the README argues them out in full.
   distinguishing `400`/`404` errors, because that caller has nothing left to leak to.
 - **`STELE_UPLOAD_TOKEN` has no default.** A default would be a published credential; an
   absent one would silently open the upload endpoint.
+- **The shared stylesheet is a Swift string, not a SwiftPM resource.** It lives as a raw
+  literal in `Sources/SteleCore/Stylesheet.swift`. The Dockerfile's runtime stage copies
+  only the built executable, and SwiftPM emits a resource bundle as a *sibling directory*
+  of that executable which `--static-swift-stdlib` does not embed — so a `Bundle.module`
+  lookup would pass `swift test` on a dev machine and 500 in production, the worst
+  failure shape available. Moving the CSS to a top-level `Resources/` would also drop it
+  out of CI's `Sources/**` path filter.
 
 ## Deployment
 
