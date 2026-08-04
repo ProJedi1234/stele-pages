@@ -22,6 +22,11 @@ public enum ConfigurationError: Error, CustomStringConvertible {
 /// change, and a bad value fails the process immediately with a message that names
 /// the variable rather than surfacing as a connection error ten minutes in.
 public struct Configuration: Sendable {
+    /// The `maxPageBytes` an unset `STELE_MAX_PAGE_BYTES` resolves to. Named so the tests
+    /// that render the skill document with "the default" share this value instead of
+    /// retyping it, where a bump here would strand their copies.
+    public static let defaultMaxPageBytes = 1024 * 1024
+
     public var host: String
     public var port: Int
     /// Origin used to build the URL returned by `POST /pages`. Purely cosmetic — the
@@ -86,7 +91,7 @@ public struct Configuration: Sendable {
             }
             self.maxPageBytes = parsed
         } else {
-            self.maxPageBytes = 1024 * 1024
+            self.maxPageBytes = Self.defaultMaxPageBytes
         }
 
         if let rawWords = value("STELE_SLUG_WORDS") {

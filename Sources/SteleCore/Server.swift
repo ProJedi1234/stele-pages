@@ -49,8 +49,13 @@ public enum ServerRoute {
     /// not a first segment — nor a slug anyone could claim — so putting it here would make
     /// this set mean two different things at once.
     public static let assets = "assets"
+    /// The publish skill an agent downloads to learn how to write for this server.
+    /// Named here before any handler exists: the name only stops being claimable as a
+    /// slug once it is in this set and in `Slug.reserved`, and a page that claimed
+    /// `skill` before the route landed would be shadowed the day it did.
+    public static let skill = "skill"
 
-    public static let names: Set<String> = [healthz, pages, assets]
+    public static let names: Set<String> = [healthz, pages, assets, skill]
 }
 
 /// Wires up the router. Split out from `buildApplication` so tests can exercise routes
@@ -147,24 +152,31 @@ public func buildRouter(
     // the store: it is code, and it changes by deploy, not by upload. Unauthenticated like
     // every other read — it is linked as a subresource by every published page.
     router.get(RouterPath(Stylesheet.path)) { request, _ -> Response in
-        if ifNoneMatchHits(request.headers[.ifNoneMatch], etag: Stylesheet.etag) {
-            return Response(
-                status: .notModified,
-                headers: [.eTag: Stylesheet.etag, .cacheControl: "no-cache"]
-            )
-        }
+        shippedDocumentResponse(
+            ifNoneMatch: request.headers[.ifNoneMatch],
+            etag: Stylesheet.etag,
+            contentType: Stylesheet.contentType,
+            body: Stylesheet.css
+        )
+    }
 
-        return Response(
-            status: .ok,
-            headers: [
-                .contentType: Stylesheet.contentType,
-                .eTag: Stylesheet.etag,
-                // Mutating in place is the feature — an edit restyles every page at once —
-                // so a cache must always come back and ask. The ETag makes that ask a
-                // bodyless round trip rather than a re-download.
-                .cacheControl: "no-cache",
-            ],
-            body: .init(byteBuffer: ByteBuffer(string: Stylesheet.css))
+    // Rendered once here rather than per request: it interpolates this deployment's own base
+    // URL and byte limit, so it is configuration-shaped rather than a compile-time constant —
+    // but it is fixed for the life of the process, and so is its ETag. Unauthenticated for the
+    // same reason every other read is, and because an agent bootstrapping from this document
+    // has no token yet: the token is for writing.
+    //
+    // No bare-segment 404 stub, unlike `/pages` and `/assets`: `/skill` is a terminal node
+    // that carries its own value, so the trie resolves it. It therefore must NOT appear in
+    // `NotFoundTests.all404sAreIdentical`.
+    let skill = PublishSkill(baseURL: configuration.baseURL, maxPageBytes: configuration.maxPageBytes)
+
+    router.get(RouterPath(PublishSkill.path)) { request, _ -> Response in
+        shippedDocumentResponse(
+            ifNoneMatch: request.headers[.ifNoneMatch],
+            etag: skill.etag,
+            contentType: PublishSkill.contentType,
+            body: skill.markdown
         )
     }
 
@@ -206,6 +218,30 @@ public func buildRouter(
     }
 
     return router
+}
+
+/// The one response shape for documents that ship with the binary — today the stylesheet
+/// and the publish skill. Both mutate in place across deploys (which is the feature: an
+/// edit reaches every page, or every agent, at once), so a cache must always come back and
+/// ask; `no-cache` forces that, and the strong ETag makes the ask a bodyless round trip
+/// rather than a re-download. No `nosniff`, because these bytes are ours — that header is
+/// this repo's marker for bodies we did *not* write. Shared so a conditional-GET fix (a
+/// 304 header, `Vary`, HEAD) cannot land on one route and silently miss the other.
+private func shippedDocumentResponse(
+    ifNoneMatch: String?,
+    etag: String,
+    contentType: String,
+    body: String
+) -> Response {
+    if ifNoneMatchHits(ifNoneMatch, etag: etag) {
+        return Response(status: .notModified, headers: [.eTag: etag, .cacheControl: "no-cache"])
+    }
+
+    return Response(
+        status: .ok,
+        headers: [.contentType: contentType, .eTag: etag, .cacheControl: "no-cache"],
+        body: .init(byteBuffer: ByteBuffer(string: body))
+    )
 }
 
 /// Whether an `If-None-Match` header says the caller already holds `etag`.
@@ -434,6 +470,9 @@ func landingPage(baseURL: String) -> String {
     <code>&lt;head&gt;</code>:
     <code>&lt;link rel="stylesheet" href="\(Stylesheet.path)"&gt;</code> — plain HTML needs
     no classes, and dark mode follows the reader's system setting.</p>
+    <p>Publishing from an agent? <a href="\(PublishSkill.path)"><code>\(PublishSkill.path)</code></a>
+    is a skill document that teaches the whole contract — the page rules, the component
+    classes and the curl above — served by this server, so it cannot drift from it.</p>
     </div>
     </body></html>
     """

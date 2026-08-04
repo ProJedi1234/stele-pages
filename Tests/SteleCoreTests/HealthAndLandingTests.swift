@@ -32,4 +32,18 @@ struct HealthAndLandingTests {
             }
         }
     }
+
+    /// The skill is only discoverable if something points at it — a human reading the
+    /// landing page is how an agent gets told to fetch it in the first place. The href is
+    /// written longhand rather than interpolated from `PublishSkill.path`, for the same
+    /// reason `StylesheetTests` writes its URI out: a rename is a breaking change to a
+    /// published address and has to be visible here as one.
+    @Test func landingPageLinksTheSkill() async throws {
+        try await TestFixture.makeApp().test(.router) { client in
+            try await client.execute(uri: "/", method: .get) { response in
+                #expect(response.status == .ok)
+                #expect(String(buffer: response.body).contains("href=\"/skill\""))
+            }
+        }
+    }
 }

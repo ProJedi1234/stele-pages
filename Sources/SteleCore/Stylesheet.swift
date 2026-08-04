@@ -28,6 +28,13 @@ enum Stylesheet {
     /// a class renamed in the CSS cannot quietly leave this list — or the skill — lying.
     static let componentClasses = ["card", "grid", "scroll", "callout", "badge", "muted", "narrow", "wide"]
 
+    /// The tone modifiers `.callout` and `.badge` accept as a second class. Deliberately not
+    /// part of `componentClasses` — the built-in pages use only the bare forms, and the drift
+    /// test that enforces that reads `componentClasses` — but the publish skill teaches the
+    /// tones, so they need a source of truth of their own rather than a hard-coded list in
+    /// two test suites.
+    static let toneClasses = ["note", "ok", "warn", "danger"]
+
     /// A raw literal because CSS legitimately contains backslashes (`content: "\201C"`,
     /// escaped selectors) and this string is fully static: raw removes an entire class of
     /// escaping bug at zero cost. Interpolation, if it were ever needed, is `\#(...)`.
@@ -364,17 +371,6 @@ extension Stylesheet {
     /// and scanner traffic against the 404 surface is explicitly in this repo's threat
     /// model, so an unvalidated `no-cache` would turn every miss into a multi-KB download.
     ///
-    /// FNV-1a rather than `String.hashValue`: Swift seeds its hasher per process, so a
-    /// `hashValue` ETag would change on every restart and differ between instances behind
-    /// the same address — validating nothing. Computed once, lazily, over a compile-time
-    /// constant.
-    static let etag: String = {
-        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
-        for byte in css.utf8 {
-            hash ^= UInt64(byte)
-            hash = hash &* 0x0000_0100_0000_01b3
-        }
-        // Quoted, per RFC 9110: an unquoted entity-tag is not a valid one.
-        return "\"\(String(hash, radix: 16))\""
-    }()
+    /// Computed once, lazily, over a compile-time constant.
+    static let etag: String = strongETag(over: css.utf8)
 }

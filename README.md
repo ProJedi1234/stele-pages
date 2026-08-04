@@ -132,6 +132,7 @@ happens to run the app, which is rarely the machine you chose for durable storag
 | `GET /healthz`     | none   | `ok`                                                   |
 | `GET /:slug`       | none   | The stored page, or a 404 page                         |
 | `GET /assets/stele.css` | none | The shared stylesheet (see "A shared look")         |
+| `GET /skill`       | none   | The publish skill, as Markdown (see "Teaching an agent to publish") |
 | `POST /pages`      | bearer | Stores the request body, returns `{slug, url}` as `201` |
 | `PUT /pages/:slug` | bearer | Replaces a stored page's body and content type, returns `{slug, url}` as `200` |
 
@@ -218,6 +219,49 @@ itself answers the same uniform 404 as every other miss, so a scanner that finds
 only what this README already told it. A deeper miss like `/assets/nope.css` gets the
 framework's own 404 rather than the uniform page — a two-segment path can never be a slug,
 so it has no namespace to leak.
+
+### Teaching an agent to publish
+
+`GET /skill` returns a SKILL.md — `text/markdown; charset=utf-8` — that teaches an agent
+the whole publish contract: how to write the one self-contained HTML file, the component
+classes above, the `curl` that publishes it, and what each failure status means. There is
+no MCP server and no CLI to install; the skill wraps `curl`, which every agent already
+has. Bootstrapping one anywhere is a single instruction:
+
+```sh
+curl https://stele.example.com/skill
+```
+
+The document is served by the deployment it documents, and is rendered from that
+deployment's configuration rather than being a compile-time constant. Every value with exactly one constant behind
+it — the base URL, `STELE_MAX_PAGE_BYTES`, the stylesheet path, the slug length bounds,
+the reserved names, the accepted content types — is interpolated from that constant, so
+the `curl` an agent copies out is already pointed at the right host with the right limits.
+That removes the opportunity for drift rather than detecting it afterwards: there is no
+second copy of those values to fall out of step. What is left is prose, and the prose is
+pinned by tests to the code it describes — the component table against the stylesheet's
+own class list, the content types against the allowlist, the example slugs against
+`Slug(custom:)` itself.
+
+Like the stylesheet, it ships with the app rather than living in Postgres: it changes by
+deploy, not by upload, and a database copy could serve one version's documentation from a
+deployment running another. It is Markdown, not a styled page, because the reader is an
+agent.
+
+**There is no versioned skill path, and it is the same tradeoff as the stylesheet.**
+`/skill` mutates with the deployment, so an agent that cached the document yesterday may
+publish against a contract that has since moved — and, symmetrically, a fix to the
+instructions reaches every agent on its next fetch, which is the point. It is served
+`no-cache` with a strong ETag, so a client revalidates rather than pinning a stale copy;
+that makes the window small, not zero. Fetch the skill at the start of a publishing task,
+not once at setup.
+
+Serving it publicly leaks nothing: the document describes the routes this README already
+describes, `skill` is a reserved name that no page can claim, and writes still need the
+bearer token — an agent that reads the skill without one learns how to publish and cannot.
+Unlike `/pages` and `/assets`, `/skill` needs no bare-segment 404 stub, because it is a
+terminal node that carries its own value; a deeper miss like `/skill/nope` gets the
+framework's own 404, which no single-segment slug could ever have reached.
 
 ## Configuration
 

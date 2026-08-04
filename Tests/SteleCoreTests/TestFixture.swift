@@ -43,6 +43,37 @@ enum TestFixture {
         ))
     }
 
+    /// Every whitespace-separated name inside a `class="…"` attribute of `html`.
+    ///
+    /// Hand-scanned rather than regex-matched so the tests pull in nothing beyond the
+    /// stdlib, and deliberately naive: the inputs are the built-in pages and the snippets in
+    /// the publish skill, and a parser clever enough to handle arbitrary HTML would be the
+    /// thing under test instead. The scan stops at a line break as well as at the closing
+    /// quote — an attribute value never spans one, so this costs nothing on real markup,
+    /// and it keeps a `class="` in the skill's *prose* with no closing quote on its line
+    /// from silently swallowing the rest of the document into garbage names. Lives here
+    /// rather than in one suite because two of them now need it, and two copies of a drift
+    /// detector is its own drift.
+    static func classNames(in html: String) -> [String] {
+        let attribute = "class=\""
+        var names: [String] = []
+        var index = html.startIndex
+        while index < html.endIndex {
+            guard html[index...].hasPrefix(attribute) else {
+                index = html.index(after: index)
+                continue
+            }
+            let start = html.index(index, offsetBy: attribute.count)
+            var end = start
+            while end < html.endIndex, html[end] != "\"", html[end] != "\n" {
+                end = html.index(after: end)
+            }
+            names.append(contentsOf: html[start..<end].split(separator: " ").map(String.init))
+            index = end
+        }
+        return names
+    }
+
     /// Pulls the message out of Hummingbird's JSON error envelope.
     ///
     /// Read as JSON rather than substring-matched on the raw body: the encoder escapes
