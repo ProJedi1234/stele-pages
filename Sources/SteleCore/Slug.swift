@@ -40,7 +40,7 @@ public struct Slug: Hashable, Sendable, CustomStringConvertible {
     /// A custom slug matching one of these would be permanently unreachable, so it's
     /// rejected at write time instead of silently 404ing later.
     public static let reserved: Set<String> = [
-        "pages", "page", "healthz", "health", "status", "metrics",
+        "pages", "page", "healthz", "health", "skill", "status", "metrics",
         "api", "admin", "static", "assets", "robots", "favicon",
         "index", "about", "login", "logout", "new", "edit", "delete",
     ]

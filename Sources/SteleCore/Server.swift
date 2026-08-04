@@ -49,8 +49,13 @@ public enum ServerRoute {
     /// not a first segment — nor a slug anyone could claim — so putting it here would make
     /// this set mean two different things at once.
     public static let assets = "assets"
+    /// The publish skill an agent downloads to learn how to write for this server.
+    /// Named here before any handler exists: the name only stops being claimable as a
+    /// slug once it is in this set and in `Slug.reserved`, and a page that claimed
+    /// `skill` before the route landed would be shadowed the day it did.
+    public static let skill = "skill"
 
-    public static let names: Set<String> = [healthz, pages, assets]
+    public static let names: Set<String> = [healthz, pages, assets, skill]
 }
 
 /// Wires up the router. Split out from `buildApplication` so tests can exercise routes
