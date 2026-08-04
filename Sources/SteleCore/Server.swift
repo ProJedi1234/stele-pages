@@ -152,24 +152,11 @@ public func buildRouter(
     // the store: it is code, and it changes by deploy, not by upload. Unauthenticated like
     // every other read — it is linked as a subresource by every published page.
     router.get(RouterPath(Stylesheet.path)) { request, _ -> Response in
-        if ifNoneMatchHits(request.headers[.ifNoneMatch], etag: Stylesheet.etag) {
-            return Response(
-                status: .notModified,
-                headers: [.eTag: Stylesheet.etag, .cacheControl: "no-cache"]
-            )
-        }
-
-        return Response(
-            status: .ok,
-            headers: [
-                .contentType: Stylesheet.contentType,
-                .eTag: Stylesheet.etag,
-                // Mutating in place is the feature — an edit restyles every page at once —
-                // so a cache must always come back and ask. The ETag makes that ask a
-                // bodyless round trip rather than a re-download.
-                .cacheControl: "no-cache",
-            ],
-            body: .init(byteBuffer: ByteBuffer(string: Stylesheet.css))
+        shippedDocumentResponse(
+            ifNoneMatch: request.headers[.ifNoneMatch],
+            etag: Stylesheet.etag,
+            contentType: Stylesheet.contentType,
+            body: Stylesheet.css
         )
     }
 
@@ -185,24 +172,11 @@ public func buildRouter(
     let skill = PublishSkill(baseURL: configuration.baseURL, maxPageBytes: configuration.maxPageBytes)
 
     router.get(RouterPath(PublishSkill.path)) { request, _ -> Response in
-        if ifNoneMatchHits(request.headers[.ifNoneMatch], etag: skill.etag) {
-            return Response(
-                status: .notModified,
-                headers: [.eTag: skill.etag, .cacheControl: "no-cache"]
-            )
-        }
-
-        return Response(
-            status: .ok,
-            headers: [
-                .contentType: PublishSkill.contentType,
-                .eTag: skill.etag,
-                // Same bargain as the stylesheet: the document ships with the deployment and
-                // changes with it, so a cache must always come back and ask — and the ETag
-                // makes that ask a bodyless round trip rather than a re-download.
-                .cacheControl: "no-cache",
-            ],
-            body: .init(byteBuffer: ByteBuffer(string: skill.markdown))
+        shippedDocumentResponse(
+            ifNoneMatch: request.headers[.ifNoneMatch],
+            etag: skill.etag,
+            contentType: PublishSkill.contentType,
+            body: skill.markdown
         )
     }
 
@@ -244,6 +218,30 @@ public func buildRouter(
     }
 
     return router
+}
+
+/// The one response shape for documents that ship with the binary — today the stylesheet
+/// and the publish skill. Both mutate in place across deploys (which is the feature: an
+/// edit reaches every page, or every agent, at once), so a cache must always come back and
+/// ask; `no-cache` forces that, and the strong ETag makes the ask a bodyless round trip
+/// rather than a re-download. No `nosniff`, because these bytes are ours — that header is
+/// this repo's marker for bodies we did *not* write. Shared so a conditional-GET fix (a
+/// 304 header, `Vary`, HEAD) cannot land on one route and silently miss the other.
+private func shippedDocumentResponse(
+    ifNoneMatch: String?,
+    etag: String,
+    contentType: String,
+    body: String
+) -> Response {
+    if ifNoneMatchHits(ifNoneMatch, etag: etag) {
+        return Response(status: .notModified, headers: [.eTag: etag, .cacheControl: "no-cache"])
+    }
+
+    return Response(
+        status: .ok,
+        headers: [.contentType: contentType, .eTag: etag, .cacheControl: "no-cache"],
+        body: .init(byteBuffer: ByteBuffer(string: body))
+    )
 }
 
 /// Whether an `If-None-Match` header says the caller already holds `etag`.

@@ -50,7 +50,11 @@ struct PublishSkill: Sendable {
     ///
     /// Every value with exactly one constant behind it is interpolated rather than typed
     /// out. That is a stronger accuracy mechanism than any test, because it removes the
-    /// opportunity for drift instead of detecting it after the fact.
+    /// opportunity for drift instead of detecting it after the fact. The one deliberate
+    /// exception is the component-class table: each row carries prose no list of names
+    /// could generate, so the names are hand-typed and held set-equal to
+    /// `Stylesheet.componentClasses` — in both directions — by
+    /// `PublishSkillTests.componentTableMatchesTheStylesheet`.
     private static func render(baseURL: String, maxPageBytes: Int) -> String {
         let reserved = Slug.reserved.sorted().map { "`\($0)`" }.joined(separator: ", ")
         let contentTypes = PageContentType.allowed.keys.sorted()
@@ -90,7 +94,7 @@ struct PublishSkill: Sendable {
         - **`<meta charset="utf-8">` in the `<head>`.** Pages are served as UTF-8; a page
           that does not declare it renders mojibake in some browsers.
         - **Valid UTF-8, non-empty, no NUL bytes.** Otherwise the upload is a `400`.
-        - **Under \#(maxPageBytes) bytes.** Otherwise it is a `413`. Inline images blow past
+        - **At most \#(maxPageBytes) bytes.** Over that is a `413`. Inline images blow past
           that fast — prefer an absolute `https://` image URL to a large `data:` URI.
         - **The only external subresource that is safe is this server's own stylesheet.**
           Everything else — your CSS, your JavaScript, your SVG — goes inline.
@@ -206,8 +210,9 @@ struct PublishSkill: Sendable {
 
         ## Pitfalls
 
-        - **Use `--data-binary @file`, not `-d @file`.** `-d` strips newlines and sends
-          `application/x-www-form-urlencoded`, which is a `415`.
+        - **Use `--data-binary @file`, not `-d @file`.** `-d` strips the file's newlines,
+          and with the `Content-Type` header above still set the upload *succeeds*: a
+          `201` whose page has been silently flattened onto one line. Nothing tells you.
         - **Send `Content-Type: text/html` explicitly.** It is the POST default, but a
           wrapper that helpfully sets `application/json` earns a `415`.
         - The accepted types are exactly these, and anything else is a `415`:
@@ -236,7 +241,7 @@ struct PublishSkill: Sendable {
         | Route | Auth | Behaviour |
         | --- | --- | --- |
         | `GET /` | none | Usage page |
-        | `GET /healthz` | none | `ok` |
+        | `GET /\#(ServerRoute.healthz)` | none | `ok` |
         | `GET /:slug` | none | The stored page, or a 404 page |
         | `GET \#(Stylesheet.path)` | none | The shared stylesheet |
         | `GET \#(PublishSkill.path)` | none | This document |

@@ -95,12 +95,16 @@ asserted today only against the in-memory fake.
   a real endpoint, not whether it has children.
 - **A generated document that quotes the code belongs in the same module as the code, and
   quotes it by interpolation.** `PublishSkill` renders the SKILL.md served at `GET /skill`
-  from `Slug.reserved`, `PageContentType.allowed`, `Stylesheet.componentClasses`,
-  `Stylesheet.toneClasses`, the configured base URL and the byte limit. Never retype one
-  of those values into the prose: interpolation removes the chance of drift, where a test
-  can only notice it later. For the prose that has no constant behind it, `PublishSkillTests`
-  pins what it can — extend those tests rather than adding a second source of truth, and
-  change the document in the same commit that changes the contract it describes.
+  from `Slug.reserved`, `PageContentType.allowed`, `Stylesheet.toneClasses`, the
+  configured base URL and the byte limit. Never retype one of those values into the
+  prose: interpolation removes the chance of drift, where a test can only notice it
+  later. The one deliberate exception is the component-class table — each row carries
+  hand-written prose no constant could generate, so its class names are typed out and
+  `PublishSkillTests.componentTableMatchesTheStylesheet` holds them set-equal to
+  `Stylesheet.componentClasses` in both directions. For the rest of the prose that has no
+  constant behind it, `PublishSkillTests` pins what it can — extend those tests rather
+  than adding a second source of truth, and change the document in the same commit that
+  changes the contract it describes.
 - **`PageStore` is the only file that touches the database.** Keep it that way.
 - **`PageStore.migrations` is append-only.** Change the schema by adding the next
   version, never by editing a shipped one; `schema_migrations` is the record of what

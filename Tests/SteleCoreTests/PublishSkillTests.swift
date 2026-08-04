@@ -10,7 +10,10 @@ import Testing
 /// configuration default, which is what `TestFixture.configuration` leaves unset — so this
 /// value and the one the router serves are the same rendering, not two that resemble each
 /// other.
-private let skillDocument = PublishSkill(baseURL: TestFixture.baseURL, maxPageBytes: 1024 * 1024)
+private let skillDocument = PublishSkill(
+    baseURL: TestFixture.baseURL,
+    maxPageBytes: Configuration.defaultMaxPageBytes
+)
 
 /// The publish skill at `GET /skill`.
 ///
@@ -35,6 +38,19 @@ struct PublishSkillTests {
             .enumerated()
             .filter { $0.offset.isMultiple(of: 2) == false }
             .map { String($0.element) }
+    }
+
+    /// The first non-blank line after the one containing `anchor`: how the suite finds a
+    /// list the document renders on a line of its own. Anchored to the sentence that
+    /// introduces the list — a structural relationship — rather than to a token from the
+    /// list itself, which is a coincidence of today's prose that a new mention anywhere
+    /// earlier in the document would silently re-point.
+    static func line(after anchor: String, in markdown: String) throws -> Substring {
+        let lines = markdown.split(separator: "\n", omittingEmptySubsequences: false)
+        let index = try #require(lines.firstIndex { $0.contains(anchor) }, "\(anchor)")
+        return try #require(
+            lines[(index + 1)...].first { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        )
     }
 
     // MARK: - The wire contract
@@ -173,10 +189,14 @@ struct PublishSkillTests {
     /// from the stylesheet — would hand a cache the wrong host and never revalidate it away.
     /// Every other assertion in this suite passes with a copy-pasted ETag; this one does not.
     @Test func etagIsBoundToTheRendering() {
-        let again = PublishSkill(baseURL: TestFixture.baseURL, maxPageBytes: 1024 * 1024)
+        let again = PublishSkill(
+            baseURL: TestFixture.baseURL, maxPageBytes: Configuration.defaultMaxPageBytes
+        )
         #expect(again.etag == skillDocument.etag)
 
-        let elsewhere = PublishSkill(baseURL: "https://other.example", maxPageBytes: 1024 * 1024)
+        let elsewhere = PublishSkill(
+            baseURL: "https://other.example", maxPageBytes: Configuration.defaultMaxPageBytes
+        )
         #expect(elsewhere.etag != skillDocument.etag)
 
         #expect(skillDocument.etag != Stylesheet.etag)
@@ -226,33 +246,26 @@ struct PublishSkillTests {
     /// the other half: this asserts the document teaches them, that asserts the sheet has
     /// them.
     ///
-    /// Backticked, and then set-equal against the one line that carries the whole list, for
-    /// the same reason `listsEveryAllowedContentType` is: the tone names are ordinary English
+    /// Backticked, and set-equal against the one line that carries the whole list, for the
+    /// same reason `listsEveryAllowedContentType` is: the tone names are ordinary English
     /// words, so a bare `contains` for `note`, `ok` or `warn` passes on unrelated prose
-    /// elsewhere in the document — deleting the Tones section outright would have left only
-    /// `danger` failing. Set equality also catches the reverse direction, a tone dropped from
-    /// the sheet but still taught here.
-    @Test(arguments: Stylesheet.toneClasses)
-    func documentsEveryToneClass(name: String) throws {
-        #expect(skillDocument.markdown.contains("`\(name)`"), "\(name)")
-
-        let line = try #require(
-            skillDocument.markdown.split(separator: "\n").first { $0.contains("`danger`") }
-        )
+    /// elsewhere in the document, and set equality is also what catches the reverse
+    /// direction — a tone dropped from the sheet but still taught here. One unparameterised
+    /// test, not one per tone: the assertion reads the whole list at once, so per-tone
+    /// arguments would just re-run it identically and report one drift as four failures.
+    @Test func documentsEveryToneClass() throws {
+        let line = try Self.line(after: "one of exactly these:", in: skillDocument.markdown)
         #expect(Set(Self.backtickedTokens(in: line)) == Set(Stylesheet.toneClasses))
     }
 
     /// An agent that sends a type the server rejects gets a `415` with no idea why, so the
     /// list has to be exact in both directions — a type missing from the document is a
-    /// capability lost, and one listed but no longer accepted is a guaranteed failed publish.
-    @Test(arguments: PageContentType.allowed.keys.sorted())
-    func listsEveryAllowedContentType(type: String) throws {
-        #expect(skillDocument.markdown.contains(type), "\(type)")
-
-        // The one line that carries the whole list, identified by the type least likely to
-        // appear in a curl example. Set equality over it catches the reverse direction.
-        let line = try #require(
-            skillDocument.markdown.split(separator: "\n").first { $0.contains("text/plain") }
+    /// capability lost, and one listed but no longer accepted is a guaranteed failed
+    /// publish. Set equality over the one line that carries the whole list checks both at
+    /// once, which is also why this is one test rather than one per type.
+    @Test func listsEveryAllowedContentType() throws {
+        let line = try Self.line(
+            after: "accepted types are exactly these", in: skillDocument.markdown
         )
         #expect(Set(Self.backtickedTokens(in: line)) == Set(PageContentType.allowed.keys))
     }
@@ -275,6 +288,9 @@ struct PublishSkillTests {
         #expect(skillDocument.markdown.contains("\(TestFixture.baseURL)/\(ServerRoute.pages)"))
         #expect(skillDocument.markdown.contains("--data-binary"))
         #expect(!skillDocument.markdown.contains("localhost"))
+        // The default an unset `STELE_BASE_URL` resolves to — the placeholder most likely
+        // to actually ship, so its absence is the half of this test that earns its keep.
+        #expect(!skillDocument.markdown.contains("127.0.0.1"))
         #expect(!skillDocument.markdown.contains("example.com"))
     }
 
@@ -285,7 +301,7 @@ struct PublishSkillTests {
         let unusual = PublishSkill(baseURL: TestFixture.baseURL, maxPageBytes: 424_242)
         #expect(unusual.markdown.contains("424242"))
         #expect(!skillDocument.markdown.contains("424242"))
-        #expect(skillDocument.markdown.contains("\(1024 * 1024)"))
+        #expect(skillDocument.markdown.contains("\(Configuration.defaultMaxPageBytes)"))
     }
 
     /// An agent choosing its own slug needs the actual bounds, not "short". Interpolated from
