@@ -134,9 +134,14 @@ struct StylesheetTests {
     /// `componentClasses` is what issue #4's publish skill will hand an agent as the
     /// vocabulary to write against, so a name in it that the sheet does not define would
     /// teach the agent to emit markup that renders unstyled.
+    ///
+    /// The opening brace is load-bearing. Matching a bare `.card` also matches the `/* .card
+    /// — … */` comment above the rule, so deleting the rule and keeping its comment left
+    /// both this test and `stylesheetDocumentsItsComponents` green — the pair passing while
+    /// the class no longer exists, which is the one thing they are here to prevent.
     @Test(arguments: Stylesheet.componentClasses)
     func stylesheetDefinesEveryDocumentedClass(name: String) {
-        #expect(Stylesheet.css.contains(".\(name)"), "\(name)")
+        #expect(Stylesheet.css.contains(".\(name) {"), "\(name)")
     }
 
     /// Each component carrying its own comment is an acceptance criterion of the issue, and
@@ -283,6 +288,35 @@ struct StylesheetTests {
             ) { response in
                 #expect(response.status == .ok)
                 #expect(String(buffer: response.body) == Stylesheet.css)
+            }
+        }
+    }
+
+    /// `If-None-Match` is a *list*, or `*`, compared weakly — RFC 9110 §13.1.2. Exact string
+    /// equality passed the test above and still broke revalidation in front of a proxy:
+    /// nginx's gzip module rewrites a strong `ETag` to `W/"…"`, so the browser sends back a
+    /// weak tag, nothing matches, and the sheet is re-sent in full on every conditional
+    /// request. The failure is silent from both ends — a 200 is always a legal answer — so
+    /// the forms are pinned here rather than left to be noticed in a bandwidth graph.
+    @Test(arguments: [
+        ("W/\(Stylesheet.etag)", true),          // weakened by an intermediary
+        ("\"other\", \(Stylesheet.etag)", true), // a list holding ours
+        ("*", true),                             // any representation, and we have one
+        ("\"other\"", false),
+        ("W/\"other\"", false),
+    ])
+    func revalidationHandlesEveryIfNoneMatchForm(header: String, expectsNotModified: Bool) async throws {
+        try await TestFixture.makeApp().test(.router) { client in
+            try await client.execute(
+                uri: Self.uri,
+                method: .get,
+                headers: [.ifNoneMatch: header]
+            ) { response in
+                #expect(response.status == (expectsNotModified ? .notModified : .ok), "\(header)")
+                #expect(
+                    response.body.readableBytes == (expectsNotModified ? 0 : Stylesheet.css.utf8.count),
+                    "\(header)"
+                )
             }
         }
     }

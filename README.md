@@ -213,9 +213,11 @@ one that inlines overrides fitted to today's rules. That is the deal, accepted k
 until it first bites.
 
 Serving something at a fixed path costs nothing on the enumeration front: `/assets` is a
-documented, server-owned prefix outside the single-segment slug namespace, and it answers
-the same uniform 404 as every other miss, so a scanner that finds it learns only what this
-README already told it.
+documented, server-owned prefix outside the single-segment slug namespace, and `GET /assets`
+itself answers the same uniform 404 as every other miss, so a scanner that finds it learns
+only what this README already told it. A deeper miss like `/assets/nope.css` gets the
+framework's own 404 rather than the uniform page — a two-segment path can never be a slug,
+so it has no namespace to leak.
 
 ## Configuration
 

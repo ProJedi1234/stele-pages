@@ -78,11 +78,21 @@ enum Stylesheet {
       --stele-border: #e7e5e4;
       --stele-accent: #0f766e;
 
+      /* A step away from --stele-surface rather than equal to it, which is what `code`
+         used to be. A chip is drawn on whatever it sits on, and .card, thead, striped rows
+         and the .callout fallback are all --stele-surface — so sharing that value made
+         inline code vanish inside every one of them. */
+      --stele-code-bg: #e7e5e4;
+
       /* One tone vocabulary shared by .callout and .badge, so a status reads the same
-         whichever shape it is wearing. */
-      --stele-tone-note: #2563eb;
-      --stele-tone-ok: #15803d;
-      --stele-tone-warn: #b45309;
+         whichever shape it is wearing.
+         These are darker than the obvious mid-weight choice because .badge paints them as
+         12px/600 *text* on a tint of themselves, which is the worst case in the file: it
+         needs 4.5:1 against that tint, not against the canvas. The lighter shades cleared
+         4.8:1 on the canvas and only ~4.1:1 where they are actually used. */
+      --stele-tone-note: #1d4ed8;
+      --stele-tone-ok: #166534;
+      --stele-tone-warn: #92400e;
       --stele-tone-danger: #b91c1c;
 
       --stele-measure: 40rem;
@@ -101,6 +111,7 @@ enum Stylesheet {
         --stele-surface: #292524;
         --stele-border: #44403c;
         --stele-accent: #5eead4;
+        --stele-code-bg: #44403c;
 
         --stele-tone-note: #93c5fd;
         --stele-tone-ok: #86efac;
@@ -144,7 +155,7 @@ enum Stylesheet {
 
     code {
       font-size: .9em;
-      background: var(--stele-surface);
+      background: var(--stele-code-bg);
       padding: .15em .4em;
       border-radius: .25rem;
     }

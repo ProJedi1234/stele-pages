@@ -147,9 +147,7 @@ public func buildRouter(
     // the store: it is code, and it changes by deploy, not by upload. Unauthenticated like
     // every other read — it is linked as a subresource by every published page.
     router.get(RouterPath(Stylesheet.path)) { request, _ -> Response in
-        // Exact match only: we emit one strong ETag, so the list forms and `*` that
-        // If-None-Match permits cannot match anything else we would ever send.
-        if request.headers[.ifNoneMatch] == Stylesheet.etag {
+        if ifNoneMatchHits(request.headers[.ifNoneMatch], etag: Stylesheet.etag) {
             return Response(
                 status: .notModified,
                 headers: [.eTag: Stylesheet.etag, .cacheControl: "no-cache"]
@@ -208,6 +206,28 @@ public func buildRouter(
     }
 
     return router
+}
+
+/// Whether an `If-None-Match` header says the caller already holds `etag`.
+///
+/// Not string equality, which is what this started as. RFC 9110 §13.1.2 defines the header
+/// as a *list* of entity-tags or `*`, compared with the **weak** function — `W/"abc"` and
+/// `"abc"` match. Exact equality looks safe when the server only ever emits one strong tag,
+/// but it fails the moment anything sits in front: nginx's gzip module rewrites a strong
+/// `ETag` into `W/"…"`, so the browser revalidates with a weak tag, nothing matches, and
+/// every conditional request re-sends the whole sheet — precisely the download the ETag was
+/// added to avoid, and invisible from both ends because a 200 is still a correct answer.
+private func ifNoneMatchHits(_ rawHeader: String?, etag: String) -> Bool {
+    guard let rawHeader else { return false }
+    let header = rawHeader.trimmingCharacters(in: .whitespaces)
+    // `*` means "any current representation", and serving this route means we have one.
+    if header == "*" { return true }
+    return header.split(separator: ",").contains { candidate in
+        let tag = candidate.trimmingCharacters(in: .whitespaces)
+        // Weak comparison: the weakness prefix is stripped before the opaque tags are
+        // compared. Only the candidate can carry one — ours is always strong.
+        return tag == etag || (tag.hasPrefix("W/") && String(tag.dropFirst(2)) == etag)
+    }
 }
 
 /// Runs a raw path or query slug through the `Slug(custom:)` chokepoint, reporting a
