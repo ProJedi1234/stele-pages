@@ -364,17 +364,6 @@ extension Stylesheet {
     /// and scanner traffic against the 404 surface is explicitly in this repo's threat
     /// model, so an unvalidated `no-cache` would turn every miss into a multi-KB download.
     ///
-    /// FNV-1a rather than `String.hashValue`: Swift seeds its hasher per process, so a
-    /// `hashValue` ETag would change on every restart and differ between instances behind
-    /// the same address — validating nothing. Computed once, lazily, over a compile-time
-    /// constant.
-    static let etag: String = {
-        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
-        for byte in css.utf8 {
-            hash ^= UInt64(byte)
-            hash = hash &* 0x0000_0100_0000_01b3
-        }
-        // Quoted, per RFC 9110: an unquoted entity-tag is not a valid one.
-        return "\"\(String(hash, radix: 16))\""
-    }()
+    /// Computed once, lazily, over a compile-time constant.
+    static let etag: String = strongETag(over: css.utf8)
 }
