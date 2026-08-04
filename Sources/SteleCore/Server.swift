@@ -264,7 +264,7 @@ private func pageResponse(
     return Response(status: status, headers: headers, body: .init(byteBuffer: body))
 }
 
-/// Builds the full application: Postgres client, schema bootstrap, and HTTP server.
+/// Builds the full application: Postgres client, schema migrations, and HTTP server.
 public func buildApplication(
     configuration: Configuration,
     logger: Logger
@@ -289,6 +289,10 @@ public func buildApplication(
     app.addServices(postgresClient)
     app.beforeServerStarts {
         logger.info("connecting to postgres", metadata: ["target": "\(configuration.databaseDescription)"])
+        // Migrating here, before the server binds, is what keeps "there is no migrate
+        // step" true. It also relies on the client's `run()` loop already executing so a
+        // connection can be leased — it is, because `addServices` above starts it
+        // concurrently, which is the same precondition every query in `PageStore` has.
         try await store.migrate()
         logger.info(
             "schema ready",

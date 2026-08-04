@@ -36,9 +36,11 @@ swift run stele
 ```
 
 `docker compose up -d` runs the full local stack at `localhost:8080`. There is no migrate
-step — `PageStore.migrate()` runs on boot and is idempotent.
+step — `PageStore.migrate()` applies the versioned migration list on boot. Applied
+versions live in `schema_migrations`, and the run is serialized by a Postgres advisory
+lock, so it is safe to run repeatedly and concurrently.
 
-## Testing gap
+## Testing
 
 Router behavior — routing, auth, status codes, the content-type allowlist, 404
 uniformity, and the headers pages are served with — is covered by HTTP-level tests. They
@@ -47,11 +49,24 @@ against an in-memory `PageStoring` fake, so no curl and no database are needed.
 
 The slug-retry and requested-slug policy is shared code in `PageStoring`'s extension, so
 the router tests exercise the real thing (the 503 test runs the retry loop to genuine
-exhaustion). The remaining gap is **`PageStore` itself** — the interpolated SQL, the
-atomicity of the `ON CONFLICT` insert, and the `UPDATE … RETURNING` existence check are
-never exercised against Postgres. Closing that
-needs a real database; if such a suite is added, gate it on an env var so a plain
-`swift test` stays hermetic.
+exhaustion).
+
+`PageStoreDatabaseTests` is the one suite that needs Postgres, gated on
+`STELE_TEST_DATABASE_URL` so a plain `swift test` stays hermetic:
+
+```sh
+docker compose up -d postgres
+STELE_TEST_DATABASE_URL=postgres://stele:stele_dev_password@localhost:5432/postgres swift test
+```
+
+It creates and drops a throwaway schema per test, and is `.serialized` because Postgres
+advisory locks are scoped to the database, which per-test schemas do not divide. It
+covers the migration runner: the schema version 1 produces, the upgrade path from a
+database created by the pre-migration bootstrap, skipping, ordering, exactly-once
+backfills, rollback of a failed migration, and the advisory lock. It deliberately does
+**not** cover `insert` / `fetch` / `update` against real Postgres — the `ON CONFLICT DO
+NOTHING` insert and the `UPDATE … RETURNING` existence check remain the standing gap,
+asserted today only against the in-memory fake.
 
 ## Conventions
 
@@ -63,6 +78,12 @@ needs a real database; if such a suite is added, gate it on an env var so a plai
   `ServerRoute`, and a test asserts the reserved set covers `ServerRoute.names`, so a
   route added any other way escapes the reservation check.
 - **`PageStore` is the only file that touches the database.** Keep it that way.
+- **`PageStore.migrations` is append-only.** Change the schema by adding the next
+  version, never by editing a shipped one; `schema_migrations` is the record of what
+  every live database has run, and an edited version diverges the databases that already
+  applied it from the ones that haven't with nothing to detect the difference. Version 1
+  is deliberately written to be a no-op on databases that predate the version table. A
+  migration runs exactly once, so data backfills belong there too.
 - **Routes take `some PageStoring`, not a concrete store.** That seam is what lets the
   HTTP tests run without Postgres. A conformer implements only `fetch` and the atomic
   storage primitives — insert-if-free and update-if-present; `create`'s retry and
