@@ -4,8 +4,19 @@ Publish an HTML file, get a readable link back. It expires in a week unless you 
 otherwise.
 
 ```
+$ stele publish index.html
+http://localhost:8080/radiant-surf-gecko
+```
+
+The `stele` CLI ([stele-cli](https://github.com/ProJedi1234/stele-cli)) holds the
+credential so that whoever runs it — usually an agent — never has to. Underneath it is an
+ordinary HTTP request, and curl still works if you are holding a token yourself — which is
+also the only way to ask for a lifetime other than the default today, since the CLI does
+not expose `?ttl=` yet:
+
+```
 $ curl -X POST "localhost:8080/pages?ttl=never" \
-    -H "Authorization: Bearer $STELE_UPLOAD_TOKEN" \
+    -H "Authorization: Bearer $TOKEN" \
     -H "Content-Type: text/html" \
     --data-binary @index.html
 {"slug":"radiant-surf-gecko","url":"http://localhost:8080/radiant-surf-gecko","expires":null}
@@ -140,9 +151,24 @@ happens to run the app, which is rarely the machine you chose for durable storag
 | `GET /:slug`       | none   | The stored page, or a 404 page if it's absent or expired |
 | `GET /assets/stele.css` | none | The shared stylesheet (see "A shared look")         |
 | `GET /skill`       | none   | The publish skill, as Markdown (see "Teaching an agent to publish") |
-| `POST /pages`      | bearer | Stores the request body, takes `?slug=` and `?ttl=`, returns `{slug, url, expires}` as `201` |
-| `PUT /pages/:slug` | bearer | Replaces a stored page's body and content type, returns `{slug, url, expires}` as `200` |
-| `DELETE /pages/:slug` | bearer | Removes a stored page and frees the slug, returns `204` |
+| `POST /pages`      | `publish` | Stores the request body, takes `?slug=` and `?ttl=`, returns `{slug, url, expires}` as `201` |
+| `PUT /pages/:slug` | `publish` | Replaces a stored page's body and content type, returns `{slug, url, expires}` as `200` |
+| `DELETE /pages/:slug` | `publish` | Removes a stored page and frees the slug, returns `204` |
+| `GET /admin/whoami` | any credential | Reports the credential presented — name, scopes, expiry, last use — and never a token |
+| `POST /admin/clients` | `admin` | Mints a credential, returns `{token, client}` as `201`. The token is shown once and never again |
+| `GET /admin/clients` | `admin` | Lists credentials — names, scopes, last use, revocation — and never a token |
+| `DELETE /admin/clients/:name` | `admin` | Revokes one, returns the credential as `200`. The row stays |
+
+The auth column names the *scope* a bearer token has to carry; see "Credentials" below.
+`GET /admin` itself answers the same uniform 404 as any other miss, so nothing on the
+public read surface advertises that the credential routes are there.
+
+`GET /admin/whoami` is the one route under `/admin` that requires no scope, only a valid
+credential. It is what `stele auth status` asks and what `stele auth login` checks before
+writing a credential to disk — both of which a publish-only agent runs — so gating it on
+`admin` would refuse the one question a working agent credential most needs answered. It
+returns the same credential record the listing does, and like the listing it carries
+neither the token nor its digest.
 
 `POST /pages` takes the page as the raw request body, up to `STELE_MAX_PAGE_BYTES`
 (default 1 MiB; larger is `413`). Add `?slug=my-page` to choose the name yourself — it's
@@ -203,6 +229,81 @@ lets go of the name.
 Custom slugs are lowercase letters, digits and single interior hyphens, 3–64 characters.
 Names the server uses for itself (`pages`, `healthz`, …) are rejected rather than
 accepted-then-shadowed.
+
+### Credentials
+
+Every writer gets its own token. A credential is a row in `clients` — a name, a SHA-256
+of the token, an array of scopes, and optional expiry and revocation timestamps — and the
+token itself exists in plaintext exactly once, in the `201` that minted it. The server
+stores only the digest and cannot produce it again, so a caller that loses it mints a
+replacement rather than looking it up.
+
+Scopes are what make revocation work. An agent's credential carries `publish` and nothing
+else, so a leaked one can deface pages — bad, bounded, recoverable from a re-publish — but
+it cannot reach `POST /admin/clients` to mint itself a second credential and revoke yours.
+`admin` is the operator's scope and no agent holds it. A valid credential used outside its
+scopes is `403`, not `401`: it is working exactly as issued, and answering `401` would send
+someone to rotate a token whose only problem is that it was never allowed to do this.
+
+Every *rejected* credential, on the other hand, gets one byte-identical `401`. Unknown,
+revoked and expired are three facts a caller probing for a valid token learns none of —
+the README's licence to return distinguishing errors applies to callers already behind the
+token, and this one is not. A missing `Authorization` header keeps its own message, because
+a caller who presented nothing has learned nothing.
+
+**`STELE_UPLOAD_TOKEN` is now the admin credential, and it can no longer publish.** It
+resolves to a synthesised client carrying `admin` alone, which is the bootstrap: minting
+the first per-client credential otherwise needs a credential you cannot yet have. It stays
+required and defaultless, and it moves out of every agent's environment into one
+operator's:
+
+```sh
+curl -X POST "$STELE/admin/clients" \
+    -H "Authorization: Bearer $STELE_UPLOAD_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"name":"claude-code","scopes":["publish"],"expiresIn":7776000}'
+```
+
+`scopes` defaults to `["publish"]` and `expiresIn` is seconds from now, absent meaning no
+expiry and anything past a century being a `400` — a `timestamptz` is microseconds in an
+`Int64`, and a date far enough out is not a value the driver refuses but one it traps on.
+Revoking is `DELETE /admin/clients/:name`; it keeps the first `revoked_at` rather than
+moving it on a retry, and the row is never deleted — "which did I revoke, and when?" is the
+question the listing exists to answer.
+
+Rotating a credential is revoke, then mint again under the same name. Names are unique
+among *live* credentials only: a revoked row keeps its name in the listing without
+reserving it, so `claude-code` stays `claude-code` across a rotation instead of becoming
+`claude-code-2`. Uniqueness still holds where it matters — there is at most one live
+credential per name, which is what keeps `DELETE /admin/clients/:name` unambiguous, and it
+always takes the live one.
+
+Every write records the credential that made it in `pages.client_id`, on `POST` and on
+`PUT` alike — the column says who wrote the bytes currently being served, so replacing a
+page re-attributes it rather than leaving the original publisher credited for content they
+did not write. Attribution is never served: `GET /:slug` answers with the page, and who
+published it is the operator's question.
+
+Pages published before any of this, or by the shared token, carry `client_id IS NULL`.
+There was no honest owner to invent for them — the shared token is synthesised rather than
+stored, so it has no row for a foreign key to point at.
+
+### Clients, and the version gate
+
+Writes are expected to come from [stele-cli](https://github.com/ProJedi1234/stele-cli),
+which stores the credential in a `0600` file and never prints it. That is the whole point
+of the split: the agent runs `stele publish page.html`, and the secret never enters its
+context.
+
+The CLI sends `User-Agent: stele-cli/<version>` on every write, and a build older than the
+server's `minimumCLIVersion` gets `426 Upgrade Required` with the required version and the
+reinstall command in the body — a contract mismatch that announces itself and names its own
+fix, instead of surfacing later as a field nobody could decode. **A request with no such
+`User-Agent` is never gated**, so curl keeps working; the header is a compatibility signal,
+not a security control, and nothing behind it assumes a minimum client. `minimumCLIVersion`
+lives in `Sources/SteleCore/SteleCLI.swift` alongside the clone URL and the install
+commands, which are the only facts this repository hardcodes about that one — and the
+publish skill interpolates all of them rather than restating any.
 
 ### How long a page lives
 
@@ -332,10 +433,10 @@ so it has no namespace to leak.
 ### Teaching an agent to publish
 
 `GET /skill` returns a SKILL.md — `text/markdown; charset=utf-8` — that teaches an agent
-the whole publish contract: how to write the one self-contained HTML file, the component
-classes above, the `curl` that publishes it, and what each failure status means. There is
-no MCP server and no CLI to install; the skill wraps `curl`, which every agent already
-has. Bootstrapping one anywhere is a single instruction:
+the whole publish contract: how to install the CLI, how to write the one self-contained
+HTML file, the component classes above, the commands that publish and replace a page, and
+what each failure status means. It assumes a machine with nothing on it, because on a fresh
+machine that is the situation. Bootstrapping an agent anywhere is a single instruction:
 
 ```sh
 curl https://stele.example.com/skill
@@ -344,15 +445,27 @@ curl https://stele.example.com/skill
 The document is served by the deployment it documents, and is rendered from that
 deployment's configuration rather than being a compile-time constant. Every value with exactly one constant behind
 it — the base URL, `STELE_MAX_PAGE_BYTES`, the stylesheet path, the slug length bounds,
-the reserved names, the accepted content types, and the whole `ttl` vocabulary (the
-parameter's name, the `never` keyword, the default lifetime and its maximum) — is
-interpolated from that constant, so
-the `curl` an agent copies out is already pointed at the right host with the right limits.
-That removes the opportunity for drift rather than detecting it afterwards: there is no
-second copy of those values to fall out of step. What is left is prose, and the prose is
-pinned by tests to the code it describes — the component table against the stylesheet's
-own class list, the content types against the allowlist, the example slugs against
-`Slug(custom:)` itself, and the lifetime table against `PageLifetime`.
+the reserved names, the accepted content types, the whole `ttl` vocabulary (the
+parameter's name, the `never` keyword, the default lifetime and its maximum), and now the
+CLI's clone URL, install commands and minimum version — is interpolated from that
+constant, so the
+`stele auth login --host …` an agent copies out is already pointed at the right host with
+the right limits. That removes the opportunity for drift rather than detecting it
+afterwards: there is no second copy of those values to fall out of step, not even across
+the two repositories. What is left is prose, and the prose is pinned by tests to the code
+it describes — the component table against the stylesheet's own class list, the content
+types against the allowlist, the example slugs against `Slug(custom:)` itself, the lifetime
+table against `PageLifetime`, and the only version string in the document against
+`minimumCLIVersion`.
+
+**The skill does not hand the agent a credential, and that is the load-bearing part.** It
+tells the agent to check `stele auth status`, to install the tool if it is missing, and to
+*ask the user* to run `stele auth login` — never to obtain, store or pass a token. An
+earlier version of this document told the agent to hold `STELE_UPLOAD_TOKEN` and warned it
+not to publish the secret it was holding; the CLI removes the secret from the model's reach
+instead of asking it to be careful. A test asserts the document contains no
+`Authorization`, no `Bearer` and no token-shaped instruction, because a well-meant edit
+restoring any of them would work perfectly and quietly undo the whole arrangement.
 
 This README is the one document that *cannot* interpolate any of that — it is a static
 file, so every route, limit, keyword and lifetime in it is typed by hand. Changing the
@@ -372,8 +485,8 @@ that makes the window small, not zero. Fetch the skill at the start of a publish
 not once at setup.
 
 Serving it publicly leaks nothing: the document describes the routes this README already
-describes, `skill` is a reserved name that no page can claim, and writes still need the
-bearer token — an agent that reads the skill without one learns how to publish and cannot.
+describes, `skill` is a reserved name that no page can claim, and writes still need a
+credential — an agent that reads the skill without one learns how to publish and cannot.
 Unlike `/pages` and `/assets`, `/skill` needs no bare-segment 404 stub, because it is a
 terminal node that carries its own value; a deeper miss like `/skill/nope` gets the
 framework's own 404, which no single-segment slug could ever have reached.
@@ -435,13 +548,17 @@ cut. The local `docker compose` database is for development only.
 
 ## Before this faces the internet
 
-The current shape is built for a trusted LAN. Three things need attention first:
+The current shape is built for a trusted LAN. Two things need attention first:
 
 - **Stored pages are same-origin.** An uploaded page's JavaScript runs on the server's
   own domain. There's nothing to steal today — no cookies, no session, no authenticated
   reads — but it stops being harmless the moment this server grows any of those. Serving
   pages from a separate domain to the API is the durable fix.
-- **One shared upload token.** No per-user attribution and no revocation short of
-  rotating it for everyone.
 - **No rate limiting.** Reads are unauthenticated and unmetered, which is what makes the
   enumeration note above practical rather than theoretical.
+
+Per-writer credentials used to be the third item on this list. They are done: each client
+has its own scoped, expirable, revocable token, and the shared token has been demoted to
+the operator's bootstrap credential — see "Credentials". The `pages.client_id` column that
+records *which* credential published a page exists and is still unwritten, so attribution
+is the remaining half of that item.

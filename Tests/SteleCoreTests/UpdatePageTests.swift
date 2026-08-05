@@ -30,7 +30,7 @@ struct UpdatePageTests {
     }
 
     static func authorized(contentType: String? = "text/html") -> HTTPFields {
-        var headers: HTTPFields = [.authorization: "Bearer \(TestFixture.token)"]
+        var headers: HTTPFields = [.authorization: "Bearer \(TestFixture.publishToken)"]
         if let contentType { headers[.contentType] = contentType }
         return headers
     }

@@ -14,8 +14,11 @@ import Testing
 /// somebody uploads. Conflating them is how a suite ends up proving neither.
 @Suite("Page expiry")
 struct PageExpiryTests {
+    /// `publishToken`, not `token`. The shared `STELE_UPLOAD_TOKEN` carries `admin` and
+    /// nothing else since per-client credentials landed, so it answers `403` on `/pages` —
+    /// every write suite authenticates with the publish-scoped fixture instead.
     static func authorized() -> HTTPFields {
-        [.authorization: "Bearer \(TestFixture.token)", .contentType: "text/html"]
+        [.authorization: "Bearer \(TestFixture.publishToken)", .contentType: "text/html"]
     }
 
     /// POSTs a page and hands back the whole decoded JSON body.

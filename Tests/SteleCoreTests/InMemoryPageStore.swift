@@ -43,9 +43,16 @@ actor InMemoryPageStore: PageStoring {
         slug: Slug,
         body: String,
         contentType: String = PageContentType.default,
-        expiresAt: Date? = nil
+        expiresAt: Date? = nil,
+        clientID: Int64? = nil
     ) {
-        pages[slug] = page(slug: slug, body: body, contentType: contentType, expiresAt: expiresAt)
+        pages[slug] = page(
+            slug: slug,
+            body: body,
+            contentType: contentType,
+            expiresAt: expiresAt,
+            clientID: clientID
+        )
     }
 
     /// Every slug physically present, expired or not.
@@ -63,17 +70,25 @@ actor InMemoryPageStore: PageStoring {
     }
 
     func insert(
-        slug: Slug, body: String, contentType: String, expiresAt: Date?
+        slug: Slug, body: String, contentType: String, expiresAt: Date?, clientID: Int64?
     ) async throws -> Bool {
         // `pages[slug] == nil`, not "no *live* page at slug": an expired row holds its name
         // until it is deleted, exactly as it does in Postgres, which is what makes
         // reclaiming before the insert observable rather than decorative.
         guard !failInserts, pages[slug] == nil else { return false }
-        pages[slug] = page(slug: slug, body: body, contentType: contentType, expiresAt: expiresAt)
+        pages[slug] = page(
+            slug: slug,
+            body: body,
+            contentType: contentType,
+            expiresAt: expiresAt,
+            clientID: clientID
+        )
         return true
     }
 
-    func update(slug: Slug, body: String, contentType: String?) async throws -> PageUpdateOutcome {
+    func update(
+        slug: Slug, body: String, contentType: String?, clientID: Int64?
+    ) async throws -> PageUpdateOutcome {
         guard let existing = pages[slug], !hasExpired(existing) else { return .noSuchPage }
         // No `createdAt` theater: `page` stamps every entry with the same fixed date, so
         // "preserved" and "reset" are indistinguishable here — the real created_at
@@ -81,11 +96,17 @@ actor InMemoryPageStore: PageStoring {
         // `expiresAt` is different: it is carried across from the existing row on purpose,
         // and a test can see the difference, because the deadline a PUT reports is part of
         // the wire contract.
+        //
+        // `clientID` goes the other way — assigned, not carried, mirroring the store's
+        // `client_id = …`: the column is who last wrote the page. A fake that preserved it
+        // would let `AttributionTests.updatingReattributesThePage` pass against the store and
+        // fail against reality, or the reverse.
         pages[slug] = page(
             slug: slug,
             body: body,
             contentType: contentType ?? existing.contentType,
-            expiresAt: existing.expiresAt
+            expiresAt: existing.expiresAt,
+            clientID: clientID
         )
         return .replaced(expiresAt: existing.expiresAt)
     }
@@ -118,13 +139,16 @@ actor InMemoryPageStore: PageStoring {
         return expiresAt <= moment
     }
 
-    private func page(slug: Slug, body: String, contentType: String, expiresAt: Date?) -> Page {
+    private func page(
+        slug: Slug, body: String, contentType: String, expiresAt: Date?, clientID: Int64?
+    ) -> Page {
         Page(
             slug: slug,
             body: body,
             contentType: contentType,
             createdAt: Date(timeIntervalSince1970: 0),
-            expiresAt: expiresAt
+            expiresAt: expiresAt,
+            clientID: clientID
         )
     }
 }

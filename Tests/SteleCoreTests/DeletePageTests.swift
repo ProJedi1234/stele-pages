@@ -32,8 +32,12 @@ struct DeletePageTests {
 
     /// `contentType` defaults to absent because DELETE carries no payload — only the test
     /// that pins the header being ignored has any reason to send one.
+    ///
+    /// `publishToken`, not `token`: DELETE is a write and sits in the `publish`-scoped
+    /// group, while the shared `STELE_UPLOAD_TOKEN` carries `admin` alone and earns a `403`
+    /// here. `ScopeEnforcementTests` is where that refusal is asserted on purpose.
     static func authorized(contentType: String? = nil) -> HTTPFields {
-        var headers: HTTPFields = [.authorization: "Bearer \(TestFixture.token)"]
+        var headers: HTTPFields = [.authorization: "Bearer \(TestFixture.publishToken)"]
         if let contentType { headers[.contentType] = contentType }
         return headers
     }

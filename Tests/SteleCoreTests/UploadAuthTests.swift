@@ -49,7 +49,7 @@ struct UploadAuthTests {
                 uri: "/pages",
                 method: .post,
                 headers: [
-                    .authorization: "Basic \(TestFixture.token)",
+                    .authorization: "Basic \(TestFixture.publishToken)",
                     .contentType: "text/html",
                 ],
                 body: ByteBuffer(string: "<h1>hi</h1>")
@@ -68,7 +68,7 @@ struct UploadAuthTests {
                 uri: "/pages",
                 method: .post,
                 headers: [
-                    .authorization: "bEaReR \(TestFixture.token)",
+                    .authorization: "bEaReR \(TestFixture.publishToken)",
                     .contentType: "text/html",
                 ],
                 body: ByteBuffer(string: "<h1>hi</h1>")
@@ -91,7 +91,7 @@ struct UploadAuthTests {
                 uri: "/pages",
                 method: .post,
                 headers: [
-                    .authorization: "Bearer \(TestFixture.token)",
+                    .authorization: "Bearer \(TestFixture.publishToken)",
                     .contentType: "text/html",
                 ],
                 body: ByteBuffer(string: uploaded)

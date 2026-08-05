@@ -55,15 +55,44 @@ against an in-memory `PageStoring` fake, so no curl and no database are needed.
 
 `PublishSkillTests` is the odd one out: alongside the usual route assertions it reads the
 rendered SKILL.md as data and pins its prose to the constants it documents — the component,
-tone and syntax-token vocabularies against `Stylesheet`, the accepted types against
-`PageContentType.allowed`, the example slugs through `Slug(custom:)`, the lifetime table and
-`?ttl=` grammar against `PageLifetime` — so changing the contract without changing the
-document fails the build rather than shipping stale instructions.
+tone and syntax-token vocabularies against `Stylesheet`, the accepted types against `PageContentType.allowed`,
+the example slugs through `Slug(custom:)`, the lifetime table and `?ttl=` grammar against
+`PageLifetime`, the install sequence against `SteleCLI`, and
+every dotted-numeric token in the whole document against `minimumCLIVersion` — so changing
+the contract without changing the document fails the build rather than shipping stale
+instructions. Two of its assertions are *negative* and are the ones to leave alone:
+`neverPutsTheCredentialInTheAgentsHands` fails if the document ever again mentions
+`STELE_UPLOAD_TOKEN`, an `Authorization` header or a `curl -X`, and `handsAuthenticationToTheUser`
+pins the sentence that says whose step `stele auth login` is. The skill's job is to keep
+the credential out of the model's reach; prose that hands it back would pass every other
+test in the suite.
+
+`documentsTheDeleteRoute` is where those two jobs pull against each other, and the shape it
+settled on is deliberate. `DELETE /pages/:slug` exists on the server, but the CLI ships no
+delete command — so the route table has to name the verb (a verb missing from that table is
+one the agent will not use, because the document tells it not to invent sub-paths) while the
+prose has to say in the same breath that nothing runs it. Naming it and stopping there is
+the failure mode: the only way to act on that row is to go find a credential, which is the
+one thing the rewrite exists to prevent. Hence the third negative assertion — `204` must
+*not* appear as a status-table row, because that table is what a command tells you and no
+command can earn one. When `stele` grows a delete command, that test is the place to start.
 
 The slug-retry policy, the requested-slug policy and the reclaim-before-insert ordering
 are shared code in `PageStoring`'s extension, so the router tests exercise the real thing
 (the 503 test runs the retry loop to genuine exhaustion, and the reclamation test proves a
 just-expired slug is claimable by the very upload that freed it).
+`ClientStoring` is the same arrangement for credentials: the primitives are
+lookup-by-hash, record-a-use, insert-if-free, list and revoke, while the two pieces of
+policy live in the extension — `authenticate(token:at:)`, which collapses the hash, the
+revocation check and the expiry check into one nil, and `create(name:scopes:expiresAt:)`,
+which generates a token and stores only its digest. `InMemoryClientStore` therefore cannot
+disagree with `ClientStore` about what "valid" means, or about what gets hashed.
+
+`AdminClientsTests` covers the three credential routes, and most of what it asserts is
+negative: that the plaintext token appears in the `201` body and in no other response, on
+the raw bytes rather than on a decoded shape, so a field a future `Encodable` conformance
+adds by accident is caught. `ScopeEnforcementTests` covers the other half — which valid
+credentials are refused, and with which status code.
 
 `PageStoreDatabaseTests` is the one suite that needs Postgres, gated on
 `STELE_TEST_DATABASE_URL` so a plain `swift test` stays hermetic:
@@ -77,12 +106,18 @@ It creates and drops a throwaway schema per test, and is `.serialized` because P
 advisory locks are scoped to the database, which per-test schemas do not divide. It
 covers the migration runner: the schema version 1 produces, what version 2 adds (the
 nullable `expires_at` and its *partial* index — assert the `indexdef`, not just the index
-name, or a full index passes), the upgrade path from a database created by the
-pre-migration bootstrap, skipping, ordering, exactly-once backfills, rollback of a failed
-migration, and the advisory lock. A probe migration in that suite must use a version the
-real list does not contain, or the runner skips it and the test asserting it fails passes
-nothing — `theLockIsReleasedWhetherTheRunSucceedsOrFails` computes one past the end for
-exactly that reason.
+name, or a full index passes), what version 3 adds, what version 4 replaces, the upgrade
+path from a database created by the pre-migration bootstrap, skipping, ordering,
+exactly-once backfills, rollback of a failed migration, and the advisory lock. Tests that
+pin one version's shape drive `migrate(_:)` with a prefix of the list rather than
+`migrate()`, so they keep meaning what they say as versions are appended — version 3's test
+in particular, since version 4 deliberately drops the `name` constraint it asserts. The ones
+that are about the *runner* rather than a version compare against
+`PageStore.migrations.map(\.version)` rather than a literal, for the same reason. A probe
+migration in that suite must use a version the real list does not contain, or the runner
+skips it and the test asserting it fails passes nothing —
+`theLockIsReleasedWhetherTheRunSucceedsOrFails` computes one past the end for exactly that
+reason.
 
 `upgradesADatabaseCreatedByTheOldBootstrap` is what proves version 2's backfill actually
 ran on a live-shaped database: the page it inserts before migrating comes back with a
@@ -101,6 +136,21 @@ every live page that carries a deadline. Both are silent, and the second is data
 seeds a past, a future and a NULL deadline and pins `insert`, `fetch`, `update` and
 `deleteExpired` against all three.
 
+It also covers `ClientStore` against real Postgres, which is where its type claims can
+actually be checked: that `token_hash` binds as `Data` — PostgresNIO encodes a `[UInt8]`
+as a `char[]`, not as `bytea` — and that `scopes` binds and decodes as `text[]` in both
+directions. The write half is there too: that an untargeted `ON CONFLICT DO NOTHING`
+catches the `name` *and* `token_hash` constraints rather than throwing on one, and that
+`COALESCE(revoked_at, now())` really does leave a second revoke's timestamp alone.
+`PageStore`'s own `insert` / `fetch` / `update` are covered too, which they had to be once
+writes started recording `pages.client_id`: that column is a foreign key, so the value the
+write path chooses is checked by the database and by nothing else — the in-memory fake
+stores whatever it is handed, and an id with no row behind it (the synthesised shared
+token's `0`) would pass every HTTP test in the repo and fail every publish in production.
+`pagesAreStoredFetchedAndReattributedAgainstTheRealSchema` pins that refusal, the
+`created_at` a replacement preserves, and the two outcomes the router turns into a `409`
+and a `404`.
+
 `deleteReportsWhetherARowWasRemoved` covers the other single-slug write: the
 `DELETE … RETURNING` existence check, that the `WHERE` clause removes the addressed row and
 not the table (which is why it seeds a second page it never deletes — with one row, "matched
@@ -109,8 +159,9 @@ cannot express that bug at all), that the freed slug can be claimed again, and t
 expired row is refused rather than removed.
 
 What remains uncovered against real Postgres is narrower than it was: the
-`ON CONFLICT DO NOTHING` *collision* branch of `insert` (the success branch is covered
-above) is the standing gap, asserted today only against the in-memory fake.
+`ON CONFLICT DO NOTHING` *collision* branch of `PageStore.insert` (its success branch is
+covered above, and `ClientStore`'s collision branch is covered separately) is the standing
+gap, asserted today only against the in-memory fake.
 
 ## Conventions
 
@@ -130,22 +181,64 @@ above) is the standing gap, asserted today only against the in-memory fake.
   resolves it, so it needs no stub and must stay **out** of `all404sAreIdentical` — that
   test asserts a 404, and a route that answers 200 there would either fail or, worse, be
   "fixed" by deleting the route's content. The distinction is whether the bare segment is
-  a real endpoint, not whether it has children.
+  a real endpoint, not whether it has children. `/admin` is the second instance of the stub
+  case, and the one where getting it wrong costs most: registered *inside* the
+  authenticated group it would answer `401`, which advertises exactly where the
+  credential-minting routes live. Register the stub outside the group.
+- **A write route belongs in a group whose middleware carries the scope it needs.**
+  `RequireScopeMiddleware(.publish)` gates `/pages`; `RequireScopeMiddleware(.admin)` gates
+  `/admin`. Both sit *after* `BearerTokenMiddleware` in the group and read the `Client` it
+  put on the context — a scope check that re-parsed the header would be a second opinion
+  about what a token means. Do not write the check as a `guard` at the top of a handler:
+  the failure mode of that version is a route someone forgets to guard, which compiles,
+  passes its own tests, and is simply open. Insufficient scope is `403`, not `401` — see
+  "Decisions that look like bugs". **`GET /admin/whoami` is the deliberate exception and
+  must stay one:** it sits under `/admin` in its own group, behind `BearerTokenMiddleware`
+  and *no* scope check, because the caller that runs it most is a publish-only agent —
+  `stele auth status` is the first command the skill tells one to run, and `stele auth
+  login` checks a credential there before writing it to disk. Tidying it into the
+  `admin`-scoped group answers both with a `403` from a credential that works perfectly.
+  `WhoamiTests.aPublishOnlyCredentialIsAnsweredHereAndStillRefusedOnTheAdminRoutes` holds
+  the two halves together.
+- **A write records who wrote it.** Both write routes pass
+  `context.client?.attributableID` down through `PageStoring`'s primitives into
+  `pages.client_id`, and `update` *assigns* it rather than coalescing — the column is who
+  wrote the bytes currently being served, not who first published the slug. The one nil is
+  `Client.sharedToken`: it is synthesised with `id` 0 and has no row, and the column is a
+  foreign key, so `attributableID` maps it to NULL. Do not add a second place that decides
+  what to write there.
 - **A generated document that quotes the code belongs in the same module as the code, and
   quotes it by interpolation.** `PublishSkill` renders the SKILL.md served at `GET /skill`
-  from `Slug.reserved`, `PageContentType.allowed`, `Stylesheet.toneClasses`, the
-  configured base URL, the byte limit and `PageLifetime`'s lifetime vocabulary
-  (`queryParameter`, `neverKeyword`, `defaultDays`, `maxDays`). Never retype one of those
-  values into the prose: interpolation removes the chance of drift, where a test can only
-  notice it later. The deliberate exceptions are the component-class table and the
-  syntax-token list — each row carries hand-written prose no constant could generate, so the
-  class names are typed out and `PublishSkillTests.componentTableMatchesTheStylesheet` /
+  from `Slug.reserved`, `PageContentType.allowed`, `Stylesheet.toneClasses`,
+  `ClientScope`, `ServerRoute`, `SteleCLI`, `minimumCLIVersion`, `PageLifetime`'s lifetime
+  vocabulary (`queryParameter`, `neverKeyword`, `defaultDays`, `maxDays`), the configured
+  base URL and the byte limit. Never retype one of
+  those values into the prose: interpolation removes the chance of drift, where a test can
+  only notice it later. **This now reaches across repositories.** The skill documents a
+  tool built in `stele-cli`, and nothing in a build of *this* package would notice a clone
+  URL that had moved or a make target that had been renamed — so those facts live in
+  `Sources/SteleCore/SteleCLI.swift` and the document quotes them. Two facts and only two
+  are hardcoded about that repo: its clone URL and `minimumCLIVersion`. Everything else is
+  derived. The deliberate exceptions are the component-class table and the syntax-token
+  list — each row carries hand-written prose no constant could generate, so the class
+  names are typed out and `PublishSkillTests.componentTableMatchesTheStylesheet` /
   `.documentsEverySyntaxTokenClass` hold them set-equal to `Stylesheet.componentClasses`
-  / `.syntaxTokenClasses` in both directions. For the rest of the prose that has no
+  / `.syntaxTokenClasses` in both directions. The scope names are *not* an exception —
+  they are interpolated from `ClientScope`, and
+  `PublishSkillTests.theRouteTableNamesExactlyTheScopesThatExist` holds the route table's
+  auth column set-equal to `ClientScope.allCases`. For the rest of the prose that has no
   constant behind it, `PublishSkillTests` pins what it can — extend those tests rather
   than adding a second source of truth, and change the document in the same commit that
   changes the contract it describes.
-- **`PageStore` is the only file that touches the database.** Keep it that way.
+- **The store layer is the only code that touches the database.** That is
+  `Sources/SteleCore/PageStore.swift` and `Sources/SteleCore/ClientStore.swift` — pages and
+  client credentials — and a new table gets a new store beside them rather than a query
+  somewhere convenient. Keep it that way.
+- **The migration list stays in `PageStore`, whatever it creates.** `PageStore.migrations`
+  is the history of the whole schema, `clients` included, because there is one database
+  and one version sequence; splitting it per store would give two sequences with no
+  defined order between them. `ClientStore` reads a table it does not create, and that is
+  correct.
 - **`PageStore.migrations` is append-only.** Change the schema by adding the next
   version, never by editing a shipped one; `schema_migrations` is the record of what
   every live database has run, and an edited version diverges the databases that already
@@ -166,7 +259,16 @@ above) is the standing gap, asserted today only against the in-memory fake.
   about one name, `deleteExpired` is housekeeping addressed at no slug in particular, and
   one entry point for both would need a predicate that is sometimes the slug and sometimes
   the clock. `PageStore` is the only conformer that talks to a database; keep new
-  persistence behind the protocol rather than reaching past it.
+  persistence behind the protocol rather than reaching past it. `ClientStoring` is the same
+  seam for credentials — `ClientStore` on Postgres, `InMemoryClientStore` in the tests — so
+  authentication stays exercisable without one.
+- **Per-request state lives on `SteleRequestContext`, and only the middleware that earned
+  it writes it.** Hummingbird makes the context a type parameter, so `buildRouter` returns
+  `Router<SteleRequestContext>` and anything a handler needs beyond the URL is a field on
+  that struct. `client` is set in exactly one place — `BearerTokenMiddleware`, after the
+  credential has been checked — so a handler behind that middleware can read it as "this
+  request is authorised". Re-deriving a credential from the header anywhere else would be a
+  second opinion about what a token means.
 
 ## Decisions that look like bugs
 
@@ -196,7 +298,70 @@ Don't "fix" these without a reason; the README argues them out in full.
   this server already treats as guessable rather than secret. A page whose link must keep
   pointing somewhere sensible is replaced with `PUT`, which never releases the name.
 - **`STELE_UPLOAD_TOKEN` has no default.** A default would be a published credential; an
-  absent one would silently open the upload endpoint.
+  absent one would silently open the upload endpoint. It still authenticates alongside
+  per-client tokens, resolving to the synthesised `Client.sharedToken` — `admin`-scoped,
+  `id` 0, no row in `clients`. That is the bootstrap: minting the first per-client
+  credential needs a credential you cannot otherwise have yet. Its `id` is never a
+  foreign key; a page it publishes has no owner to record.
+- **Every rejected credential gets one byte-identical 401.** Unknown, revoked, expired and
+  a mistyped shared token are four facts the caller learns none of.
+  `ClientStoring.authenticate` collapses the first three to nil before the middleware sees
+  them, so there is no shape left to branch on. The README's licence to return
+  distinguishing errors applies to callers *behind* the token; someone probing for a valid
+  one is not behind it. A *missing* `Authorization` header keeps its own message — a caller
+  who presented nothing has learned nothing.
+- **`STELE_UPLOAD_TOKEN` can no longer publish.** It resolves to `Client.sharedToken`,
+  which carries `admin` and nothing else, so `POST /pages` and `PUT /pages/:slug` answer it
+  with a `403`. That is the demotion, not a bug: it became the credential that *mints*
+  publishing credentials, and a root token that could also write pages would be one an
+  agent had a reason to hold. The fixture that publishes in the tests is
+  `TestFixture.publishToken`, not `TestFixture.token`.
+- **The `426` version gate only fires on a client that names itself.** A write carrying
+  `User-Agent: stele-cli/<version>` older than `minimumCLIVersion` gets `426 Upgrade
+  Required`; a request with no such header — curl, a script, anything predating the CLI —
+  is waved straight through. That asymmetry is the whole design: gating unversioned
+  clients would be a far larger outage than the drift it prevents, and it also means the
+  gate is *advisory*. Anyone can omit the header, so nothing behind it may assume a
+  minimum client, and it must never be reached for as a security control. A `stele-cli/`
+  token with an unreadable version is rejected rather than waved through, because a client
+  that sends the header is asking to be version-checked.
+  `MinimumCLIVersionMiddleware` is registered **last** in its group, after
+  authentication and the scope check: reinstalling the CLI does not fix a bad credential,
+  and a `426` would spend an agent's one retry on the wrong thing.
+- **Insufficient scope is `403`, and that is deliberately distinguishable from `401`.** The
+  credential is valid; it simply is not permitted, and the caller is already behind the
+  token so there is nothing left to leak to them. Collapsing the two would be actively
+  harmful rather than merely cautious: a `401` sends an operator to rotate a credential
+  that is working exactly as issued, instead of to widen its scopes. The error names both
+  the required scope and the ones the credential carries — the caller already knows both,
+  because it is their credential.
+- **Revoking is idempotent by keeping the first `revoked_at`, not by tolerating a second
+  write.** `ClientStore.revoke` is `COALESCE(revoked_at, now())`, and `InMemoryClientStore`
+  mirrors it. That timestamp is the boundary an incident is reconstructed from; a retried
+  `DELETE` that moved it would erase the only record of when trust ended. The row itself is
+  never deleted, and revoked credentials stay in `GET /admin/clients` — "which did I revoke,
+  and when?" is the question that list exists to answer.
+- **A credential name is unique among *live* rows, not across the table.** Migration 3
+  replaced version 2's `name UNIQUE` with `clients_live_name_idx`, a partial index over
+  `WHERE revoked_at IS NULL`. Rows are never deleted, so table-wide uniqueness meant
+  revoking `claude-code` retired the name permanently and rotation — revoke, then mint the
+  replacement — answered `409` forever, with `claude-code-2` as the only way out. Two
+  consequences to keep straight. `ClientStore.insert` must stay an *untargeted*
+  `ON CONFLICT DO NOTHING`: a conflict target would have to restate the index's predicate to
+  infer it at all. And `revoke` resolves several-rows-one-name to a single row with
+  `ORDER BY revoked_at DESC NULLS FIRST` — the live one, or else the most recently retired
+  one, which is what keeps a repeated `DELETE` a `200` rather than a `404`. Updating every
+  row with that name is harmless under `COALESCE` and still wrong: it would return whichever
+  row the planner reached first, so a retry could answer with a different credential than the
+  call it retries.
+- **`expiresIn` is bounded above, and that bound is not a policy.** `validatedExpiry` caps it
+  at `maxExpiresInSeconds` (a century). PostgresNIO encodes a `Date` as microseconds in an
+  `Int64` via a plain `Int64(_:)` over a `Double`, which **traps** past roughly the year
+  294000 — a trap in a handler takes the process and every in-flight request with it, and one
+  JSON field reaches it. "No expiry" is already spelled by omitting the field, so nothing
+  legitimate lives above the cap. The in-memory store holds any `Date` it is handed, so this
+  is one of the cases where only the Postgres path can fail: pin new arithmetic on that column
+  in `validatedExpiry`, not downstream.
 - **Pages expire by default, and permanence is the opt-out.** `?ttl=` is 7 days when
   absent, `never` for permanent, and a `400` for anything else — never a silent default.
   A `NULL` `expires_at` means "never expires" and nothing else — pages that predate the

@@ -15,6 +15,15 @@ public struct Page: Sendable, Equatable {
     /// added the column, which is why that backfill had to happen in the same migration.
     /// Once the column exists, a NULL is a decision rather than an absence of one.
     public var expiresAt: Date?
+    /// The credential that last wrote this page, or nil for one written by the shared token
+    /// or published before migration 3 added the column.
+    ///
+    /// Read back rather than write-only so attribution is *observable* — a column nothing
+    /// ever selects is one whose writes no test can check, which is how it came to be
+    /// unwritten in the first place. It is deliberately not served anywhere: `GET /:slug`
+    /// answers with the body and its type, and who published a page is the operator's
+    /// question, not the reader's.
+    public var clientID: Int64?
 }
 
 public enum PageStoreError: Error, Equatable {
@@ -46,7 +55,7 @@ public struct PageStore: Sendable {
         // around to deleting it.
         let rows = try await client.query(
             """
-            SELECT body, content_type, created_at, expires_at
+            SELECT body, content_type, created_at, expires_at, client_id
             FROM pages WHERE slug = \(slug.value)
               AND (expires_at IS NULL OR expires_at > now())
             """,
@@ -58,15 +67,20 @@ public struct PageStore: Sendable {
         // with a deadline, and throw at runtime on precisely the pages someone chose to keep
         // forever. Version 2's backfill removed the *other* source of NULLs — pages older
         // than the column — but not this one, and this one is permanent by design.
-        for try await (body, contentType, createdAt, expiresAt) in rows.decode(
-            (String, String, Date, Date?).self, context: .default
+        //
+        // `client_id` is optional for a different reason and permanently so: the shared
+        // token has no row to point at, and pages written before migration 3 have no owner
+        // to name.
+        for try await (body, contentType, createdAt, expiresAt, clientID) in rows.decode(
+            (String, String, Date, Date?, Int64?).self, context: .default
         ) {
             return Page(
                 slug: slug,
                 body: body,
                 contentType: contentType,
                 createdAt: createdAt,
-                expiresAt: expiresAt
+                expiresAt: expiresAt,
+                clientID: clientID
             )
         }
         return nil
@@ -74,16 +88,20 @@ public struct PageStore: Sendable {
 
     /// - Returns: true if the row was inserted, false if the slug was already taken.
     public func insert(
-        slug: Slug, body: String, contentType: String, expiresAt: Date?
+        slug: Slug, body: String, contentType: String, expiresAt: Date?, clientID: Int64?
     ) async throws -> Bool {
         // ON CONFLICT DO NOTHING makes the uniqueness check and the insert one atomic
         // step. Checking first and then inserting would leave a window where two
         // concurrent uploads both see the slug as free. Note that an *expired* row still
         // conflicts — it is a row — which is why `create` reclaims before it gets here.
+        //
+        // `client_id` is a foreign key into `clients`, so a nil here is the only way to
+        // record a page whose writer has no row — the shared token's. `Client.attributableID`
+        // is what turns that credential into the nil, upstream of this call.
         let rows = try await client.query(
             """
-            INSERT INTO pages (slug, body, content_type, expires_at)
-            VALUES (\(slug.value), \(body), \(contentType), \(expiresAt))
+            INSERT INTO pages (slug, body, content_type, expires_at, client_id)
+            VALUES (\(slug.value), \(body), \(contentType), \(expiresAt), \(clientID))
             ON CONFLICT (slug) DO NOTHING
             RETURNING slug
             """,
@@ -99,7 +117,7 @@ public struct PageStore: Sendable {
     /// - Returns: `.replaced` with the page's unchanged expiry, or `.noSuchPage` if no live
     ///   row exists at that slug.
     public func update(
-        slug: Slug, body: String, contentType: String?
+        slug: Slug, body: String, contentType: String?, clientID: Int64?
     ) async throws -> PageUpdateOutcome {
         // A single UPDATE is its own existence check: the WHERE clause and the write are
         // one statement, and RETURNING tells us whether a row matched. `created_at` is
@@ -110,12 +128,21 @@ public struct PageStore: Sendable {
         // is a new body at an old address, not a new page. If editing extended the deadline,
         // a link's lifetime would depend on how often somebody happened to touch it.
         //
+        // `client_id` gets the opposite treatment to both, and deliberately: it is
+        // *assigned* rather than left or COALESCEd. An absent content type means "the caller
+        // expressed no opinion", whereas the writer is never absent — it is whoever's
+        // credential just replaced these bytes. Coalescing it would leave a page attributed
+        // to a credential that wrote none of what it now serves.
+        //
         // The same expired-row exclusion the fetch uses appears here so that a PUT to an
         // expired-but-unreclaimed page is a 404 exactly as a GET of it is — the write
         // surface and the read surface agree on which pages exist.
         let rows = try await client.query(
             """
-            UPDATE pages SET body = \(body), content_type = COALESCE(\(contentType), content_type)
+            UPDATE pages
+            SET body = \(body),
+                content_type = COALESCE(\(contentType), content_type),
+                client_id = \(clientID)
             WHERE slug = \(slug.value)
               AND (expires_at IS NULL OR expires_at > now())
             RETURNING expires_at
@@ -219,6 +246,11 @@ extension PageStore {
     /// schema by adding the next version — version 2 is what that looks like, and it is
     /// deliberately not another idempotent `ALTER` bolted onto version 1.
     ///
+    /// The number is claimed by whatever merges first, and that is not a formality: two
+    /// branches that both append a "version 3" produce databases where version 3 means two
+    /// different things and `schema_migrations` cannot tell them apart. Rebasing onto a list
+    /// that has grown means renumbering, not keeping the number the branch was written with.
+    ///
     /// Statements are not limited to DDL. Because a version runs exactly once and commits
     /// with the row recording it, a data backfill belongs in a migration too and will run
     /// once, ever.
@@ -288,6 +320,75 @@ extension PageStore {
                 """
                 CREATE INDEX pages_expires_at_idx ON pages (expires_at)
                 WHERE expires_at IS NOT NULL
+                """,
+            ]
+        ),
+        Migration(
+            version: 3,
+            statements: [
+                // Per-client credentials. No `IF NOT EXISTS`: unlike version 1 this
+                // describes a table that has never existed anywhere, so a name collision
+                // is a mistake worth failing the boot over rather than a state to
+                // tolerate.
+                //
+                // `token_hash` is the digest, never the token — see `ClientCredential`.
+                // Its UNIQUE constraint is also the index the authentication lookup rides
+                // on, which is what keeps that a hash comparison rather than a scan.
+                //
+                // The `'{publish}'` default is `ClientScope.publish` retyped, the one
+                // place in the repo where that is unavoidable: these statements are
+                // literal SQL by design — a `\(…)` here becomes a *bind* parameter, and
+                // DDL cannot take binds. `MigrationListTests` pins the two together
+                // instead.
+                """
+                CREATE TABLE clients (
+                    id           bigserial PRIMARY KEY,
+                    name         text NOT NULL UNIQUE,
+                    token_hash   bytea NOT NULL UNIQUE,
+                    scopes       text[] NOT NULL DEFAULT '{publish}',
+                    created_at   timestamptz NOT NULL DEFAULT now(),
+                    last_used_at timestamptz,
+                    expires_at   timestamptz,
+                    revoked_at   timestamptz
+                )
+                """,
+                // Nullable, and left null for every page that already exists. Those were
+                // written with the shared token and there is no honest owner to invent
+                // for them. The column cannot be backfilled here either: `migrate()` runs
+                // in the store layer and has no access to configuration, so it could not
+                // hash `STELE_UPLOAD_TOKEN` into a `clients` row even if that were the
+                // right answer — and keeping that separation is worth more than a tidier
+                // backfill.
+                "ALTER TABLE pages ADD COLUMN client_id bigint REFERENCES clients (id)",
+            ]
+        ),
+        Migration(
+            version: 4,
+            statements: [
+                // Version 3 made `name` unique across the whole table, and rows are never
+                // deleted — so revoking `claude-code` retired that name permanently and the
+                // replacement had to be called `claude-code-2`. Rotation is the ordinary
+                // reason to revoke, and a name that survives it is the whole point of having
+                // one: it is the handle `DELETE /admin/clients/:name` addresses and the
+                // string an operator recognises in a listing.
+                //
+                // Uniqueness moves to the live rows rather than being dropped. Two *usable*
+                // credentials sharing a name would make revocation ambiguous at exactly the
+                // wrong moment, which is the thing version 3 was right about; the history
+                // beside them is what an incident is reconstructed from and does not need to
+                // be unique to be read. `ClientStore.revoke` is what resolves the resulting
+                // several-rows-one-name to a single row — live first, newest revocation
+                // otherwise.
+                //
+                // The constraint is dropped by the name Postgres generates for a column-level
+                // UNIQUE (`<table>_<column>_key`), not by one version 3 chose. No
+                // `IF EXISTS`: on any database that ran version 3 it is there, and on one
+                // where it is not, something has edited the schema by hand and the boot
+                // should say so.
+                "ALTER TABLE clients DROP CONSTRAINT clients_name_key",
+                """
+                CREATE UNIQUE INDEX clients_live_name_idx
+                ON clients (name) WHERE revoked_at IS NULL
                 """,
             ]
         ),
