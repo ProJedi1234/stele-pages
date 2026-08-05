@@ -7,10 +7,10 @@ import Foundation
 /// so an actor conforms directly, and `Mutex` would need macOS 15 while the manifest
 /// declares macOS 14.
 ///
-/// Only the seam's primitives — insert-if-free and update-if-present — are implemented
-/// here, so the
-/// requested-vs-generated policy and the collision-retry loop the router tests exercise
-/// are the real shared ones from `PageStoring`'s extension, not a reimplementation.
+/// Only the seam's primitives — insert-if-free, update-if-present and delete-if-present —
+/// are implemented here, so the requested-vs-generated policy and the collision-retry loop
+/// the router tests exercise are the real shared ones from `PageStoring`'s extension, not
+/// a reimplementation.
 ///
 /// Every test should build its own instance — swift-testing runs suites in parallel and
 /// nothing here is meant to be shared.
@@ -51,6 +51,14 @@ actor InMemoryPageStore: PageStoring {
         // guarantee lives in `PageStore`'s SQL and only a Postgres test can check it.
         pages[slug] = page(slug: slug, body: body, contentType: contentType ?? existing.contentType)
         return true
+    }
+
+    func delete(slug: Slug) async throws -> Bool {
+        // Hard, like the store's DELETE: nothing is kept to mark the slug as spent, so a
+        // test that deletes and then inserts at the same slug sees it free — which is the
+        // behaviour the router relies on and the only part of the real thing worth
+        // imitating here.
+        pages.removeValue(forKey: slug) != nil
     }
 
     private func page(slug: Slug, body: String, contentType: String) -> Page {

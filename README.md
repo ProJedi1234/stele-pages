@@ -135,6 +135,7 @@ happens to run the app, which is rarely the machine you chose for durable storag
 | `GET /skill`       | none   | The publish skill, as Markdown (see "Teaching an agent to publish") |
 | `POST /pages`      | bearer | Stores the request body, returns `{slug, url}` as `201` |
 | `PUT /pages/:slug` | bearer | Replaces a stored page's body and content type, returns `{slug, url}` as `200` |
+| `DELETE /pages/:slug` | bearer | Removes a stored page and frees the slug, returns `204` |
 
 `POST /pages` takes the page as the raw request body, up to `STELE_MAX_PAGE_BYTES`
 (default 1 MiB; larger is `413`). Add `?slug=my-page` to choose the name yourself — it's
@@ -154,6 +155,28 @@ same grammar as a custom slug below; malformed or reserved is `400` rather than 
 public `404`, because this side of the API is behind the upload token and has nothing to
 hide from its caller. A well-formed slug with no page at it is `404`: `PUT` never
 creates, so publishing a new page is always `POST`.
+
+`DELETE /pages/:slug` removes the page and answers `204` with an empty body. There is no
+`{slug, url}` to return — the URL that payload would carry now leads to the 404 page, and
+handing back a dead link on a success response is worse than saying nothing. No request
+body is read at all, so the size limit and the content-type allowlist have nothing to
+apply to and neither `413` nor `415` can come back from this route; a `Content-Type` sent
+anyway is ignored rather than rejected. Malformed or reserved is `400` and a well-formed
+slug with no page at it is `404`, on the same reasoning as `PUT`: this side of the API is
+behind the upload token and has nothing to hide from its caller, so a delete that removed
+nothing says so instead of returning the idempotent `204` that would let a script delete a
+typo and be told it worked.
+
+**The delete is hard, and the slug goes back into the pool.** The row is gone; nothing is
+kept to mark the name as spent, so a later `POST ?slug=` can ask for it and the random
+generator can draw it — which means a link that has already been shared may one day
+resolve to somebody else's page. That is the trade, taken deliberately rather than
+conceded: the alternative is a tombstone, which buys link stability by growing a table of
+names nobody may ever use again and a `WHERE deleted_at IS NULL` on every read after it,
+in exchange for protecting URLs that this server already treats as guessable rather than
+secret. Deleting is the operation for giving a name up. A page whose link is out in the
+world and must keep pointing somewhere sensible should be replaced with `PUT`, which never
+lets go of the name.
 
 Custom slugs are lowercase letters, digits and single interior hyphens, 3–64 characters.
 Names the server uses for itself (`pages`, `healthz`, …) are rejected rather than

@@ -89,6 +89,29 @@ public struct PageStore: Sendable {
         }
         return false
     }
+
+    /// - Returns: true if a row was removed, false if no such slug exists.
+    public func delete(slug: Slug) async throws -> Bool {
+        // Like the UPDATE above, the statement is its own existence check: the WHERE
+        // clause and the removal are one command, and RETURNING says whether a row
+        // matched. Reading first and then deleting would leave a window in which a
+        // concurrent PUT rewrites the row — or a POST claims the slug again after a
+        // parallel delete — and this would answer for a page other than the one it
+        // removed. The row is gone outright: no tombstone column to filter out of every
+        // later read, and the slug is free the moment this commits.
+        let rows = try await client.query(
+            """
+            DELETE FROM pages WHERE slug = \(slug.value)
+            RETURNING slug
+            """,
+            logger: logger
+        )
+
+        for try await _ in rows.decode(String.self, context: .default) {
+            return true
+        }
+        return false
+    }
 }
 
 // MARK: - Schema migrations
@@ -277,7 +300,7 @@ extension PageStore {
 }
 
 /// `PageStore` is the database-backed conformer of the seam the router talks to. Only
-/// the storage primitives — insert-if-free and update-if-present — live here; the retry
-/// and requested-slug policy come from `PageStoring`'s extension, shared with every
-/// other conformer.
+/// the storage primitives — insert-if-free, update-if-present and delete-if-present —
+/// live here; the retry and requested-slug policy come from `PageStoring`'s extension,
+/// shared with every other conformer.
 extension PageStore: PageStoring {}

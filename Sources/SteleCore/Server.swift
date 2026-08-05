@@ -138,6 +138,30 @@ public func buildRouter(
                 includeLocation: false
             )
         }
+        // The one write that never reads a body. DELETE carries no payload, so
+        // `readValidatedPage` is deliberately not called and the content-type allowlist has
+        // nothing to apply to — sending `Content-Type: image/png` here is not an error,
+        // because nothing is being stored to serve back. Leaving the body unread is safe
+        // for the connection too: `handleHTTP` drains whatever body parts remain before it
+        // reads the next request head, so a caller who sends bytes anyway does not wedge a
+        // keep-alive connection. Ordering is PUT's — auth, then the slug, then the store.
+        .delete(":slug") { _, context -> Response in
+            let slug = try validatedSlug(context.parameters.require("slug"))
+
+            // An absent slug is a 404, not an idempotent 204, mirroring PUT: the caller is
+            // already past the upload token, so there is nothing left for a distinguishing
+            // failure to leak to, and a script that deleted a typo'd slug would otherwise
+            // be told it succeeded at work it never did.
+            guard try await store.delete(slug: slug) else {
+                throw HTTPError(.notFound, message: "No page exists at \(slug.value).")
+            }
+
+            // 204 with no body, rather than POST and PUT's `{slug, url}`. The url in that
+            // payload would point at what is now a 404 — a link handed back by a
+            // success response that leads nowhere is worse than saying nothing, and
+            // there is no resource left to describe.
+            return Response(status: .noContent)
+        }
 
     // The trie matches the literal `pages` node for `GET /pages` and does not backtrack
     // to `/:slug`, so without this the framework's own plain-text 404 would leak out —
@@ -464,6 +488,8 @@ func landingPage(baseURL: String) -> String {
     <code>?slug=</code>.</p></div>
     <div class="card"><h3><span class="badge">PUT</span> /pages/:slug</h3>
     <p>Replace the page already published at a slug. Never creates one.</p></div>
+    <div class="card"><h3><span class="badge">DELETE</span> /pages/:slug</h3>
+    <p>Remove the page at a slug for good. The name goes back in the pool.</p></div>
     </div>
     <div class="callout">
     <p>Pages you publish can share this server's look. Link the stylesheet from your

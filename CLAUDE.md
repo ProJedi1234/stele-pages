@@ -69,9 +69,12 @@ It creates and drops a throwaway schema per test, and is `.serialized` because P
 advisory locks are scoped to the database, which per-test schemas do not divide. It
 covers the migration runner: the schema version 1 produces, the upgrade path from a
 database created by the pre-migration bootstrap, skipping, ordering, exactly-once
-backfills, rollback of a failed migration, and the advisory lock. It deliberately does
-**not** cover `insert` / `fetch` / `update` against real Postgres — the `ON CONFLICT DO
-NOTHING` insert and the `UPDATE … RETURNING` existence check remain the standing gap,
+backfills, rollback of a failed migration, and the advisory lock. Of the storage
+primitives it covers only `delete`: its `DELETE … RETURNING` existence check, that the
+`WHERE` clause removes the addressed row and not the table (which is why that test seeds a
+second page it never deletes), and that the freed slug can be claimed again are all
+asserted against real Postgres. `insert` / `fetch` / `update` remain the standing gap —
+the `ON CONFLICT DO NOTHING` insert and the `UPDATE … RETURNING` existence check are
 asserted today only against the in-memory fake.
 
 ## Conventions
@@ -115,11 +118,10 @@ asserted today only against the in-memory fake.
   migration runs exactly once, so data backfills belong there too.
 - **Routes take `some PageStoring`, not a concrete store.** That seam is what lets the
   HTTP tests run without Postgres. A conformer implements only `fetch` and the atomic
-  storage primitives — insert-if-free and update-if-present; `create`'s retry and
-  requested-slug policy lives in the
-  protocol extension and must stay there, shared. `PageStore` is the only conformer that
-  talks to a database; keep new persistence behind the protocol rather than reaching
-  past it.
+  storage primitives — insert-if-free, update-if-present and delete-if-present; `create`'s
+  retry and requested-slug policy lives in the protocol extension and must stay there,
+  shared. `PageStore` is the only conformer that talks to a database; keep new persistence
+  behind the protocol rather than reaching past it.
 
 ## Decisions that look like bugs
 
@@ -129,8 +131,17 @@ Don't "fix" these without a reason; the README argues them out in full.
   scannable. Access control would need a real auth check, not a longer slug.
 - **Every 404 on the public read surface is identical.** Malformed, reserved, and absent
   slugs return the same page so a scanner can't map the namespace faster than guessing.
-  This is deliberately *not* true behind the upload token: `PUT /pages/:slug` returns
-  distinguishing `400`/`404` errors, because that caller has nothing left to leak to.
+  This is deliberately *not* true behind the upload token: `PUT` and `DELETE /pages/:slug`
+  return distinguishing `400`/`404` errors, because that caller has nothing left to leak
+  to. `DELETE` is not idempotent for the same reason — a repeat delete is a `404`, not the
+  `204` convention suggests, so a script that deleted a typo'd slug is told it removed
+  nothing instead of being congratulated on work it never did.
+- **Deleting is hard, and the slug goes back into the pool.** No tombstone, no
+  `deleted_at`, nothing that keeps a retired name spent — so a link already shared may one
+  day resolve to somebody else's page. Link stability would cost a growing table of names
+  nobody may use again plus a `WHERE deleted_at IS NULL` on every read, to protect URLs
+  this server already treats as guessable rather than secret. A page whose link must keep
+  pointing somewhere sensible is replaced with `PUT`, which never releases the name.
 - **`STELE_UPLOAD_TOKEN` has no default.** A default would be a published credential; an
   absent one would silently open the upload endpoint.
 - **The shared stylesheet and the publish skill are Swift strings, not SwiftPM

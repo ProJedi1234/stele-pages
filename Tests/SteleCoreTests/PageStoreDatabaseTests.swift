@@ -472,4 +472,69 @@ struct PageStoreDatabaseTests {
             #expect(freeAfterFailure)
         }
     }
+
+    /// The one storage primitive here that is not about the migration runner, because
+    /// everything it promises is a claim about a SQL statement and not about Swift.
+    ///
+    /// `delete`'s `Bool` is the router's entire 204-versus-404 decision, and it comes from
+    /// `DELETE … RETURNING slug` yielding a row or not. The in-memory fake gets that for
+    /// free from `removeValue`, which means every HTTP test in the suite is asserting the
+    /// dictionary's honesty rather than the statement's: a `RETURNING` clause that reported
+    /// on a slug it had not removed, or reported nothing on one it had, would pass all of
+    /// them. The re-delete is the half worth the round trip — "no row matched" has to be
+    /// distinguishable from "a row matched", not merely absent.
+    ///
+    /// Two rows, not one, and that is the point of the bystander. With a single row in the
+    /// schema, "the addressed row matched" and "every row matched" are the same
+    /// observation: `DELETE FROM pages` with the `WHERE` clause dropped, or widened to a
+    /// `LIKE` prefix, would satisfy every other assertion here — and `removeValue(forKey:)`
+    /// cannot express that bug at all, so nothing else in the repo would see it either. The
+    /// surviving page is what makes the predicate load-bearing, and one deployed `DELETE`
+    /// that emptied the table is the failure nobody can undo.
+    ///
+    /// The re-claim at the end is the other property the hard delete rests on, asserted
+    /// where it is not tautological: the fake frees the key by construction, whereas here a
+    /// `deleted_at` column and an `UPDATE` in place of the `DELETE` would still read back
+    /// as absent while `ON CONFLICT DO NOTHING` bounced off the tombstone — a 409 on
+    /// republish, in production, with the whole suite green.
+    ///
+    /// `insert`, `fetch` and `update` are otherwise still the standing gap; this closes it
+    /// for `delete` alone, and leans on them only as far as the delete's own claims need.
+    @Test func deleteReportsWhetherARowWasRemoved() async throws {
+        try await PostgresFixture.withThrowawaySchema { database in
+            let store = database.store
+            try await store.migrate()
+            let slug = try Slug(custom: "quiet-cedar-otter")
+            let bystander = try Slug(custom: "amber-willow-heron")
+
+            let inserted = try await store.insert(
+                slug: slug, body: "<h1>here</h1>", contentType: PageContentType.default
+            )
+            #expect(inserted)
+            let insertedBystander = try await store.insert(
+                slug: bystander, body: "<h1>elsewhere</h1>", contentType: PageContentType.default
+            )
+            #expect(insertedBystander)
+
+            let removed = try await store.delete(slug: slug)
+            #expect(removed)
+            // Hard, as advertised: the row is not filtered out of a read, it is gone.
+            let afterDelete = try await store.fetch(slug: slug)
+            #expect(afterDelete == nil)
+            // And the statement removed the row it was addressed at, not the table.
+            let survivor = try await store.fetch(slug: bystander)
+            #expect(survivor?.body == "<h1>elsewhere</h1>")
+
+            let removedAgain = try await store.delete(slug: slug)
+            #expect(removedAgain == false)
+
+            // The freed slug, claimed again against a real primary key.
+            let reclaimed = try await store.insert(
+                slug: slug, body: "<h1>second tenant</h1>", contentType: PageContentType.default
+            )
+            #expect(reclaimed)
+            let republished = try await store.fetch(slug: slug)
+            #expect(republished?.body == "<h1>second tenant</h1>")
+        }
+    }
 }

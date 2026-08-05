@@ -7,9 +7,10 @@ import Logging
 /// does so on the concrete `PageStore`, so schema bootstrap stays a database concern
 /// rather than something every conformer has to pretend to implement.
 ///
-/// The seam is storage primitives only — insert-if-free and update-if-present — with the
-/// requested-vs-generated policy and the collision-retry loop living in the extension
-/// below, shared by every conformer. That keeps the policy written (and tested) once:
+/// The seam is storage primitives only — insert-if-free, update-if-present and
+/// delete-if-present — with the requested-vs-generated policy and the collision-retry
+/// loop living in the extension below, shared by every conformer. That keeps the policy
+/// written (and tested) once:
 /// a conformer that only implements the primitives cannot drift from the retry semantics.
 public protocol PageStoring: Sendable {
     /// Fetches a page, or nil if no such slug exists.
@@ -29,6 +30,18 @@ public protocol PageStoring: Sendable {
     ///
     /// - Returns: true if the page was replaced, false if no such slug exists.
     func update(slug: Slug, body: String, contentType: String?) async throws -> Bool
+
+    /// Removes the page at `slug`, as one atomic step: the existence check and the removal
+    /// must not leave a window where a concurrent write changes what the removal lands on,
+    /// or this reports on a page it did not delete.
+    ///
+    /// The removal is hard — no tombstone, no reservation. The slug goes straight back
+    /// into the pool, so a later POST can ask for it and the generator can draw it. That
+    /// is the intended reading of a delete: the caller is giving the name up, not holding
+    /// it. Anyone still following the old link sees whatever gets published there next.
+    ///
+    /// - Returns: true if a row was removed, false if no such slug existed.
+    func delete(slug: Slug) async throws -> Bool
 }
 
 extension PageStoring {
