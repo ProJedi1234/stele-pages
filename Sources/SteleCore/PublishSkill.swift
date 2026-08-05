@@ -85,7 +85,9 @@ struct PublishSkill: Sendable {
         description: Publish a self-contained HTML page to this stele server and get a
           readable three-word URL back. Pages expire after \#(PageLifetime.defaultDays) days
           unless published with `\#(PageLifetime.queryParameter)=\#(PageLifetime.neverKeyword)`.
-          Use when asked to publish, share, or put a page online at \#(baseURL).
+          Use when asked to publish, share, or put a page online at \#(baseURL), when asked
+          to replace or update a page already there, and when asked to delete or unpublish
+          one.
         ---
 
         # Publishing a page to stele
@@ -361,6 +363,28 @@ struct PublishSkill: Sendable {
         at that name yet — or that it has expired — so `stele publish page.html --slug my-page`
         is what you want instead. A successful update keeps the same URL.
 
+        ### Deleting a page
+
+        **`stele` has no delete command**, so nothing you can run takes a page down. The
+        server does have a `DELETE /\#(ServerRoute.pages)/:slug` and the route table below
+        lists it, but reaching it means holding a credential — the one thing this
+        arrangement exists to spare you. A user who wants a page gone early is asking for a
+        newer `stele`, exactly as a non-default lifetime is. Do not work around it.
+
+        Two facts make that an answer rather than an apology.
+
+        **You never have to delete a page to make it expire.** A page with a deadline retires
+        itself, and every page you publish has one — so "take it down" usually needs nothing
+        from anybody beyond waiting for the date you already reported.
+
+        And replacing is what the request usually means anyway. `stele update` rewrites a
+        page without ever releasing its name, so a link already in someone's hands keeps
+        pointing at something the user chose. Deleting is the harsher tool even where it is
+        available. Deletion is permanent — there is no undo. The row is removed outright
+        rather than tombstoned, so the name goes straight back into the pool the moment the
+        delete commits, and the server's own generator can draw it again.
+        A URL you already handed out may later resolve to a different page.
+
         ### The commands, in full
 
         | Command | Who runs it | Does |
@@ -418,6 +442,7 @@ struct PublishSkill: Sendable {
         | `GET \#(PublishSkill.path)` | none | This document |
         | `POST /\#(ServerRoute.pages)` | `\#(ClientScope.publish.rawValue)` | Stores the body, takes `?slug=` and `?\#(PageLifetime.queryParameter)=`, returns `{slug, url, expires}` as `201` |
         | `PUT /\#(ServerRoute.pages)/:slug` | `\#(ClientScope.publish.rawValue)` | Replaces a stored page, returns `{slug, url, expires}` as `200` |
+        | `DELETE /\#(ServerRoute.pages)/:slug` | `\#(ClientScope.publish.rawValue)` | Removes a stored page and frees the slug, returns `204`. No command reaches it — see "Deleting a page". |
         | `GET /\#(ServerRoute.admin)/\#(ServerRoute.adminWhoami)` | any credential | Reports the credential you hold — name, scopes, expiry. This is what `stele auth status` asks. |
         | `POST /\#(ServerRoute.admin)/\#(ServerRoute.adminClients)` | `\#(ClientScope.admin.rawValue)` | Mints a credential. The operator's route, not yours. |
         | `GET /\#(ServerRoute.admin)/\#(ServerRoute.adminClients)` | `\#(ClientScope.admin.rawValue)` | Lists credentials. The operator's route, not yours. |
@@ -451,6 +476,10 @@ struct PublishSkill: Sendable {
           should carry its own inline `<style>` and link nothing.
         - **There is no listing endpoint.** Keep the URL you were handed; nothing else will
           give it back to you.
+        - **A URL is not a permanent address.** Deleting retires the page, not the name, so
+          a link you published can be occupied by somebody else's page afterwards. If a
+          link has already gone where you cannot reach it, replace the page with PUT rather
+          than deleting it.
         """#
     }
 }

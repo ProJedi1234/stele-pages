@@ -7,7 +7,7 @@ import Foundation
 /// so an actor conforms directly, and `Mutex` would need macOS 15 while the manifest
 /// declares macOS 14.
 ///
-/// Only the seam's primitives — insert-if-free, update-if-present and
+/// Only the seam's primitives — insert-if-free, update-if-present, delete-if-live and
 /// delete-what-has-expired — are implemented here, so the requested-vs-generated policy,
 /// the collision-retry loop and the reclaim-before-insert ordering the router tests
 /// exercise are the real shared ones from `PageStoring`'s extension, not a
@@ -16,9 +16,10 @@ import Foundation
 /// Where expiry is concerned this fake follows the SQL rather than doing whatever is
 /// convenient, because the router tests are the only place several of those rules are
 /// checked at all: a read hides an expired page, an update refuses one and never moves a
-/// stored deadline, and an insert still collides with an expired row — it is a row until
-/// something deletes it. A fake that quietly filtered expired rows out of `insert` would
-/// make the reclamation tests pass without any reclamation happening.
+/// stored deadline, a single-slug delete refuses one too, and an insert still collides with
+/// an expired row — it is a row until something deletes it. A fake that quietly filtered
+/// expired rows out of `insert` would make the reclamation tests pass without any
+/// reclamation happening.
 ///
 /// Every test should build its own instance — swift-testing runs suites in parallel and
 /// nothing here is meant to be shared.
@@ -108,6 +109,21 @@ actor InMemoryPageStore: PageStoring {
             clientID: clientID
         )
         return .replaced(expiresAt: existing.expiresAt)
+    }
+
+    func delete(slug: Slug) async throws -> Bool {
+        // Hard, like the store's DELETE: nothing is kept to mark the slug as spent, so a
+        // test that deletes and then inserts at the same slug sees it free — which is the
+        // behaviour the router relies on and the only part of the real thing worth
+        // imitating here.
+        //
+        // Expired rows are refused rather than removed, mirroring the SQL's deadline
+        // predicate. Getting this wrong in the convenient direction — `removeValue` on
+        // anything present — is invisible in every test that never seeds an expired page,
+        // and would let the router answer 204 for a page the fake's own `fetch` hides.
+        guard let existing = pages[slug], !hasExpired(existing) else { return false }
+        pages.removeValue(forKey: slug)
+        return true
     }
 
     func deleteExpired() async throws -> Int {

@@ -183,6 +183,37 @@ public struct PageStore: Sendable {
         }
         return deleted
     }
+
+    /// - Returns: true if a live row was removed, false if no live page exists at that slug.
+    public func delete(slug: Slug) async throws -> Bool {
+        // Like the UPDATE above, the statement is its own existence check: the WHERE
+        // clause and the removal are one command, and RETURNING says whether a row
+        // matched. Reading first and then deleting would leave a window in which a
+        // concurrent PUT rewrites the row — or a POST claims the slug again after a
+        // parallel delete — and this would answer for a page other than the one it
+        // removed. The row is gone outright: no tombstone column to filter out of every
+        // later read, and the slug is free the moment this commits.
+        //
+        // The deadline predicate is the same one `fetch` and `update` carry, and it is here
+        // for the reason it is there: the write surface and the read surface have to agree
+        // on which pages exist. Without it a DELETE aimed at an expired-but-unreclaimed row
+        // would remove it and answer `204` — "I deleted that for you" about a page every
+        // reader already 404s, and about work the next upload's reclamation was going to do
+        // anyway. The row stays; `deleteExpired` owns it.
+        let rows = try await client.query(
+            """
+            DELETE FROM pages WHERE slug = \(slug.value)
+              AND (expires_at IS NULL OR expires_at > now())
+            RETURNING slug
+            """,
+            logger: logger
+        )
+
+        for try await _ in rows.decode(String.self, context: .default) {
+            return true
+        }
+        return false
+    }
 }
 
 // MARK: - Schema migrations
@@ -493,7 +524,8 @@ extension PageStore {
 }
 
 /// `PageStore` is the database-backed conformer of the seam the router talks to. Only
-/// the storage primitives — insert-if-free, update-if-present, delete-what-has-expired —
-/// live here; the retry policy, the requested-slug policy and the order reclamation runs
-/// in come from `PageStoring`'s extension, shared with every other conformer.
+/// the storage primitives — insert-if-free, update-if-present, delete-if-live and
+/// delete-what-has-expired — live here; the retry policy, the requested-slug policy and the
+/// order reclamation runs in come from `PageStoring`'s extension, shared with every other
+/// conformer.
 extension PageStore: PageStoring {}

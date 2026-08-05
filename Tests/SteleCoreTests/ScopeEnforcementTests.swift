@@ -34,9 +34,13 @@ struct ScopeEnforcementTests {
     /// carries `admin` and nothing else. This is the behaviour every deployed agent hits
     /// the moment this ships, so it should fail here first if it is ever reverted by
     /// accident.
+    /// `DELETE` is in the list because it is the write whose refusal matters most: the
+    /// shared token is the one credential an operator still types by hand, and the route it
+    /// would reach past this gate is the only one that destroys a page.
     @Test("the admin-only shared token cannot publish", arguments: [
         ("/\(ServerRoute.pages)", HTTPRequest.Method.post),
         ("/\(ServerRoute.pages)/quiet-cedar-otter", HTTPRequest.Method.put),
+        ("/\(ServerRoute.pages)/quiet-cedar-otter", HTTPRequest.Method.delete),
     ])
     func sharedTokenIsForbiddenOnWrites(uri: String, method: HTTPRequest.Method) async throws {
         let store = InMemoryPageStore()
@@ -61,11 +65,11 @@ struct ScopeEnforcementTests {
     }
 
     /// The positive half of the same gate, and the half a mistake would break silently: a
-    /// `publish` credential — the only kind an agent ever holds — is waved through on both
-    /// write verbs. A scope check that refused everything would pass every negative test in
+    /// `publish` credential — the only kind an agent ever holds — is waved through on every
+    /// write verb. A scope check that refused everything would pass every negative test in
     /// this file, so the accept path is worth pinning next to them rather than leaving it
     /// implied by the suites that happen to publish.
-    @Test func aPublishOnlyCredentialIsAcceptedOnBothWriteRoutes() async throws {
+    @Test func aPublishOnlyCredentialIsAcceptedOnEveryWriteRoute() async throws {
         let store = InMemoryPageStore()
         await store.seed(slug: try Slug(custom: "quiet-cedar-otter"), body: "<h1>original</h1>")
         let clients = InMemoryClientStore(
@@ -88,6 +92,16 @@ struct ScopeEnforcementTests {
             try await client.execute(uri: "/quiet-cedar-otter", method: .get) { response in
                 #expect(String(buffer: response.body) == "<h1>hi</h1>")
             }
+
+            // Last, because it takes the page away: the same credential is let through the
+            // gate on the destructive verb too.
+            let removed = try await Self.write(
+                client,
+                token: TestFixture.publishToken,
+                uri: "/\(ServerRoute.pages)/quiet-cedar-otter",
+                method: .delete
+            )
+            #expect(removed.status == .noContent)
         }
     }
 

@@ -1109,4 +1109,97 @@ struct PageStoreDatabaseTests {
             #expect(freeAfterFailure)
         }
     }
+
+    /// The one storage primitive here that is not about the migration runner, because
+    /// everything it promises is a claim about a SQL statement and not about Swift.
+    ///
+    /// `delete`'s `Bool` is the router's entire 204-versus-404 decision, and it comes from
+    /// `DELETE … RETURNING slug` yielding a row or not. The in-memory fake gets that for
+    /// free from `removeValue`, which means every HTTP test in the suite is asserting the
+    /// dictionary's honesty rather than the statement's: a `RETURNING` clause that reported
+    /// on a slug it had not removed, or reported nothing on one it had, would pass all of
+    /// them. The re-delete is the half worth the round trip — "no row matched" has to be
+    /// distinguishable from "a row matched", not merely absent.
+    ///
+    /// Two rows, not one, and that is the point of the bystander. With a single row in the
+    /// schema, "the addressed row matched" and "every row matched" are the same
+    /// observation: `DELETE FROM pages` with the `WHERE` clause dropped, or widened to a
+    /// `LIKE` prefix, would satisfy every other assertion here — and `removeValue(forKey:)`
+    /// cannot express that bug at all, so nothing else in the repo would see it either. The
+    /// surviving page is what makes the predicate load-bearing, and one deployed `DELETE`
+    /// that emptied the table is the failure nobody can undo.
+    ///
+    /// The re-claim at the end is the other property the hard delete rests on, asserted
+    /// where it is not tautological: the fake frees the key by construction, whereas here a
+    /// `deleted_at` column and an `UPDATE` in place of the `DELETE` would still read back
+    /// as absent while `ON CONFLICT DO NOTHING` bounced off the tombstone — a 409 on
+    /// republish, in production, with the whole suite green.
+    ///
+    /// The expired case is the third claim, and the one only this suite can settle honestly:
+    /// `delete` carries the same `expires_at > now()` predicate the reads do, so a dead row
+    /// is refused rather than removed. Proved by refusing it and *then* watching
+    /// `deleteExpired` still find it — a delete that had quietly swept the row up would
+    /// return false either way, and only the reclaim count tells the two apart.
+    ///
+    /// `insert`, `fetch` and `update` are otherwise still the standing gap; this closes it
+    /// for `delete` alone, and leans on them only as far as the delete's own claims need.
+    @Test func deleteReportsWhetherARowWasRemoved() async throws {
+        try await PostgresFixture.withThrowawaySchema { database in
+            let store = database.store
+            try await store.migrate()
+            let slug = try Slug(custom: "quiet-cedar-otter")
+            let bystander = try Slug(custom: "amber-willow-heron")
+            let dead = try Slug(custom: "brisk-maple-compass")
+
+            // `clientID: nil` throughout — attribution is not what this test is about, and
+            // the foreign key it has to satisfy is pinned by
+            // `pagesAreStoredFetchedAndReattributedAgainstTheRealSchema` instead.
+            let inserted = try await store.insert(
+                slug: slug, body: "<h1>here</h1>",
+                contentType: PageContentType.default, expiresAt: nil, clientID: nil
+            )
+            #expect(inserted)
+            let insertedBystander = try await store.insert(
+                slug: bystander, body: "<h1>elsewhere</h1>",
+                contentType: PageContentType.default, expiresAt: nil, clientID: nil
+            )
+            #expect(insertedBystander)
+            let insertedDead = try await store.insert(
+                slug: dead, body: "<h1>expired</h1>",
+                contentType: PageContentType.default,
+                expiresAt: Date().addingTimeInterval(-60), clientID: nil
+            )
+            #expect(insertedDead)
+
+            let removed = try await store.delete(slug: slug)
+            #expect(removed)
+            // Hard, as advertised: the row is not filtered out of a read, it is gone.
+            let afterDelete = try await store.fetch(slug: slug)
+            #expect(afterDelete == nil)
+            // And the statement removed the row it was addressed at, not the table.
+            let survivor = try await store.fetch(slug: bystander)
+            #expect(survivor?.body == "<h1>elsewhere</h1>")
+
+            // An expired page is already gone as far as every reader is concerned, so there
+            // is nothing here to delete and nothing to report having deleted.
+            let removedDead = try await store.delete(slug: dead)
+            #expect(removedDead == false)
+            // …and it was refused, not silently swept: the row is still there for
+            // reclamation to find. Without this, `delete` removing it would look identical.
+            let reclaimed = try await store.deleteExpired()
+            #expect(reclaimed == 1)
+
+            let removedAgain = try await store.delete(slug: slug)
+            #expect(removedAgain == false)
+
+            // The freed slug, claimed again against a real primary key.
+            let reinserted = try await store.insert(
+                slug: slug, body: "<h1>second tenant</h1>",
+                contentType: PageContentType.default, expiresAt: nil, clientID: nil
+            )
+            #expect(reinserted)
+            let republished = try await store.fetch(slug: slug)
+            #expect(republished?.body == "<h1>second tenant</h1>")
+        }
+    }
 }

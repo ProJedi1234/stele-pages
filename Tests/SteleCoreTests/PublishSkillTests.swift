@@ -535,6 +535,63 @@ struct PublishSkillTests {
         #expect(skillDocument.markdown.contains(code), "\(code)")
     }
 
+    /// The delete verb has to appear in the route table and must not appear as something to
+    /// run, and those two halves are one fact rather than two.
+    ///
+    /// The route table is where an agent looks to decide whether a verb exists at all; the
+    /// document tells it not to invent sub-paths, so a verb missing from that table is a
+    /// capability it will not use. But `stele` ships no delete command, so the only way to
+    /// act on that row is to reach past the tool for a credential — which is precisely what
+    /// `neverPutsTheCredentialInTheAgentsHands` exists to forbid. A row that named the verb
+    /// and stopped there would be an invitation to go find a way, so the document says the
+    /// gap out loud in the same breath, exactly as it does for `?ttl=`. When the CLI grows a
+    /// delete command, this test is the one to come back to.
+    ///
+    /// `204` is asserted *absent* for the same reason, and it is why the status is missing
+    /// from `documentsEveryFailureStatus`' arguments too — that table is what a command
+    /// tells you, and no command can earn a `204` today. The assertion is anchored on the
+    /// row shape rather than the bare digits, which would collide with any byte limit that
+    /// happened to contain them.
+    @Test func documentsTheDeleteRoute() {
+        let markdown = skillDocument.markdown
+        #expect(
+            markdown.contains(
+                "| `DELETE /\(ServerRoute.pages)/:slug` | `\(ClientScope.publish.rawValue)` |"
+            )
+        )
+        #expect(markdown.contains("**`stele` has no delete command**"))
+        #expect(!markdown.contains("| `204` |"))
+    }
+
+    /// The consequence no status code can carry, pinned as exact sentences the way
+    /// `documentsThePutDifference` is. A delete here frees the name rather than retiring it,
+    /// so a page taken down is a URL that may one day serve a stranger's page — and it is
+    /// the *agent*, not the server, that has to decide the user meant that. That the CLI
+    /// cannot delete today makes this more worth keeping, not less: it is the argument the
+    /// agent relays to a user asking for the capability, and the argument it will need at
+    /// hand on the day a `stele delete` arrives. An edit that compressed this section into
+    /// "removes the page" would still pass every other assertion in this suite while
+    /// dropping the only part that changes what a caller does.
+    @Test func documentsThatDeletionIsPermanent() {
+        #expect(skillDocument.markdown.contains("Deletion is permanent — there is no undo."))
+        #expect(
+            skillDocument.markdown
+                .contains("A URL you already handed out may later resolve to a different page.")
+        )
+    }
+
+    /// The one place the two features can mislead each other. An agent that has been told
+    /// pages expire, and separately that DELETE removes pages, has every reason to invent a
+    /// tidy-up pass that deletes what it published — which earns a `404` per page, because
+    /// an expired page is already gone. The document says so in as many words; this pins
+    /// that it keeps saying so.
+    @Test func documentsThatExpiryNeedsNoDelete() {
+        #expect(
+            skillDocument.markdown
+                .contains("You never have to delete a page to make it expire.")
+        )
+    }
+
     /// `400` is now four different mistakes, and a malformed lifetime is the one an agent
     /// will actually make — it is the only `400` you can earn while sending a perfectly good
     /// page. `documentsEveryFailureStatus` cannot see this: `contains("400")` stays true
@@ -604,6 +661,28 @@ struct PublishSkillTests {
         #expect(skillDocument.markdown.hasPrefix("---\n"))
         #expect(skillDocument.markdown.contains("\nname: "))
         #expect(skillDocument.markdown.contains("\ndescription: "))
+    }
+
+    /// The `description` is the whole activation surface — a runtime reads it to decide
+    /// whether to open this document, and reads nothing else. So the triggers have to name
+    /// every capability the body teaches, or a section is unreachable in exactly the
+    /// situation it was written for: an agent told to unpublish the page it put here
+    /// matches nothing, never loads the skill, and either refuses or invents a route, which
+    /// is the sub-path invention the Pitfalls section exists to prevent. `hasFrontmatter`
+    /// only asserts the line exists; this asserts it still names all three write verbs, and
+    /// the search is scoped to the frontmatter because the words appear all over the body.
+    ///
+    /// One test over all three rather than one per verb: what this pins is that the trigger
+    /// list and the body stayed the same size, and that is a single fact. `replace` earned
+    /// its place here the slow way — it shipped with `PUT` and went unnamed until `DELETE`
+    /// made the omission a pattern, which is the argument for asserting the whole set at
+    /// once instead of the verb most recently added.
+    @Test func frontmatterTriggersOnEveryWriteVerb() throws {
+        let close = try #require(skillDocument.markdown.range(of: "\n---\n"))
+        let frontmatter = skillDocument.markdown[..<close.lowerBound]
+        for trigger in ["publish", "replace", "update", "delete", "unpublish"] {
+            #expect(frontmatter.contains(trigger), "\(trigger)")
+        }
     }
 
     // MARK: - The 404 surface

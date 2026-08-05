@@ -339,23 +339,13 @@ struct UpdatePageTests {
 
     // MARK: - Trie edges
 
-    /// `PUT /pages/:slug` puts a parameter node under the literal `pages`, which is also a
-    /// GET-able path. An unauthenticated `GET /pages/<anything>` must not answer 401 — a
-    /// status only reachable under `pages` would tell a scanner it had found the write
-    /// namespace. It answers 404 — the framework's plain envelope, not the uniform page,
-    /// which is fine: only the status is scanner-visible signal here.
-    @Test func unauthenticatedGetUnderPagesIsNot401() async throws {
-        try await TestFixture.makeApp().test(.router) { client in
-            try await client.execute(uri: "/\(ServerRoute.pages)/foo", method: .get) { response in
-                #expect(response.status != .unauthorized)
-                #expect(response.status == .notFound)
-            }
-        }
-    }
-
-    /// The other edge of the same trie question: `PUT /pages` with no slug segment has no
+    /// `PUT /pages` with no slug segment has no
     /// responder at all. Pinned so a future routing change that starts answering it —
     /// with an upsert, or with a 401 that distinguishes the path — has to say so here.
+    ///
+    /// The neighbouring edge — that an unauthenticated `GET /pages/<anything>` stays a 404
+    /// rather than becoming a 401 — is a property of the node itself rather than of any one
+    /// verb hung off it, and lives in `NotFoundTests.noAuthLeaksUnderPages`.
     @Test func putPagesWithoutSlugHasNoResponder() async throws {
         try await TestFixture.makeApp().test(.router) { client in
             try await client.execute(

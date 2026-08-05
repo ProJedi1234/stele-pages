@@ -67,6 +67,16 @@ pins the sentence that says whose step `stele auth login` is. The skill's job is
 the credential out of the model's reach; prose that hands it back would pass every other
 test in the suite.
 
+`documentsTheDeleteRoute` is where those two jobs pull against each other, and the shape it
+settled on is deliberate. `DELETE /pages/:slug` exists on the server, but the CLI ships no
+delete command — so the route table has to name the verb (a verb missing from that table is
+one the agent will not use, because the document tells it not to invent sub-paths) while the
+prose has to say in the same breath that nothing runs it. Naming it and stopping there is
+the failure mode: the only way to act on that row is to go find a credential, which is the
+one thing the rewrite exists to prevent. Hence the third negative assertion — `204` must
+*not* appear as a status-table row, because that table is what a command tells you and no
+command can earn one. When `stele` grows a delete command, that test is the place to start.
+
 The slug-retry policy, the requested-slug policy and the reclaim-before-insert ordering
 are shared code in `PageStoring`'s extension, so the router tests exercise the real thing
 (the 503 test runs the retry loop to genuine exhaustion, and the reclamation test proves a
@@ -140,6 +150,18 @@ token's `0`) would pass every HTTP test in the repo and fail every publish in pr
 `pagesAreStoredFetchedAndReattributedAgainstTheRealSchema` pins that refusal, the
 `created_at` a replacement preserves, and the two outcomes the router turns into a `409`
 and a `404`.
+
+`deleteReportsWhetherARowWasRemoved` covers the other single-slug write: the
+`DELETE … RETURNING` existence check, that the `WHERE` clause removes the addressed row and
+not the table (which is why it seeds a second page it never deletes — with one row, "matched
+the right row" and "matched every row" are the same observation, and `removeValue(forKey:)`
+cannot express that bug at all), that the freed slug can be claimed again, and that an
+expired row is refused rather than removed.
+
+What remains uncovered against real Postgres is narrower than it was: the
+`ON CONFLICT DO NOTHING` *collision* branch of `PageStore.insert` (its success branch is
+covered above, and `ClientStore`'s collision branch is covered separately) is the standing
+gap, asserted today only against the in-memory fake.
 
 ## Conventions
 
@@ -225,16 +247,20 @@ and a `404`.
   migration runs exactly once, so data backfills belong there too.
 - **Routes take `some PageStoring`, not a concrete store.** That seam is what lets the
   HTTP tests run without Postgres. A conformer implements only `fetch` and the atomic
-  storage primitives — insert-if-free, update-if-present, delete-what-has-expired;
+  storage primitives — insert-if-free, update-if-present, delete-if-live,
+  delete-what-has-expired;
   `create`'s retry policy, requested-slug policy and reclaim-*before*-insert ordering live
   in the protocol extension and must stay there, shared. The ordering is load-bearing:
   reclaiming first is what frees an expired slug in time for the upload happening now, and
   a delete failure must propagate rather than be swallowed. `deleteExpired` deliberately
   has no default implementation — a default would be a no-op every conformer inherits in
   silence, and every reclamation test would pass against a store that reclaims nothing.
-  `PageStore` is the only conformer that talks to a database; keep new persistence behind
-  the protocol rather than reaching past it. `ClientStoring` is the same seam for
-  credentials — `ClientStore` on Postgres, `InMemoryClientStore` in the tests — so
+  The two deletes are separate primitives on purpose: `delete(slug:)` answers one caller
+  about one name, `deleteExpired` is housekeeping addressed at no slug in particular, and
+  one entry point for both would need a predicate that is sometimes the slug and sometimes
+  the clock. `PageStore` is the only conformer that talks to a database; keep new
+  persistence behind the protocol rather than reaching past it. `ClientStoring` is the same
+  seam for credentials — `ClientStore` on Postgres, `InMemoryClientStore` in the tests — so
   authentication stays exercisable without one.
 - **Per-request state lives on `SteleRequestContext`, and only the middleware that earned
   it writes it.** Hummingbird makes the context a type parameter, so `buildRouter` returns
@@ -254,8 +280,23 @@ Don't "fix" these without a reason; the README argues them out in full.
   *expired* slugs return the same page so a scanner can't map the namespace faster than
   guessing — an expired page answering differently would reveal that a name used to be a
   page, handing over the namespace's publication history for free.
-  This is deliberately *not* true behind the upload token: `PUT /pages/:slug` returns
-  distinguishing `400`/`404` errors, because that caller has nothing left to leak to.
+  This is deliberately *not* true behind the upload token: `PUT` and `DELETE /pages/:slug`
+  return distinguishing `400`/`404` errors, because that caller has nothing left to leak
+  to. `DELETE` is not idempotent for the same reason — a repeat delete is a `404`, not the
+  `204` convention suggests, so a script that deleted a typo'd slug is told it removed
+  nothing instead of being congratulated on work it never did.
+- **`DELETE` refuses an expired page rather than sweeping it up.** `delete(slug:)` carries
+  the same `expires_at > now()` predicate `fetch` and `update` do, so a DELETE aimed at an
+  expired-but-unreclaimed row is a `404`, not a `204`. Removing the row would be tidier by
+  one row and wrong by one answer: it would report "deleted that for you" about a page every
+  reader already 404s, and about work the next upload's reclamation was going to do anyway.
+  The write surface and the read surface agree on which pages exist.
+- **Deleting is hard, and the slug goes back into the pool.** No tombstone, no
+  `deleted_at`, nothing that keeps a retired name spent — so a link already shared may one
+  day resolve to somebody else's page. Link stability would cost a growing table of names
+  nobody may use again plus a `WHERE deleted_at IS NULL` on every read, to protect URLs
+  this server already treats as guessable rather than secret. A page whose link must keep
+  pointing somewhere sensible is replaced with `PUT`, which never releases the name.
 - **`STELE_UPLOAD_TOKEN` has no default.** A default would be a published credential; an
   absent one would silently open the upload endpoint. It still authenticates alongside
   per-client tokens, resolving to the synthesised `Client.sharedToken` — `admin`-scoped,
