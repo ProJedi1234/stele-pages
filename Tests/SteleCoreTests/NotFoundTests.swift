@@ -89,4 +89,25 @@ struct NotFoundTests {
             }
         }
     }
+
+    /// The same leak one segment deeper. Every write verb hangs a parameter node under the
+    /// literal `pages`, and an unauthenticated `GET /pages/<anything>` must not answer 401:
+    /// a status reachable only under `pages` tells a scanner it has found the write
+    /// namespace, which is the read surface's uniformity defeated by a status code rather
+    /// than by a body. It answers 404 — the framework's plain envelope rather than the
+    /// uniform page, which is fine here, because a two-segment path can never be a slug and
+    /// only the status is signal.
+    ///
+    /// This lives here rather than in the suite for any one verb because it is a property
+    /// of the node, not of POST, PUT or DELETE: it was asserted identically in two write
+    /// suites until DELETE would have made it three, and a copy per verb is a count that
+    /// grows while the property stays one.
+    @Test func noAuthLeaksUnderPages() async throws {
+        try await TestFixture.makeApp().test(.router) { client in
+            try await client.execute(uri: "/\(ServerRoute.pages)/foo", method: .get) { response in
+                #expect(response.status != .unauthorized)
+                #expect(response.status == .notFound)
+            }
+        }
+    }
 }

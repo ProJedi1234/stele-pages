@@ -38,12 +38,15 @@ struct DeletePageTests {
         return headers
     }
 
-    /// Asserts the seeded page still reads back as it was stored.
+    /// Asserts the seeded page still reads back as it was stored — `nosniff` included,
+    /// this repo's marker for bodies it did not write, since a rejected delete must leave
+    /// the page served exactly as it was rather than merely still present.
     static func expectOriginalIntact(_ client: some TestClientProtocol) async throws {
         try await client.execute(uri: "/\(slugName)", method: .get) { response in
             #expect(response.status == .ok)
             #expect(String(buffer: response.body) == original)
             #expect(response.headers[.contentType] == PageContentType.default)
+            #expect(response.headers[.xContentTypeOptions] == "nosniff")
         }
     }
 
@@ -150,6 +153,13 @@ struct DeletePageTests {
     /// both answer with `{slug, url}`, and the url in that payload would point at what is
     /// now a 404, so a success response that grew one would be handing the caller a dead
     /// link as confirmation.
+    ///
+    /// `Content-Length` is asserted absent, not zero. RFC 9112 §6.2 forbids the header on a
+    /// 204, and Hummingbird adds it unprompted — an empty `ResponseBody` reports a length of
+    /// 0 rather than nil — so the handler strips it back off. Nothing about the response is
+    /// visibly different if that line is deleted, which is the whole reason this assertion
+    /// exists: near every client accepts the malformed form, and the intermediaries that do
+    /// not would reject a delete the server had already performed.
     @Test func deleteRemovesThePageAndReturnsNoContent() async throws {
         try await TestFixture.makeApp(store: try await Self.seededStore()).test(.router) { client in
             try await client.execute(
@@ -160,6 +170,7 @@ struct DeletePageTests {
                 #expect(response.status == .noContent)
                 #expect(response.body.readableBytes == 0)
                 #expect(response.headers[.location] == nil)
+                #expect(response.headers[.contentLength] == nil)
             }
 
             try await Self.expectNothingPublished(client, at: Self.slugName)
@@ -286,27 +297,15 @@ struct DeletePageTests {
 
     // MARK: - Trie edges
 
-    /// `DELETE /pages/:slug` hangs a third method off the parameter node under the literal
-    /// `pages`, which is also a GET-able path. An unauthenticated `GET /pages/<anything>`
-    /// must still not answer 401 — a status only reachable under `pages` would tell a
-    /// scanner it had found the write namespace. Re-pinned here rather than left to the PUT
-    /// suite because it is this suite's own registration that last changed that node: the
-    /// question is whether the token group has stayed on the methods it was written for.
-    @Test func unauthenticatedGetUnderPagesIsNot401() async throws {
-        try await TestFixture.makeApp().test(.router) { client in
-            try await client.execute(uri: "/\(ServerRoute.pages)/foo", method: .get) { response in
-                #expect(response.status != .unauthorized)
-                #expect(response.status == .notFound)
-            }
-        }
-    }
-
-    /// The other edge of the same trie question: `DELETE /pages` with no slug segment
-    /// resolves the literal node, finds no responder for the method, and gets the
-    /// framework's 404 — the same answer `PUT /pages` gets. Pinned because the alternative
-    /// readings are both live: a collection-level DELETE that empties the table, or a 401
-    /// from a group that started matching the bare segment. Either would have to come and
-    /// change this line.
+    /// `DELETE /pages` with no slug segment resolves the literal node, finds no responder
+    /// for the method, and gets the framework's 404 — the same answer `PUT /pages` gets.
+    /// Pinned because the alternative readings are both live: a collection-level DELETE
+    /// that empties the table, or a 401 from a group that started matching the bare
+    /// segment. Either would have to come and change this line.
+    ///
+    /// The neighbouring edge — that an unauthenticated `GET /pages/<anything>` stays a 404
+    /// rather than becoming a 401 — is a property of the node itself rather than of any one
+    /// verb hung off it, and lives in `NotFoundTests.noAuthLeaksUnderPages`.
     @Test func deletePagesWithoutSlugHasNoResponder() async throws {
         try await TestFixture.makeApp(store: try await Self.seededStore()).test(.router) { client in
             try await client.execute(

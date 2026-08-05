@@ -160,7 +160,17 @@ public func buildRouter(
             // payload would point at what is now a 404 — a link handed back by a
             // success response that leads nowhere is worse than saying nothing, and
             // there is no resource left to describe.
-            return Response(status: .noContent)
+            var response = Response(status: .noContent)
+            // And 204 means *no content*, not zero-length content: RFC 9112 §6.2 forbids
+            // `Content-Length` on this status outright. `Response.init` adds one anyway —
+            // an empty `ResponseBody` reports a length of 0 rather than nil, and the
+            // initialiser writes whatever length the body reports — so the header is
+            // removed here rather than never set. Nearly every client tolerates the
+            // spec-violating form, which is exactly why it would have survived unnoticed;
+            // the ones that don't are intermediaries, and a proxy that rejects a delete
+            // the server actually performed is a failure with no signal at either end.
+            response.headers[.contentLength] = nil
+            return response
         }
 
     // The trie matches the literal `pages` node for `GET /pages` and does not backtrack
