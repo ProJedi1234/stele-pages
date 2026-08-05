@@ -101,6 +101,13 @@ every live page that carries a deadline. Both are silent, and the second is data
 seeds a past, a future and a NULL deadline and pins `insert`, `fetch`, `update` and
 `deleteExpired` against all three.
 
+`deleteReportsWhetherARowWasRemoved` covers the other single-slug write: the
+`DELETE … RETURNING` existence check, that the `WHERE` clause removes the addressed row and
+not the table (which is why it seeds a second page it never deletes — with one row, "matched
+the right row" and "matched every row" are the same observation, and `removeValue(forKey:)`
+cannot express that bug at all), that the freed slug can be claimed again, and that an
+expired row is refused rather than removed.
+
 What remains uncovered against real Postgres is narrower than it was: the
 `ON CONFLICT DO NOTHING` *collision* branch of `insert` (the success branch is covered
 above) is the standing gap, asserted today only against the in-memory fake.
@@ -147,15 +154,19 @@ above) is the standing gap, asserted today only against the in-memory fake.
   migration runs exactly once, so data backfills belong there too.
 - **Routes take `some PageStoring`, not a concrete store.** That seam is what lets the
   HTTP tests run without Postgres. A conformer implements only `fetch` and the atomic
-  storage primitives — insert-if-free, update-if-present, delete-what-has-expired;
+  storage primitives — insert-if-free, update-if-present, delete-if-live,
+  delete-what-has-expired;
   `create`'s retry policy, requested-slug policy and reclaim-*before*-insert ordering live
   in the protocol extension and must stay there, shared. The ordering is load-bearing:
   reclaiming first is what frees an expired slug in time for the upload happening now, and
   a delete failure must propagate rather than be swallowed. `deleteExpired` deliberately
   has no default implementation — a default would be a no-op every conformer inherits in
   silence, and every reclamation test would pass against a store that reclaims nothing.
-  `PageStore` is the only conformer that talks to a database; keep new persistence behind
-  the protocol rather than reaching past it.
+  The two deletes are separate primitives on purpose: `delete(slug:)` answers one caller
+  about one name, `deleteExpired` is housekeeping addressed at no slug in particular, and
+  one entry point for both would need a predicate that is sometimes the slug and sometimes
+  the clock. `PageStore` is the only conformer that talks to a database; keep new
+  persistence behind the protocol rather than reaching past it.
 
 ## Decisions that look like bugs
 
@@ -167,8 +178,23 @@ Don't "fix" these without a reason; the README argues them out in full.
   *expired* slugs return the same page so a scanner can't map the namespace faster than
   guessing — an expired page answering differently would reveal that a name used to be a
   page, handing over the namespace's publication history for free.
-  This is deliberately *not* true behind the upload token: `PUT /pages/:slug` returns
-  distinguishing `400`/`404` errors, because that caller has nothing left to leak to.
+  This is deliberately *not* true behind the upload token: `PUT` and `DELETE /pages/:slug`
+  return distinguishing `400`/`404` errors, because that caller has nothing left to leak
+  to. `DELETE` is not idempotent for the same reason — a repeat delete is a `404`, not the
+  `204` convention suggests, so a script that deleted a typo'd slug is told it removed
+  nothing instead of being congratulated on work it never did.
+- **`DELETE` refuses an expired page rather than sweeping it up.** `delete(slug:)` carries
+  the same `expires_at > now()` predicate `fetch` and `update` do, so a DELETE aimed at an
+  expired-but-unreclaimed row is a `404`, not a `204`. Removing the row would be tidier by
+  one row and wrong by one answer: it would report "deleted that for you" about a page every
+  reader already 404s, and about work the next upload's reclamation was going to do anyway.
+  The write surface and the read surface agree on which pages exist.
+- **Deleting is hard, and the slug goes back into the pool.** No tombstone, no
+  `deleted_at`, nothing that keeps a retired name spent — so a link already shared may one
+  day resolve to somebody else's page. Link stability would cost a growing table of names
+  nobody may use again plus a `WHERE deleted_at IS NULL` on every read, to protect URLs
+  this server already treats as guessable rather than secret. A page whose link must keep
+  pointing somewhere sensible is replaced with `PUT`, which never releases the name.
 - **`STELE_UPLOAD_TOKEN` has no default.** A default would be a published credential; an
   absent one would silently open the upload endpoint.
 - **Pages expire by default, and permanence is the opt-out.** `?ttl=` is 7 days when

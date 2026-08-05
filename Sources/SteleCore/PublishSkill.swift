@@ -73,7 +73,9 @@ struct PublishSkill: Sendable {
         description: Publish a self-contained HTML page to this stele server and get a
           readable three-word URL back. Pages expire after \#(PageLifetime.defaultDays) days
           unless published with `\#(PageLifetime.queryParameter)=\#(PageLifetime.neverKeyword)`.
-          Use when asked to publish, share, or put a page online at \#(baseURL).
+          Use when asked to publish, share, or put a page online at \#(baseURL), when asked
+          to replace or update a page already there, and when asked to delete or unpublish
+          one.
         ---
 
         # Publishing a page to stele
@@ -298,6 +300,32 @@ struct PublishSkill: Sendable {
         One asymmetry to watch — omitting `Content-Type` on a PUT keeps the stored type,
         which is the opposite of POST, where an absent header means `text/html`.
 
+        ### Deleting a page
+
+        ```sh
+        curl -X DELETE \#(baseURL)/pages/my-page \
+          -H "Authorization: Bearer $STELE_UPLOAD_TOKEN"
+        ```
+
+        No `Content-Type` and no `--data-binary`: DELETE carries no body, so there is
+        nothing for a content type to describe. Success is a `204` with an empty body —
+        there is no page left to hand back a URL for. A `404` means there is no live page
+        at that name: either nothing was ever published there, or it has expired. Those are
+        one answer on purpose, because they are one situation — an expired page is gone, and
+        deleting it is not a thing left to do.
+
+        **You never have to delete a page to make it expire.**
+        A page with a deadline retires itself. DELETE is for ending a page's life early, or
+        for one published with
+        `\#(PageLifetime.queryParameter)=\#(PageLifetime.neverKeyword)`.
+
+        Deletion is permanent — there is no undo. The row is removed outright rather than
+        tombstoned, so the name goes back into the pool the moment the delete commits:
+        anyone holding the token can claim it again, and the server's own generator can
+        draw it. A URL you already handed out may later resolve to a different page. Delete
+        when the user means to give the name up; to change what an already-shared link
+        shows, use PUT, which rewrites the page without ever releasing the name.
+
         ## Pitfalls
 
         - **Use `--data-binary @file`, not `-d @file`.** `-d` strips the file's newlines,
@@ -322,9 +350,10 @@ struct PublishSkill: Sendable {
         | --- | --- | --- |
         | `201` | Published. | Read `url` from the body and report it, with `expires`. |
         | `200` | Replaced (PUT). | Same URL as before. |
+        | `204` | Deleted. | Nothing to read; the page is gone. |
         | `400` | Bad slug, bad `\#(PageLifetime.queryParameter)`, empty body, non-UTF-8, or a NUL byte. | Fix the input; the message says which. |
         | `401` | Missing or wrong bearer token. | Do not retry. Ask the user for the token. |
-        | `404` | PUT to a slug that does not exist, or has expired. | Publish it with POST instead. |
+        | `404` | PUT or DELETE to a slug that holds no live page — never published, or expired. | For PUT, publish it with POST instead; for DELETE, there was nothing left to remove. |
         | `409` | That slug is taken. | Choose another name. |
         | `413` | Page is over \#(maxPageBytes) bytes. | Drop inline images; link them instead. |
         | `415` | Content type not on the allowlist. | Send one of the accepted types. |
@@ -341,6 +370,7 @@ struct PublishSkill: Sendable {
         | `GET \#(PublishSkill.path)` | none | This document |
         | `POST /pages` | bearer | Stores the body, takes `?slug=` and `?\#(PageLifetime.queryParameter)=`, returns `{slug, url, expires}` as `201` |
         | `PUT /pages/:slug` | bearer | Replaces a stored page, returns `{slug, url, expires}` as `200` |
+        | `DELETE /pages/:slug` | bearer | Removes a stored page and frees the slug, returns `204` |
 
         ## Checklist before you publish
 
@@ -361,6 +391,10 @@ struct PublishSkill: Sendable {
           should carry its own inline `<style>` and link nothing.
         - **There is no listing endpoint.** Keep the URL you were handed; nothing else will
           give it back to you.
+        - **A URL is not a permanent address.** Deleting retires the page, not the name, so
+          a link you published can be occupied by somebody else's page afterwards. If a
+          link has already gone where you cannot reach it, replace the page with PUT rather
+          than deleting it.
         """#
     }
 }

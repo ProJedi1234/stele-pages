@@ -22,11 +22,17 @@ public enum PageUpdateOutcome: Sendable, Equatable {
 /// does so on the concrete `PageStore`, so schema bootstrap stays a database concern
 /// rather than something every conformer has to pretend to implement.
 ///
-/// The seam is storage primitives only — insert-if-free, update-if-present, and
-/// delete-what-has-expired — with the requested-vs-generated policy, the collision-retry
-/// loop, and the order reclamation runs in living in the extension below, shared by every
-/// conformer. That keeps the policy written (and tested) once: a conformer that only
-/// implements the primitives cannot drift from the retry semantics.
+/// The seam is storage primitives only — insert-if-free, update-if-present,
+/// delete-if-live, and delete-what-has-expired — with the requested-vs-generated policy,
+/// the collision-retry loop, and the order reclamation runs in living in the extension
+/// below, shared by every conformer. That keeps the policy written (and tested) once: a
+/// conformer that only implements the primitives cannot drift from the retry semantics.
+///
+/// The two deletes are not variations on each other. `delete(slug:)` is a caller giving one
+/// name up and is answerable to that caller; `deleteExpired()` is housekeeping nobody asked
+/// for, addressed at no slug in particular, and reports a count rather than a fate. Folding
+/// them into one entry point would mean a predicate that is sometimes the slug and sometimes
+/// the clock.
 public protocol PageStoring: Sendable {
     /// Fetches a page, or nil if no such slug exists.
     ///
@@ -56,6 +62,25 @@ public protocol PageStoring: Sendable {
     /// Never changes the expiry either, and reports it back instead. A replacement is a new
     /// body at an old address, not a new page.
     func update(slug: Slug, body: String, contentType: String?) async throws -> PageUpdateOutcome
+
+    /// Removes the *live* page at `slug`, as one atomic step: the existence check and the
+    /// removal must not leave a window where a concurrent write changes what the removal
+    /// lands on, or this reports on a page it did not delete.
+    ///
+    /// "Live" carries the same meaning it does in `fetch` and `update`, and for the same
+    /// reason: an expired-but-unreclaimed row must read as absent here too, or DELETE would
+    /// answer `204` for a page that GET and PUT both call gone. Such a row is left where it
+    /// is rather than swept up opportunistically — reclamation is `deleteExpired`'s job, and
+    /// a delete that removed rows it then reported as absent would be doing two things under
+    /// one return value.
+    ///
+    /// The removal is hard — no tombstone, no reservation. The slug goes straight back
+    /// into the pool, so a later POST can ask for it and the generator can draw it. That
+    /// is the intended reading of a delete: the caller is giving the name up, not holding
+    /// it. Anyone still following the old link sees whatever gets published there next.
+    ///
+    /// - Returns: true if a live row was removed, false if no live page existed there.
+    func delete(slug: Slug) async throws -> Bool
 
     /// Removes every row whose expiry has passed, returning them to the slug pool.
     ///
