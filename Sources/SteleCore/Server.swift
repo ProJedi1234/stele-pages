@@ -573,6 +573,18 @@ private func validatedScopes(_ raw: [String]?) throws -> [ClientScope] {
     return parsed.filter { seen.insert($0).inserted }
 }
 
+/// The furthest ahead `expiresIn` may reach. A century is far past any credential anyone
+/// means to issue, and "no expiry at all" is already spelled by omitting the field — so
+/// nothing legitimate lives between here and the top of `Int`.
+///
+/// The bound is a safety limit, not a policy one. A `timestamptz` is microseconds in an
+/// `Int64`, and PostgresNIO's `Date` encoder converts to that with a plain `Int64(_:)` over
+/// a `Double`: a date past roughly the year 294000 does not fail to bind, it **traps**, and
+/// a trap in a request handler takes the process and every in-flight request with it. That
+/// is reachable from one JSON field, so the field is bounded here rather than trusted to be
+/// sensible.
+let maxExpiresInSeconds = 100 * 365 * 24 * 60 * 60
+
 /// Turns `expiresIn` seconds into the absolute instant stored in `expires_at`.
 ///
 /// Absolute rather than relative in the database, so a credential's death is a fact rather
@@ -586,6 +598,15 @@ private func validatedExpiry(_ seconds: Int?, from moment: Date = Date()) throws
             .badRequest,
             message: """
                 "expiresIn" is a number of seconds from now and must be positive. \
+                Omit it for a credential that does not expire.
+                """
+        )
+    }
+    guard seconds <= maxExpiresInSeconds else {
+        throw HTTPError(
+            .badRequest,
+            message: """
+                "expiresIn" is at most \(maxExpiresInSeconds) seconds (a century). \
                 Omit it for a credential that does not expire.
                 """
         )

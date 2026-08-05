@@ -257,6 +257,14 @@ Don't "fix" these without a reason; the README argues them out in full.
   `DELETE` that moved it would erase the only record of when trust ended. The row itself is
   never deleted, and revoked credentials stay in `GET /admin/clients` — "which did I revoke,
   and when?" is the question that list exists to answer.
+- **`expiresIn` is bounded above, and that bound is not a policy.** `validatedExpiry` caps it
+  at `maxExpiresInSeconds` (a century). PostgresNIO encodes a `Date` as microseconds in an
+  `Int64` via a plain `Int64(_:)` over a `Double`, which **traps** past roughly the year
+  294000 — a trap in a handler takes the process and every in-flight request with it, and one
+  JSON field reaches it. "No expiry" is already spelled by omitting the field, so nothing
+  legitimate lives above the cap. The in-memory store holds any `Date` it is handed, so this
+  is one of the cases where only the Postgres path can fail: pin new arithmetic on that column
+  in `validatedExpiry`, not downstream.
 - **The shared stylesheet and the publish skill are Swift strings, not SwiftPM
   resources.** They live as raw literals in `Sources/SteleCore/Stylesheet.swift` and
   `Sources/SteleCore/PublishSkill.swift`. The Dockerfile's runtime stage copies

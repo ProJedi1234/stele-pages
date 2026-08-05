@@ -218,9 +218,11 @@ curl -X POST "$STELE/admin/clients" \
 ```
 
 `scopes` defaults to `["publish"]` and `expiresIn` is seconds from now, absent meaning no
-expiry. Revoking is `DELETE /admin/clients/:name`; it keeps the first `revoked_at` rather
-than moving it on a retry, and the row is never deleted — "which did I revoke, and when?"
-is the question the listing exists to answer.
+expiry and anything past a century being a `400` — a `timestamptz` is microseconds in an
+`Int64`, and a date far enough out is not a value the driver refuses but one it traps on.
+Revoking is `DELETE /admin/clients/:name`; it keeps the first `revoked_at` rather than
+moving it on a retry, and the row is never deleted — "which did I revoke, and when?" is the
+question the listing exists to answer.
 
 Every write records the credential that made it in `pages.client_id`, on `POST` and on
 `PUT` alike — the column says who wrote the bytes currently being served, so replacing a

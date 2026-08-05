@@ -181,6 +181,33 @@ struct AdminClientsTests {
         }
     }
 
+    /// The other end of the range, which is not a taste question. A `timestamptz` is
+    /// microseconds in an `Int64` and PostgresNIO converts to that with `Int64(_:)` over a
+    /// `Double`, so a far enough expiry does not fail to bind — it traps, taking the process
+    /// and every in-flight request with it. One JSON field reaches that, so the field is
+    /// bounded and the answer is a 400.
+    ///
+    /// The in-memory store would happily hold any of these dates; what this pins is that
+    /// `validatedExpiry` refuses them before a store is ever asked.
+    @Test func anAbsurdlyDistantExpiryIs400RatherThanACrash() async throws {
+        try await Self.makeApp().test(.router) { client in
+            for bad in ["\(Int.max)", "\(maxExpiresInSeconds + 1)"] {
+                let response = try await Self.create(
+                    client, body: #"{"name":"distant","expiresIn":\#(bad)}"#
+                )
+                #expect(response.status == .badRequest, "\(bad)")
+                #expect(response.json["token"] == nil)
+            }
+
+            // The boundary itself is allowed: the limit is a safety rail, and a century is
+            // past anything an operator means but not a value to reject as nonsense.
+            let allowed = try await Self.create(
+                client, body: #"{"name":"long-lived","expiresIn":\#(maxExpiresInSeconds)}"#
+            )
+            #expect(allowed.status == .created)
+        }
+    }
+
     /// The name is the handle `DELETE` addresses, so anything that would not survive a URL
     /// path segment has to be refused at creation — a credential nobody can revoke is the
     /// one failure this whole feature exists to prevent.
