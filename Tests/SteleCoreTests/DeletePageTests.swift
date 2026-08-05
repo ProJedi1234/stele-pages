@@ -245,6 +245,39 @@ struct DeletePageTests {
 
     // MARK: - Absent pages
 
+    /// An expired page is one of the absent ones, and this is the seam where that could
+    /// most easily have gone the other way. The row is still physically there — reclamation
+    /// only runs on upload — so the naive `DELETE FROM pages WHERE slug = $1` matches it,
+    /// removes it, and answers 204: the server claiming credit for removing a page that GET
+    /// and PUT both already call gone, and doing the next upload's reclamation early under
+    /// a return value that means something else.
+    ///
+    /// The follow-up read is what makes this more than a status assertion. It has to be the
+    /// uniform 404, so an expired page and a never-published one stay indistinguishable on
+    /// the public surface even after somebody has tried to delete one.
+    @Test func deletingAnExpiredPageIs404() async throws {
+        let store = InMemoryPageStore()
+        await store.seed(
+            slug: try Slug(custom: Self.slugName),
+            body: Self.original,
+            expiresAt: Date().addingTimeInterval(-1)
+        )
+
+        try await TestFixture.makeApp(store: store).test(.router) { client in
+            try await client.execute(
+                uri: "/pages/\(Self.slugName)",
+                method: .delete,
+                headers: Self.authorized()
+            ) { response in
+                #expect(response.status == .notFound)
+                let message = try TestFixture.errorMessage(response.body)
+                #expect(message == "No page exists at \(Self.slugName).")
+            }
+
+            try await Self.expectNothingPublished(client, at: Self.slugName)
+        }
+    }
+
     /// Not idempotent, deliberately, and mirroring PUT: the second delete is a 404 with the
     /// same message shape rather than a second 204.
     ///

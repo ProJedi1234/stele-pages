@@ -351,7 +351,11 @@ struct PublishSkillTests {
             var remainder = Substring(skillDocument.markdown)
             while let found = remainder.range(of: marker) {
                 let tail = remainder[found.upperBound...]
-                let name = tail.prefix { !" \n`\"\\".contains($0) }
+                // `&`, `?` and `#` end a slug as surely as whitespace does: the document
+                // teaches `?slug=my-page&ttl=never`, and without them the "example" this
+                // scan extracts is the whole query string — a name `Slug(custom:)` rejects,
+                // failing this test for a document that is entirely correct.
+                let name = tail.prefix { !" \n`\"\\&?#".contains($0) }
                 examples.append(String(name))
                 remainder = tail
             }
@@ -411,12 +415,69 @@ struct PublishSkillTests {
         )
     }
 
+    /// The one place the two features can mislead each other. An agent that has been told
+    /// pages expire, and separately that DELETE removes pages, has every reason to invent a
+    /// tidy-up pass that deletes what it published — which earns a `404` per page, because
+    /// an expired page is already gone. The document says so in as many words; this pins
+    /// that it keeps saying so.
+    @Test func documentsThatExpiryNeedsNoDelete() {
+        #expect(
+            skillDocument.markdown
+                .contains("You never have to delete a page to make it expire.")
+        )
+    }
+
+    /// `400` is now four different mistakes, and a malformed lifetime is the one an agent
+    /// will actually make — it is the only `400` you can earn while sending a perfectly good
+    /// page. `documentsEveryFailureStatus` cannot see this: `contains("400")` stays true
+    /// however incomplete the row's enumeration becomes.
+    @Test func theBadRequestRowNamesTheLifetime() throws {
+        let row = try #require(
+            skillDocument.markdown.split(separator: "\n").first { $0.hasPrefix("| `400`") }
+        )
+        #expect(row.contains(PageLifetime.queryParameter))
+    }
+
     /// The field names the agent reads its answer out of. Worth pinning because the README
     /// shows `url` first while `PageLocationResponse` encodes `slug` first — the document has
     /// to show what the encoder actually emits, not what reads better in prose.
+    ///
+    /// `expires` is here for a sharper reason than the other two: it is the only field whose
+    /// value can be JSON `null`, so an agent that never learned the key exists will report a
+    /// permanent-looking URL for a page with a week to live.
     @Test func documentsTheResponseShape() {
         #expect(skillDocument.markdown.contains("\"slug\""))
         #expect(skillDocument.markdown.contains("\"url\""))
+        #expect(skillDocument.markdown.contains("\"expires\""))
+    }
+
+    /// The default lifetime, pinned to the constant through the table row that states it.
+    ///
+    /// Unlike `documentsTheConfiguredSizeLimit` there is no negative half available: the
+    /// default is a compile-time constant rather than an init parameter, so there is no
+    /// "render with an unusual value" rendering to contrast against. What this test does
+    /// catch is the drift that matters — a `7` typed into the prose in place of the
+    /// interpolation would pass today and fail the moment the constant moved, which is
+    /// exactly when a stale document would otherwise start teaching a wrong lifetime.
+    ///
+    /// Anchored on the table row rather than a sentence because the row is one line and
+    /// structural; a prose phrase would break on any rewording that left the fact intact.
+    @Test func documentsTheDefaultLifetime() {
+        #expect(skillDocument.markdown.contains("| omitted | \(PageLifetime.defaultDays) days |"))
+    }
+
+    /// The rest of the `?ttl=` vocabulary: the parameter's name, the opt-out spelling, and
+    /// the upper bound. All three are constants the parser reads, so a document that taught
+    /// `forever`, or `lifetime=`, or a bound the server does not enforce would be a `200`
+    /// from this route and a `400` for the agent that followed it — the worst shape of
+    /// wrong, because nothing on either side reports a problem with the document.
+    @Test func documentsTheLifetimeGrammar() {
+        let markdown = skillDocument.markdown
+        #expect(markdown.contains("?\(PageLifetime.queryParameter)="))
+        #expect(
+            markdown.contains("\(PageLifetime.queryParameter)=\(PageLifetime.neverKeyword)")
+        )
+        #expect(markdown.contains("\(PageLifetime.maxDays)"))
     }
 
     /// The asymmetry an agent updating a page will otherwise get wrong: absence of

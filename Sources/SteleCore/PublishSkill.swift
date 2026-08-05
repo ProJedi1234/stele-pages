@@ -24,10 +24,11 @@
 ///
 /// Maintenance: the prose is pinned to the code it documents by
 /// `PublishSkillTests.componentTableMatchesTheStylesheet`, `.documentsEverySyntaxTokenClass`,
-/// `.documentsOnlyDefinedClasses`, `.listsEveryAllowedContentType` and
-/// `.exampleSlugsAreValid`. Those tests can only pin
-/// what has a constant behind it; the rest of the prose is a human responsibility, and
-/// changing the publish contract means changing this document in the same commit.
+/// `.documentsOnlyDefinedClasses`, `.listsEveryAllowedContentType`, `.exampleSlugsAreValid`,
+/// `.documentsTheDefaultLifetime`, `.documentsTheLifetimeGrammar` and
+/// `.theBadRequestRowNamesTheLifetime`. Those tests can only pin what has a constant behind
+/// it; the rest of the prose is a human responsibility, and changing the publish contract
+/// means changing this document in the same commit.
 struct PublishSkill: Sendable {
     static let path = "/\(ServerRoute.skill)"
 
@@ -50,12 +51,15 @@ struct PublishSkill: Sendable {
     /// therefore `\#(...)`.
     ///
     /// Every value with exactly one constant behind it is interpolated rather than typed
-    /// out. That is a stronger accuracy mechanism than any test, because it removes the
-    /// opportunity for drift instead of detecting it after the fact. The deliberate
-    /// exceptions are the component-class table and the syntax-token list: each row
-    /// carries prose no list of names could generate, so the names are hand-typed and
-    /// held set-equal to `Stylesheet.componentClasses` / `.syntaxTokenClasses` — in both
-    /// directions — by `PublishSkillTests.componentTableMatchesTheStylesheet` and
+    /// out — the base URL, the byte limit, the stylesheet path, the slug bounds, the
+    /// reserved names, the accepted content types, and the whole lifetime vocabulary
+    /// (`PageLifetime.queryParameter`, `.neverKeyword`, `.defaultDays`, `.maxDays`). That is
+    /// a stronger accuracy mechanism than any test, because it removes the opportunity for
+    /// drift instead of detecting it after the fact. The deliberate exceptions are the
+    /// component-class table and the syntax-token list: each row carries prose no list of
+    /// names could generate, so the names are hand-typed and held set-equal to
+    /// `Stylesheet.componentClasses` / `.syntaxTokenClasses` — in both directions — by
+    /// `PublishSkillTests.componentTableMatchesTheStylesheet` and
     /// `.documentsEverySyntaxTokenClass`.
     private static func render(baseURL: String, maxPageBytes: Int) -> String {
         let reserved = Slug.reserved.sorted().map { "`\($0)`" }.joined(separator: ", ")
@@ -67,24 +71,29 @@ struct PublishSkill: Sendable {
         ---
         name: publish-to-stele
         description: Publish a self-contained HTML page to this stele server and get a
-          readable three-word URL back. Use when asked to publish, share, or put a page
-          online at \#(baseURL), when asked to replace or update a page already there,
-          and when asked to delete or unpublish one.
+          readable three-word URL back. Pages expire after \#(PageLifetime.defaultDays) days
+          unless published with `\#(PageLifetime.queryParameter)=\#(PageLifetime.neverKeyword)`.
+          Use when asked to publish, share, or put a page online at \#(baseURL), when asked
+          to replace or update a page already there, and when asked to delete or unpublish
+          one.
         ---
 
         # Publishing a page to stele
 
         stele is a page server: you hand it one self-contained HTML file and it hands back a
         readable three-word URL like `\#(baseURL)/quiet-cedar-otter`. This document was
-        served by the very deployment you are about to publish to, so every host, limit and
-        reserved name below is that deployment's actual value rather than an example. There
-        is no MCP server and no CLI — this skill wraps `curl`.
+        served by the very deployment you are about to publish to, so every host, limit,
+        lifetime and reserved name below is that deployment's actual value rather than an
+        example. There is no MCP server and no CLI — this skill wraps `curl`.
 
         ## Before you start
 
         - `STELE_UPLOAD_TOKEN` must be in the environment. Reads are open; writes are not.
           If it is unset, ask the user for it. Never invent one, and never write it into a
           page you publish.
+        - **Decide how long the page should live.** It expires in \#(PageLifetime.defaultDays)
+          days if you say nothing, which is wrong for anything the user means to keep. See
+          "How long the page lives" below.
         - Nothing else. No SDK, no build step, no dependencies.
 
         ## 1. Write one self-contained HTML file
@@ -203,25 +212,75 @@ struct PublishSkill: Sendable {
           --data-binary @page.html
         ```
 
+        That command takes the default lifetime — \#(PageLifetime.defaultDays) days. It is
+        written that way on purpose: the lifetime is the one thing here you cannot change
+        afterwards, so it is a choice to make rather than one to inherit from an example. Read
+        the next section before you run it.
+
         Success is a `201` with a JSON body:
 
         ```json
-        {"slug":"quiet-cedar-otter","url":"\#(baseURL)/quiet-cedar-otter"}
+        {"slug":"quiet-cedar-otter","url":"\#(baseURL)/quiet-cedar-otter","expires":"2030-01-08T09:41:00Z"}
         ```
 
-        Read `url` out of that and report it to the user. That URL is the deliverable.
+        `expires` is that instant for a page with a deadline, and JSON `null` for one that
+        never expires. The key is always there. The three keys are not always in this
+        order, though — parse the body by key rather than by position.
+
+        Read `url` out of that and report it to the user. That URL is the deliverable. Report
+        `expires` alongside it — either the date the link dies, or that it is permanent —
+        because the user cannot look it up later and nothing will remind them.
+
+        ### How long the page lives
+
+        **Pages are temporary unless you say otherwise.** A page with no
+        `\#(PageLifetime.queryParameter)` expires \#(PageLifetime.defaultDays) days after it is
+        published, and then serves the ordinary 404 exactly as if it had never existed.
+
+        | Query | Means |
+        | --- | --- |
+        | omitted | \#(PageLifetime.defaultDays) days |
+        | `?\#(PageLifetime.queryParameter)=30` | 30 days; any whole number from 1 to \#(PageLifetime.maxDays) |
+        | `?\#(PageLifetime.queryParameter)=\#(PageLifetime.neverKeyword)` | never expires |
+
+        Anything else — `0`, a negative, `7.5`, an empty value, a number past
+        \#(PageLifetime.maxDays) — is a `400`. Nothing is ever silently rounded or defaulted, so
+        a rejected value means the page was not published at all rather than published with a
+        lifetime nobody chose.
+
+        Set one by adding the parameter to the POST above:
+
+        ```sh
+        curl -X POST "\#(baseURL)/pages?\#(PageLifetime.queryParameter)=\#(PageLifetime.neverKeyword)" \
+          -H "Authorization: Bearer $STELE_UPLOAD_TOKEN" \
+          -H "Content-Type: text/html" \
+          --data-binary @page.html
+        ```
+
+        Choose deliberately rather than reflexively. A one-off preview or a draft for review
+        wants a short lifetime; anything the user will link to, bookmark or hand to someone else
+        wants `\#(PageLifetime.queryParameter)=\#(PageLifetime.neverKeyword)`. When you cannot
+        tell, ask.
+
+        The expiry belongs to the page, not to its current contents: replacing a page with
+        PUT does not extend it, and there is no way to change it afterwards. A page that
+        needs to outlive its deadline has to be published again.
 
         ### Choosing your own slug
 
         Add `?slug=my-page` to the POST. A slug is lowercase letters, digits and single
         interior hyphens, \#(Slug.minLength)–\#(Slug.maxLength) characters long. Breaking
         those rules is a `400`; a name already taken is a `409` — pick a different one
-        rather than retrying the same one.
+        rather than retrying the same one. Combine it with a lifetime as an ordinary query
+        string: `?slug=my-page&\#(PageLifetime.queryParameter)=\#(PageLifetime.neverKeyword)`.
 
         These names are reserved by the server and are rejected outright rather than
         accepted and then shadowed:
 
         \#(reserved)
+
+        A name freed by an expiry becomes claimable again — expired pages leave nothing
+        behind — so a `409` today may not be a `409` next week.
 
         ### Replacing a page you already published
 
@@ -232,8 +291,11 @@ struct PublishSkill: Sendable {
           --data-binary @page.html
         ```
 
-        Returns `200`. It **never creates**: a `404` means nothing is published there yet, so
-        use POST instead.
+        Returns `200`, and reports the page's unchanged `expires` in the same body POST answers
+        with. A `?\#(PageLifetime.queryParameter)=` on this verb is refused with a `400` rather
+        than ignored — the lifetime was fixed at publication, and silently discarding the value
+        would leave you believing you had changed it. It **never creates**: a `404` means
+        nothing is published there yet — or that it has expired — so use POST.
 
         One asymmetry to watch — omitting `Content-Type` on a PUT keeps the stored type,
         which is the opposite of POST, where an absent header means `text/html`.
@@ -247,8 +309,15 @@ struct PublishSkill: Sendable {
 
         No `Content-Type` and no `--data-binary`: DELETE carries no body, so there is
         nothing for a content type to describe. Success is a `204` with an empty body —
-        there is no page left to hand back a URL for. A `404` means nothing was published
-        at that name to begin with.
+        there is no page left to hand back a URL for. A `404` means there is no live page
+        at that name: either nothing was ever published there, or it has expired. Those are
+        one answer on purpose, because they are one situation — an expired page is gone, and
+        deleting it is not a thing left to do.
+
+        **You never have to delete a page to make it expire.**
+        A page with a deadline retires itself. DELETE is for ending a page's life early, or
+        for one published with
+        `\#(PageLifetime.queryParameter)=\#(PageLifetime.neverKeyword)`.
 
         Deletion is permanent — there is no undo. The row is removed outright rather than
         tombstoned, so the name goes back into the pool the moment the delete commits:
@@ -270,17 +339,21 @@ struct PublishSkill: Sendable {
         - Do not invent sub-paths. The API is exactly the routes in the table below.
         - A `503` means \#(PageStore.maxSlugAttempts) random slugs collided in a row. Retry
           once, or pass `?slug=`.
+        - **A `201` is not a promise the page will still be there.** The default is
+          \#(PageLifetime.defaultDays) days, not forever, and a link the user expects to keep
+          needs `?\#(PageLifetime.queryParameter)=\#(PageLifetime.neverKeyword)` at publish time.
+          There is no way to add it afterwards.
 
         ## Status codes
 
         | Code | Means | Do |
         | --- | --- | --- |
-        | `201` | Published. | Read `url` from the body and report it. |
+        | `201` | Published. | Read `url` from the body and report it, with `expires`. |
         | `200` | Replaced (PUT). | Same URL as before. |
         | `204` | Deleted. | Nothing to read; the page is gone. |
-        | `400` | Bad slug, empty body, non-UTF-8, or a NUL byte. | Fix the input; the message says which. |
+        | `400` | Bad slug, bad `\#(PageLifetime.queryParameter)`, empty body, non-UTF-8, or a NUL byte. | Fix the input; the message says which. |
         | `401` | Missing or wrong bearer token. | Do not retry. Ask the user for the token. |
-        | `404` | PUT or DELETE to a slug that holds no page. | For PUT, publish it with POST instead; for DELETE, there was nothing to remove. |
+        | `404` | PUT or DELETE to a slug that holds no live page — never published, or expired. | For PUT, publish it with POST instead; for DELETE, there was nothing left to remove. |
         | `409` | That slug is taken. | Choose another name. |
         | `413` | Page is over \#(maxPageBytes) bytes. | Drop inline images; link them instead. |
         | `415` | Content type not on the allowlist. | Send one of the accepted types. |
@@ -292,22 +365,27 @@ struct PublishSkill: Sendable {
         | --- | --- | --- |
         | `GET /` | none | Usage page |
         | `GET /\#(ServerRoute.healthz)` | none | `ok` |
-        | `GET /:slug` | none | The stored page, or a 404 page |
+        | `GET /:slug` | none | The stored page, or a 404 page if it is absent or expired |
         | `GET \#(Stylesheet.path)` | none | The shared stylesheet |
         | `GET \#(PublishSkill.path)` | none | This document |
-        | `POST /pages` | bearer | Stores the body, returns `{slug, url}` as `201` |
-        | `PUT /pages/:slug` | bearer | Replaces a stored page, returns `{slug, url}` as `200` |
+        | `POST /pages` | bearer | Stores the body, takes `?slug=` and `?\#(PageLifetime.queryParameter)=`, returns `{slug, url, expires}` as `201` |
+        | `PUT /pages/:slug` | bearer | Replaces a stored page, returns `{slug, url, expires}` as `200` |
         | `DELETE /pages/:slug` | bearer | Removes a stored page and frees the slug, returns `204` |
 
         ## Checklist before you publish
 
         One file · stylesheet linked · nothing fetched from another host · the stylesheet's
-        rules not restated · no secrets in the markup · a valid slug if you chose one · the
-        token read from the environment.
+        rules not restated · no secrets in the markup · a valid slug if you chose one · a
+        lifetime chosen on purpose · the token read from the environment.
 
         ## What this is not
 
         - **Reads are unauthenticated and slugs are guessable.** Nothing private goes here.
+        - **This is not permanent hosting.** A URL you hand to a user stops working on its
+          expiry date, and the user then gets the same "nothing here" page a wrong address gets
+          — no explanation, nothing to retry. Publishing with
+          `\#(PageLifetime.queryParameter)=\#(PageLifetime.neverKeyword)` is the only thing that
+          prevents it.
         - **The stylesheet mutates in place.** A restyle reaches an already-published page on
           its next load, which is the point — but a page whose appearance must never change
           should carry its own inline `<style>` and link nothing.

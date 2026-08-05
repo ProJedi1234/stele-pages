@@ -1,3 +1,4 @@
+import Foundation
 import Hummingbird
 import HummingbirdTesting
 import Testing
@@ -9,26 +10,38 @@ import Testing
 /// faster than guessing at it.
 @Suite("Not found")
 struct NotFoundTests {
-    /// Three different reasons to fail — malformed, reserved-but-unrouted, and simply
-    /// absent — have to be indistinguishable from outside. The store holds a real page
+    /// Four different reasons to fail — malformed, reserved-but-unrouted, simply absent,
+    /// and expired — have to be indistinguishable from outside. The store holds a real page
     /// throughout (asserted with a 200 below, so the seeding can't silently go inert),
     /// which makes "absent" mean absent rather than "the store is empty".
+    ///
+    /// Expiry is the newest member and the one with the most to leak: a page that once
+    /// existed answering differently from one that never did would tell a scanner it had
+    /// found a real slug, and hand it the publication history of the namespace for free.
+    /// The expired page is seeded and never reclaimed, which is the state a real server sits
+    /// in between uploads.
     @Test func all404sAreIdentical() async throws {
         let store = InMemoryPageStore()
         await store.seed(slug: try Slug(custom: "amber-willow-heron"), body: "<h1>here</h1>")
+        await store.seed(
+            slug: try Slug(custom: "brisk-maple-compass"),
+            body: "<h1>expired</h1>",
+            expiresAt: Date().addingTimeInterval(-1)
+        )
 
         // Malformed (too short), reserved but with no GET route, well-formed but never
-        // published, a routed path whose only responder is POST, and the bare parent of
-        // the stylesheet — `/pages` and `/assets` each need their own GET responder
-        // because the trie matches the literal node without backtracking to `/:slug`.
+        // published, published but past its deadline, a routed path whose only responder is
+        // POST, and the bare parent of the stylesheet — `/pages` and `/assets` each need
+        // their own GET responder because the trie matches the literal node without
+        // backtracking to `/:slug`.
         //
         // `/skill` is deliberately absent, even though this list otherwise mirrors
         // `ServerRoute.names`: it answers with the publish document, not a 404, so it has
         // no uniform-404 responder to compare. Adding it here is the instinctive "fix" and
         // is wrong — `PublishSkillTests.servesTheSkill` is what covers that path.
         let paths = [
-            "/x", "/admin", "/quiet-cedar-otter", "/\(ServerRoute.pages)",
-            "/\(ServerRoute.assets)",
+            "/x", "/admin", "/quiet-cedar-otter", "/brisk-maple-compass",
+            "/\(ServerRoute.pages)", "/\(ServerRoute.assets)",
         ]
         // Collected inside the test closure and returned out of it: the closure is
         // `@Sendable`, so it cannot mutate a captured local.

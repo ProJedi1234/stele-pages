@@ -272,14 +272,13 @@ struct UpdatePageTests {
                 // Not `.created`: nothing came into existence here.
                 #expect(response.status == .ok)
 
-                // Decoded loosely rather than through a mirror of `PageLocationResponse`:
-                // the wire shape is what this test is about.
-                let payload = try #require(
-                    try JSONSerialization.jsonObject(with: Data(buffer: response.body))
-                        as? [String: String]
-                )
-                #expect(payload["slug"] == Self.slugName)
-                #expect(payload["url"] == "\(TestFixture.baseURL)/\(Self.slugName)")
+                let payload = try TestFixture.writeResponse(response.body)
+                #expect(payload["slug"] as? String == Self.slugName)
+                #expect(payload["url"] as? String == "\(TestFixture.baseURL)/\(Self.slugName)")
+                // The seeded page is permanent, so this is the `null` case — asserted here
+                // rather than only in `PageExpiryTests` because this is the test that would
+                // otherwise stop covering the body's full shape the day a key was added.
+                #expect(try TestFixture.expiry(in: payload) == nil)
                 #expect(response.headers[.location] == nil)
             }
 

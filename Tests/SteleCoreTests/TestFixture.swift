@@ -82,4 +82,28 @@ enum TestFixture {
         let payload = try JSONSerialization.jsonObject(with: Data(buffer: body))
         return try #require((payload as? [String: [String: String]])?["error"]?["message"])
     }
+
+    /// A write route's JSON body, decoded loosely rather than through a mirror of
+    /// `PageLocationResponse` — the wire shape is what these tests are about.
+    ///
+    /// `[String: Any]`, not `[String: String]`, which is what this started as: `expires` is
+    /// JSON `null` for a permanent page, and a `[String: String]` cast fails outright on the
+    /// `NSNull` that produces. That failure would land in whichever test happened to publish
+    /// a permanent page, nowhere near the reason.
+    static func writeResponse(_ body: ByteBuffer) throws -> [String: Any] {
+        let payload = try JSONSerialization.jsonObject(with: Data(buffer: body))
+        return try #require(payload as? [String: Any])
+    }
+
+    /// The `expires` field of a write response, as an instant, or nil for a permanent page.
+    ///
+    /// An *absent* key fails rather than reading as nil, and that distinction is the point:
+    /// absence would mean the server had no opinion about the page's lifetime, and it always
+    /// has one. Only an explicit JSON null says "this page never expires".
+    static func expiry(in payload: [String: Any]) throws -> Date? {
+        let raw = try #require(payload["expires"], "the response must carry an `expires` key")
+        if raw is NSNull { return nil }
+        let text = try #require(raw as? String, "`expires` must be a string or null")
+        return try Date(text, strategy: .iso8601)
+    }
 }
