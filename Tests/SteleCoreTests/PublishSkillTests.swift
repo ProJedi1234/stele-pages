@@ -419,10 +419,63 @@ struct PublishSkillTests {
     /// that named only `stele publish` would leave an agent on a fresh machine with a
     /// `command not found` and no instruction covering it.
     @Test(arguments: [
-        "stele auth status", "stele auth login", "stele publish", "stele update",
+        "stele auth status", "stele auth login", "stele auth logout", "stele publish",
+        "stele update", "stele skill", "stele admin clients",
     ])
     func documentsEveryCommandTheAgentNeeds(command: String) {
         #expect(skillDocument.markdown.contains(command), "\(command)")
+    }
+
+    /// Every flag the client accepts has to be named, because a flag an agent has not been
+    /// told about is a capability it does not have.
+    ///
+    /// This is the test the document needed and did not have. `--ttl` shipped in the client
+    /// while the prose still read "`stele publish` does not expose this yet", so an agent
+    /// asked for a permanent page refused — citing a limitation that had stopped existing,
+    /// in a sentence confident enough to be read as policy. Nothing here can see the other
+    /// repository, so this cannot prove the flags exist; what it proves is that the set this
+    /// package believes in and the set the document teaches are the same set, which is the
+    /// half that was actually broken.
+    @Test(arguments: SteleCLI.flags)
+    func documentsEveryFlagTheAgentCanUse(flag: String) {
+        #expect(skillDocument.markdown.contains(flag), "\(flag)")
+    }
+
+    /// The exit table, held to `SteleCLI.exits` row for row and in order.
+    ///
+    /// The exit code is what an agent branches on — the CLI says so itself — and the
+    /// document used to answer "what does a failure look like?" with HTTP statuses the
+    /// caller never sees: the client rewrites the message in its own words and, outside one
+    /// case, never prints the number. So an agent was told to match on strings that do not
+    /// arrive, while `2` (no credential here) and `9` (nothing answered) had no row at all
+    /// because neither has a status behind it.
+    ///
+    /// Order is asserted, not just membership: the table is read top to bottom by something
+    /// deciding what to do, and a code that drifted out of sequence would read as a
+    /// severity ranking that is not there.
+    @Test func theExitTableMatchesTheClientsExitCodes() throws {
+        let rows = try Self.tableRows(
+            after: "These are the codes, and what each one asks you to do next:",
+            in: skillDocument.markdown
+        )
+        let documented = rows.compactMap { row -> Int32? in
+            guard row.count > 1 else { return nil }
+            return Self.backtickedTokens(in: row[1]).first.flatMap { Int32($0) }
+        }
+
+        #expect(documented == SteleCLI.exits.map(\.code))
+        // The success case earns a row too: an agent that only ever sees failures documented
+        // has been told what to do about every outcome except the one it usually gets.
+        #expect(documented.first == 0)
+    }
+
+    /// The two exits with no HTTP status behind them, which is exactly why the old
+    /// status-only table could not carry them. `2` is decided before a request is built and
+    /// `9` is a request that never got an answer — and they are between them the most likely
+    /// way a fresh machine fails, so an agent without a row for either invents one.
+    @Test(arguments: ["`2`", "`9`"])
+    func documentsTheFailuresThatNeverReachTheServer(code: String) {
+        #expect(skillDocument.markdown.contains(code), "\(code)")
     }
 
     /// The one version string in the document, and it is the server's.

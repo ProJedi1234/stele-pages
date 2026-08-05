@@ -29,15 +29,25 @@
 /// — undoes the point of the tool and is caught by
 /// `PublishSkillTests.neverPutsTheCredentialInTheAgentsHands`.
 ///
+/// **What the document owes the CLI, and how that went wrong.** `--ttl` shipped in the
+/// client and this document went on saying "`stele publish` does not expose this yet" — so
+/// an agent asked for a permanent page refused, citing a limitation that had stopped
+/// existing, in prose confident enough to read as policy rather than staleness. Nothing in a
+/// build of this package can see the other repository, which is the whole difficulty; what
+/// closed it is naming the client's surface in `SteleCLI` and interpolating it, so the
+/// document has one place to be wrong instead of six and a test can hold it to that place.
+/// `SteleCLI.flags` and `SteleCLI.exits` exist for that and for nothing else.
+///
 /// Maintenance: the prose is pinned to the code it documents by
 /// `PublishSkillTests.componentTableMatchesTheStylesheet`, `.documentsEverySyntaxTokenClass`,
 /// `.documentsOnlyDefinedClasses`, `.listsEveryAllowedContentType`,
 /// `.theRouteTableNamesExactlyTheScopesThatExist`, `.exampleSlugsAreValid`,
 /// `.documentsTheInstallSequence`, `.mentionsExactlyTheMinimumCLIVersion`,
-/// `.documentsTheDefaultLifetime`, `.documentsTheLifetimeGrammar` and
-/// `.theBadRequestRowNamesTheLifetime`. Those tests can only pin what has a constant behind
-/// it; the rest of the prose is a human responsibility, and changing the publish contract
-/// means changing this document in the same commit.
+/// `.documentsEveryCommandTheAgentNeeds`, `.documentsEveryFlagTheAgentCanUse`,
+/// `.theExitTableMatchesTheClientsExitCodes`, `.documentsTheDefaultLifetime`,
+/// `.documentsTheLifetimeGrammar` and `.theBadRequestRowNamesTheLifetime`. Those tests can
+/// only pin what has a constant behind it; the rest of the prose is a human responsibility,
+/// and changing the publish contract means changing this document in the same commit.
 struct PublishSkill: Sendable {
     static let path = "/\(ServerRoute.skill)"
 
@@ -78,6 +88,9 @@ struct PublishSkill: Sendable {
         let contentTypes = PageContentType.allowed.keys.sorted()
             .map { "`\($0)`" }.joined(separator: ", ")
         let tones = Stylesheet.toneClasses.map { "`\($0)`" }.joined(separator: ", ")
+        let exits = SteleCLI.exits
+            .map { "| `\($0.code)` | \($0.meaning) | \($0.remedy) |" }
+            .joined(separator: "\n")
 
         return #"""
         ---
@@ -121,8 +134,13 @@ struct PublishSkill: Sendable {
 
         - It prints a host, a client name and its scopes — you are ready. Skip to step 2.
         - `command not found` — install it, below.
-        - It runs but reports no credential — installed, not authenticated. Skip to
-          *Authenticating*.
+        - It exits `2` and says there is no stored credential — installed, but not
+          authenticated. Skip to *Authenticating*.
+        - It prints the stored credential, says it could not reach the server, and exits `9`
+          — the credential is fine and the address is not. Fix that before anything else.
+
+        It asks the server rather than reading the file, which is the point: a credential
+        revoked yesterday still looks perfectly healthy on disk.
 
         ### Installing
 
@@ -276,28 +294,24 @@ struct PublishSkill: Sendable {
         stele publish page.html
         ```
 
-        That command takes the default lifetime — \#(PageLifetime.defaultDays) days. It is
-        written that way on purpose: the lifetime is the one thing here you cannot change
-        afterwards, so it is a choice to make rather than one to inherit from an example. Read
-        "How long the page lives" below before you run it.
+        That command takes the default lifetime — \#(PageLifetime.defaultDays) days — and the
+        page stops being served when it runs out. Read "How long the page lives" below before
+        you run it; `\#(SteleCLI.ttlFlag)` is how you choose something else, and it cannot be
+        chosen later.
 
-        It prints the URL. **That URL is the deliverable** — report it to the user. If you
-        would rather parse the answer than read it, every command takes `--json`, and this
-        one prints the server's own response:
+        The URL goes to stdout and nothing else does, so `url=$(stele publish page.html)`
+        captures it cleanly; the page's deadline is printed under it on stderr. **That URL is
+        the deliverable** — report it to the user. If you would rather parse the answer than
+        read it, every command takes `\#(SteleCLI.jsonFlag)`:
 
         ```json
         {"slug":"quiet-cedar-otter","url":"\#(baseURL)/quiet-cedar-otter","expires":"2030-01-08T09:41:00Z"}
         ```
 
-        ### Choosing your own slug
-
-        ```sh
-        stele publish page.html --slug my-page
-        ```
-
         `expires` is that instant for a page with a deadline, and JSON `null` for one that
-        never expires. The key is always there. The three keys are not always in this
-        order, though — parse the body by key rather than by position.
+        never expires. The key is always there, so read it rather than reading permanence
+        into its absence. Parse by key rather than by position — the server's own body makes
+        no promise about the order of the three.
 
         Report `expires` alongside the URL — either the date the link dies, or that it is
         permanent — because the user cannot look it up later and nothing will remind them.
@@ -308,7 +322,26 @@ struct PublishSkill: Sendable {
         expires \#(PageLifetime.defaultDays) days after it is published, and then serves the
         ordinary 404 exactly as if it had never existed.
 
-        The server takes the lifetime as a query parameter on the write:
+        `stele publish` takes the lifetime as `\#(SteleCLI.ttlFlag)`:
+
+        ```sh
+        stele publish page.html \#(SteleCLI.ttlFlag) \#(PageLifetime.neverKeyword)
+        ```
+
+        | Flag | Means |
+        | --- | --- |
+        | omitted | the server's default: \#(PageLifetime.defaultDays) days |
+        | `\#(SteleCLI.ttlFlag) 30` | 30 days. `30d` says the same thing, and `2w` means fourteen |
+        | `\#(SteleCLI.ttlFlag) \#(PageLifetime.neverKeyword)` | kept until somebody deletes it |
+
+        A page's deadline is stored to the day, so anything finer is refused rather than
+        rounded to a lifetime you did not ask for: `12h` is an error, not half a day. Ask for
+        the lifetime the user actually wants — this is the one thing about a page that cannot
+        be changed afterwards, so it is a choice to make rather than one to inherit from an
+        example, and a user expecting a permanent link needs to hear if they did not get one.
+
+        Underneath, the server reads the lifetime as a query parameter on the write, and that
+        is where the bounds live:
 
         | Query | Means |
         | --- | --- |
@@ -319,18 +352,14 @@ struct PublishSkill: Sendable {
         Anything else — `0`, a negative, `7.5`, an empty value, a number past
         \#(PageLifetime.maxDays) — is a `400`. Nothing is ever silently rounded or defaulted, so
         a rejected value means the page was not published at all rather than published with a
-        lifetime nobody chose.
-
-        **`stele publish` does not expose this yet, so everything you publish takes the
-        \#(PageLifetime.defaultDays)-day default.** Say so when you report the URL: a user who
-        expected a permanent link needs to hear that it is not one. If they need a page that
-        outlives the default, that is a request for a newer `stele` rather than something to
-        work around — do not reach past the tool for a token to send the query parameter
-        yourself.
+        lifetime nobody chose. You do not send that parameter yourself; `\#(SteleCLI.ttlFlag)`
+        is how it gets there.
 
         The expiry belongs to the page, not to its current contents: replacing a page does not
-        extend it, and there is no way to change it afterwards. A page that needs to outlive
-        its deadline has to be published again.
+        extend it, and there is no way to change it afterwards — which is why `stele update`
+        has no `\#(SteleCLI.ttlFlag)` and refuses the query parameter with a `400` rather than
+        accepting it and moving nothing. A page that needs to outlive its deadline has to be
+        published again.
 
         ### Choosing your own slug
 
@@ -359,7 +388,7 @@ struct PublishSkill: Sendable {
         Reports the page's unchanged `expires` in the same body a publish answers with: the
         lifetime was fixed at publication and an update does not move it.
 
-        `stele update <slug> <file>` **never creates**: a `404` means nothing is published
+        `stele update <slug> <file>` **never creates**: exit `7` means nothing is published
         at that name yet — or that it has expired — so `stele publish page.html --slug my-page`
         is what you want instead. A successful update keeps the same URL.
 
@@ -369,7 +398,7 @@ struct PublishSkill: Sendable {
         server does have a `DELETE /\#(ServerRoute.pages)/:slug` and the route table below
         lists it, but reaching it means holding a credential — the one thing this
         arrangement exists to spare you. A user who wants a page gone early is asking for a
-        newer `stele`, exactly as a non-default lifetime is. Do not work around it.
+        newer `stele`; say so, and do not work around it.
 
         Two facts make that an answer rather than an apology.
 
@@ -389,11 +418,20 @@ struct PublishSkill: Sendable {
 
         | Command | Who runs it | Does |
         | --- | --- | --- |
-        | `stele auth status` | you | Host, client name, scopes. Never prints the token. |
+        | `stele auth status` | you | Host, client name, scopes, expiry, and whether the server still accepts it. Never prints the token. |
         | `stele auth login` | **the user** | Prompts for the credential and stores it. Not yours to run. |
-        | `stele publish <file> [--slug <name>]` | you | Publishes a page, prints its URL. |
-        | `stele update <slug> <file>` | you | Replaces a page already published at that name. |
+        | `stele auth logout` | **the user** | Forgets the stored credential for a host. Not yours to run either. |
+        | `stele publish <file> [\#(SteleCLI.slugFlag) <name>] [\#(SteleCLI.ttlFlag) <days>] [\#(SteleCLI.contentTypeFlag) <type>]` | you | Publishes a page, prints its URL. |
+        | `stele update <slug> <file> [\#(SteleCLI.contentTypeFlag) <type>]` | you | Replaces a page already published at that name. |
         | `stele skill` | you | Prints this document, fetched live from the server. |
+        | `stele admin clients` (`create`, `list`, `revoke`) | **an operator** | Mints, lists and revokes credentials. Needs the `\#(ClientScope.admin.rawValue)` scope, which yours does not have. |
+
+        Every one of them also takes `\#(SteleCLI.hostFlag) <url>`, needed only when the
+        credential file holds more than one deployment, and `\#(SteleCLI.jsonFlag)`.
+
+        `\#(SteleCLI.contentTypeFlag)` is rarely worth reaching for: the type is inferred from
+        the file's extension, which is the whole reason a `415` is not something you have to
+        think about. Override it when the extension is lying, not otherwise.
 
         ## Pitfalls
 
@@ -404,16 +442,28 @@ struct PublishSkill: Sendable {
           below for orientation, not as an invitation — reaching them directly means holding
           a credential, which is the one thing this arrangement is built to spare you.
         - A `503` means \#(PageStore.maxSlugAttempts) random slugs collided in a row. Retry once, or pass `--slug`.
-        - A failure with no status at all is usually not the server: check `stele auth status`
-          first, then that you are pointed at the right host.
+        - A failure with no status at all — exit `9` — is usually not the server being down:
+          check `stele auth status` first, then that you are pointed at the right host.
         - **A successful publish is not a promise the page will still be there.** The default
           is \#(PageLifetime.defaultDays) days, not forever, and the deadline cannot be changed
           afterwards. Tell the user which they got.
 
-        ## Status codes
+        ## What a failure looks like
 
-        The tool exits non-zero and prints the server's status and message, so these are
-        what a failed command tells you and what you react to.
+        Every command prints one sentence saying what to do, and exits. **Branch on the exit
+        code.** It is the stable half of that answer — the message is prose, and the server's
+        status number is usually not in it at all. Two of the likeliest outcomes never reach a
+        server and so have no status behind them: no usable credential on this machine, and a
+        host that did not answer.
+
+        These are the codes, and what each one asks you to do next:
+
+        | Exit | Means | Do |
+        | --- | --- | --- |
+        \#(exits)
+
+        The statuses underneath are what those messages are written from. You will not often
+        act on one directly, but they are what the server means:
 
         | Code | Means | Do |
         | --- | --- | --- |
