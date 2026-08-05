@@ -217,7 +217,7 @@ struct StylesheetTests {
     /// assertion; the rejections mean nothing if the sheet had been shadowed anyway.
     @Test func assetsCannotBeClaimedAsASlug() async throws {
         let headers: HTTPFields = [
-            .authorization: "Bearer \(TestFixture.token)",
+            .authorization: "Bearer \(TestFixture.publishToken)",
             .contentType: "text/html",
         ]
 

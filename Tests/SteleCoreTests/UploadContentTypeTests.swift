@@ -19,7 +19,7 @@ struct UploadContentTypeTests {
         body: String
     ) async throws -> String {
         var headers = headers
-        headers[.authorization] = "Bearer \(TestFixture.token)"
+        headers[.authorization] = "Bearer \(TestFixture.publishToken)"
         return try await client.execute(
             uri: "/pages",
             method: .post,
@@ -43,7 +43,7 @@ struct UploadContentTypeTests {
                 uri: "/pages",
                 method: .post,
                 headers: [
-                    .authorization: "Bearer \(TestFixture.token)",
+                    .authorization: "Bearer \(TestFixture.publishToken)",
                     .contentType: "application/json",
                 ],
                 body: ByteBuffer(string: #"{"hello":"world"}"#)

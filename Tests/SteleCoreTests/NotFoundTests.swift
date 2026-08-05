@@ -17,18 +17,19 @@ struct NotFoundTests {
         let store = InMemoryPageStore()
         await store.seed(slug: try Slug(custom: "amber-willow-heron"), body: "<h1>here</h1>")
 
-        // Malformed (too short), reserved but with no GET route, well-formed but never
-        // published, a routed path whose only responder is POST, and the bare parent of
-        // the stylesheet — `/pages` and `/assets` each need their own GET responder
-        // because the trie matches the literal node without backtracking to `/:slug`.
+        // Malformed (too short), well-formed but never published, and three bare segments
+        // whose real endpoints are elsewhere: `/pages` (its responders are POST and the
+        // `:slug` child), `/assets` (the stylesheet) and `/admin` (the client routes).
+        // Each of those three needs its own GET responder, because the trie matches the
+        // literal node and does not backtrack to `/:slug`.
         //
         // `/skill` is deliberately absent, even though this list otherwise mirrors
         // `ServerRoute.names`: it answers with the publish document, not a 404, so it has
         // no uniform-404 responder to compare. Adding it here is the instinctive "fix" and
         // is wrong — `PublishSkillTests.servesTheSkill` is what covers that path.
         let paths = [
-            "/x", "/admin", "/quiet-cedar-otter", "/\(ServerRoute.pages)",
-            "/\(ServerRoute.assets)",
+            "/x", "/quiet-cedar-otter", "/\(ServerRoute.pages)",
+            "/\(ServerRoute.assets)", "/\(ServerRoute.admin)",
         ]
         // Collected inside the test closure and returned out of it: the closure is
         // `@Sendable`, so it cannot mutate a captured local.
@@ -78,13 +79,17 @@ struct NotFoundTests {
         }
     }
 
-    /// The GET responder on `/pages` exists only to keep 404s uniform — it must not sit
-    /// behind the upload group's bearer-token middleware, or an unauthenticated probe
-    /// would get a 401 there and a 404 everywhere else, which is the same leak with a
-    /// different status code.
-    @Test func getPagesNeedsNoAuth() async throws {
+    /// The GET responders on `/pages` and `/admin` exist only to keep 404s uniform — they
+    /// must not sit behind their group's bearer-token middleware, or an unauthenticated
+    /// probe would get a 401 there and a 404 everywhere else, which is the same leak with a
+    /// different status code. `/admin` is the one where it would matter most: a 401 on the
+    /// bare segment advertises where the credential-minting routes live.
+    @Test("a bare routed segment answers 404 without asking for a credential", arguments: [
+        ServerRoute.pages, ServerRoute.admin,
+    ])
+    func bareSegmentsNeedNoAuth(segment: String) async throws {
         try await TestFixture.makeApp().test(.router) { client in
-            try await client.execute(uri: "/\(ServerRoute.pages)", method: .get) { response in
+            try await client.execute(uri: "/\(segment)", method: .get) { response in
                 #expect(response.status == .notFound)
             }
         }

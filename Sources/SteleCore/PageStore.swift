@@ -8,6 +8,15 @@ public struct Page: Sendable, Equatable {
     public var body: String
     public var contentType: String
     public var createdAt: Date
+    /// The credential that last wrote this page, or nil for one written by the shared token
+    /// or published before migration 2 added the column.
+    ///
+    /// Read back rather than write-only so attribution is *observable* — a column nothing
+    /// ever selects is one whose writes no test can check, which is how it came to be
+    /// unwritten in the first place. It is deliberately not served anywhere: `GET /:slug`
+    /// answers with the body and its type, and who published a page is the operator's
+    /// question, not the reader's.
+    public var clientID: Int64?
 }
 
 public enum PageStoreError: Error, Equatable {
@@ -34,29 +43,41 @@ public struct PageStore: Sendable {
     public func fetch(slug: Slug) async throws -> Page? {
         let rows = try await client.query(
             """
-            SELECT body, content_type, created_at
+            SELECT body, content_type, created_at, client_id
             FROM pages WHERE slug = \(slug.value)
             """,
             logger: logger
         )
 
-        for try await (body, contentType, createdAt) in rows.decode(
-            (String, String, Date).self, context: .default
+        for try await (body, contentType, createdAt, clientID) in rows.decode(
+            (String, String, Date, Int64?).self, context: .default
         ) {
-            return Page(slug: slug, body: body, contentType: contentType, createdAt: createdAt)
+            return Page(
+                slug: slug,
+                body: body,
+                contentType: contentType,
+                createdAt: createdAt,
+                clientID: clientID
+            )
         }
         return nil
     }
 
     /// - Returns: true if the row was inserted, false if the slug was already taken.
-    public func insert(slug: Slug, body: String, contentType: String) async throws -> Bool {
+    public func insert(
+        slug: Slug, body: String, contentType: String, clientID: Int64?
+    ) async throws -> Bool {
         // ON CONFLICT DO NOTHING makes the uniqueness check and the insert one atomic
         // step. Checking first and then inserting would leave a window where two
         // concurrent uploads both see the slug as free.
+        //
+        // `client_id` is a foreign key into `clients`, so a nil here is the only way to
+        // record a page whose writer has no row — the shared token's. `Client.attributableID`
+        // is what turns that credential into the nil, upstream of this call.
         let rows = try await client.query(
             """
-            INSERT INTO pages (slug, body, content_type)
-            VALUES (\(slug.value), \(body), \(contentType))
+            INSERT INTO pages (slug, body, content_type, client_id)
+            VALUES (\(slug.value), \(body), \(contentType), \(clientID))
             ON CONFLICT (slug) DO NOTHING
             RETURNING slug
             """,
@@ -70,14 +91,25 @@ public struct PageStore: Sendable {
     }
 
     /// - Returns: true if the row was replaced, false if no such slug exists.
-    public func update(slug: Slug, body: String, contentType: String?) async throws -> Bool {
+    public func update(
+        slug: Slug, body: String, contentType: String?, clientID: Int64?
+    ) async throws -> Bool {
         // A single UPDATE is its own existence check: the WHERE clause and the write are
         // one statement, and RETURNING tells us whether a row matched. `created_at` is
         // left alone, so a replaced page keeps the moment it was first published, and a
         // nil content type COALESCEs to the stored value rather than overwriting it.
+        //
+        // `client_id` is assigned rather than COALESCEd, which is the opposite treatment
+        // and deliberate: an absent content type means "the caller expressed no opinion",
+        // whereas the writer is never absent — it is whoever's credential just replaced
+        // these bytes. Coalescing it would leave a page attributed to a credential that
+        // wrote none of what it now serves.
         let rows = try await client.query(
             """
-            UPDATE pages SET body = \(body), content_type = COALESCE(\(contentType), content_type)
+            UPDATE pages
+            SET body = \(body),
+                content_type = COALESCE(\(contentType), content_type),
+                client_id = \(clientID)
             WHERE slug = \(slug.value)
             RETURNING slug
             """,
@@ -119,7 +151,7 @@ extension PageStore {
     /// ever booted this code; editing an entry diverges the databases that already ran it
     /// from the ones that haven't, with nothing to detect the difference. Change the
     /// schema by adding the next version. Issue #6's TTL column ships as
-    /// `Migration(version: 2, statements: ["ALTER TABLE pages ADD COLUMN expires_at
+    /// `Migration(version: 3, statements: ["ALTER TABLE pages ADD COLUMN expires_at
     /// timestamptz"])`, not as another idempotent `ALTER` bolted onto version 1.
     ///
     /// Statements are not limited to DDL. Because a version runs exactly once and commits
@@ -144,7 +176,46 @@ extension PageStore {
                 """,
                 "CREATE INDEX IF NOT EXISTS pages_created_at_idx ON pages (created_at DESC)",
             ]
-        )
+        ),
+        Migration(
+            version: 2,
+            statements: [
+                // Per-client credentials. No `IF NOT EXISTS`: unlike version 1 this
+                // describes a table that has never existed anywhere, so a name collision
+                // is a mistake worth failing the boot over rather than a state to
+                // tolerate.
+                //
+                // `token_hash` is the digest, never the token — see `ClientCredential`.
+                // Its UNIQUE constraint is also the index the authentication lookup rides
+                // on, which is what keeps that a hash comparison rather than a scan.
+                //
+                // The `'{publish}'` default is `ClientScope.publish` retyped, the one
+                // place in the repo where that is unavoidable: these statements are
+                // literal SQL by design — a `\(…)` here becomes a *bind* parameter, and
+                // DDL cannot take binds. `MigrationListTests` pins the two together
+                // instead.
+                """
+                CREATE TABLE clients (
+                    id           bigserial PRIMARY KEY,
+                    name         text NOT NULL UNIQUE,
+                    token_hash   bytea NOT NULL UNIQUE,
+                    scopes       text[] NOT NULL DEFAULT '{publish}',
+                    created_at   timestamptz NOT NULL DEFAULT now(),
+                    last_used_at timestamptz,
+                    expires_at   timestamptz,
+                    revoked_at   timestamptz
+                )
+                """,
+                // Nullable, and left null for every page that already exists. Those were
+                // written with the shared token and there is no honest owner to invent
+                // for them. The column cannot be backfilled here either: `migrate()` runs
+                // in the store layer and has no access to configuration, so it could not
+                // hash `STELE_UPLOAD_TOKEN` into a `clients` row even if that were the
+                // right answer — and keeping that separation is worth more than a tidier
+                // backfill.
+                "ALTER TABLE pages ADD COLUMN client_id bigint REFERENCES clients (id)",
+            ]
+        ),
     ]
 
     /// Advisory locks are scoped to a database, so this constant only ever collides with

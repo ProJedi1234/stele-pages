@@ -29,36 +29,54 @@ actor InMemoryPageStore: PageStoring {
     func seed(
         slug: Slug,
         body: String,
-        contentType: String = PageContentType.default
+        contentType: String = PageContentType.default,
+        clientID: Int64? = nil
     ) {
-        pages[slug] = page(slug: slug, body: body, contentType: contentType)
+        pages[slug] = page(slug: slug, body: body, contentType: contentType, clientID: clientID)
     }
 
     func fetch(slug: Slug) async throws -> Page? {
         pages[slug]
     }
 
-    func insert(slug: Slug, body: String, contentType: String) async throws -> Bool {
+    func insert(
+        slug: Slug, body: String, contentType: String, clientID: Int64?
+    ) async throws -> Bool {
         guard !failInserts, pages[slug] == nil else { return false }
-        pages[slug] = page(slug: slug, body: body, contentType: contentType)
+        pages[slug] = page(slug: slug, body: body, contentType: contentType, clientID: clientID)
         return true
     }
 
-    func update(slug: Slug, body: String, contentType: String?) async throws -> Bool {
+    func update(
+        slug: Slug, body: String, contentType: String?, clientID: Int64?
+    ) async throws -> Bool {
         guard let existing = pages[slug] else { return false }
         // No `createdAt` theater: `page` stamps every entry with the same fixed date, so
         // "preserved" and "reset" are indistinguishable here — the real created_at
         // guarantee lives in `PageStore`'s SQL and only a Postgres test can check it.
-        pages[slug] = page(slug: slug, body: body, contentType: contentType ?? existing.contentType)
+        //
+        // `clientID` is assigned, not coalesced, mirroring the store's `client_id = …`:
+        // the column is who last wrote the page. A fake that preserved it instead would let
+        // `AttributionTests.updatingReattributesThePage` pass against the store and fail
+        // against reality, or the reverse.
+        pages[slug] = page(
+            slug: slug,
+            body: body,
+            contentType: contentType ?? existing.contentType,
+            clientID: clientID
+        )
         return true
     }
 
-    private func page(slug: Slug, body: String, contentType: String) -> Page {
+    private func page(
+        slug: Slug, body: String, contentType: String, clientID: Int64?
+    ) -> Page {
         Page(
             slug: slug,
             body: body,
             contentType: contentType,
-            createdAt: Date(timeIntervalSince1970: 0)
+            createdAt: Date(timeIntervalSince1970: 0),
+            clientID: clientID
         )
     }
 }

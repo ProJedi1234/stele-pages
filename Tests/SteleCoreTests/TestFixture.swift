@@ -9,9 +9,23 @@ import Testing
 /// values it pins — the token length, the base URL, the parse-only database URL — are
 /// asserted in exactly one place instead of drifting per file.
 enum TestFixture {
-    /// Exactly the minimum accepted token length, so the fixture pins that boundary
-    /// rather than drifting past it.
+    /// The shared `STELE_UPLOAD_TOKEN`, at exactly the minimum accepted length so the
+    /// fixture pins that boundary rather than drifting past it.
+    ///
+    /// This is the **admin** credential now, not the publishing one: it resolves to
+    /// `Client.sharedToken`, which carries `admin` and nothing else, so a write route
+    /// answers it with a 403. Suites that mean to publish want `publishToken` below; this
+    /// one is for the admin routes and for the auth failures that never get as far as a
+    /// scope check.
     static let token = String(repeating: "t", count: 16)
+
+    /// The per-client credential every write suite publishes with, seeded into the default
+    /// client store by `makeApp`.
+    ///
+    /// Carries `ClientCredential.prefix` because a token that did not would still work —
+    /// nothing checks the prefix on the way in — and this way the fixture exercises the
+    /// shape a real `POST /admin/clients` hands out.
+    static let publishToken = ClientCredential.prefix + "fixture-publish-credential"
 
     /// A base URL that could not be a default, so an assertion on it proves the
     /// configured value reached the response rather than a hard-coded one.
@@ -31,15 +45,22 @@ enum TestFixture {
         return try Configuration(environment: environment)
     }
 
-    /// Each test gets its own application and its own fake — swift-testing runs tests in
+    /// Each test gets its own application and its own fakes — swift-testing runs tests in
     /// parallel, so nothing is shared.
+    ///
+    /// The default `clients` store holds exactly one credential — `publishToken`, scoped
+    /// `publish` — because that is now the only kind of credential that can write a page.
+    /// A suite testing the admin routes, or the shared token's own behaviour, passes its
+    /// own store or authenticates with `token`.
     static func makeApp(
         store: InMemoryPageStore = InMemoryPageStore(),
+        clients: InMemoryClientStore = InMemoryClientStore(holding: publishToken),
         environment: [String: String] = [:]
-    ) throws -> Application<RouterResponder<BasicRequestContext>> {
+    ) throws -> Application<RouterResponder<SteleRequestContext>> {
         Application(router: buildRouter(
             configuration: try configuration(environment: environment),
-            store: store
+            store: store,
+            clients: clients
         ))
     }
 

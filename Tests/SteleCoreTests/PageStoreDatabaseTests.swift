@@ -48,6 +48,9 @@ enum PostgresFixture {
 
         var client: PostgresClient { clients[0] }
         var store: PageStore { PageStore(client: client, logger: PostgresFixture.logger) }
+        var clientStore: ClientStore {
+            ClientStore(client: client, logger: PostgresFixture.logger)
+        }
     }
 
     /// Runs `body` against a freshly created, empty schema, and drops it afterwards.
@@ -178,9 +181,14 @@ struct PageStoreDatabaseTests {
     /// What version 1 produces when there was nothing there before. The runner's own
     /// `IF NOT EXISTS` forms mean a wrong shape would never announce itself — this is the
     /// only place the schema's actual columns, constraints and index are pinned.
+    ///
+    /// Runs version 1 *alone*, through the `migrate(_:)` seam, so the assertions stay
+    /// about what version 1 produces as the list grows past it. Every later version is
+    /// pinned by its own test, and the full-list boot is covered by
+    /// `migrationTwoAddsCredentialsAndLeavesExistingPagesUnowned`.
     @Test func virginDatabaseGetsTheVersionOneSchema() async throws {
         try await PostgresFixture.withThrowawaySchema { database in
-            try await database.store.migrate()
+            try await database.store.migrate(Array(PageStore.migrations.prefix(1)))
 
             let versions = try await PostgresFixture.appliedVersions(on: database.client)
             #expect(versions == [1])
@@ -287,11 +295,359 @@ struct PageStoreDatabaseTests {
             try await database.store.migrate()
 
             let versions = try await PostgresFixture.appliedVersions(on: database.client)
-            #expect(versions == [1])
+            #expect(versions == [1, 2])
             let page = try await database.store.fetch(slug: Slug(unchecked: "quiet-cedar-otter"))
             #expect(page?.body == "<h1>before</h1>")
             #expect(page?.contentType == "text/html")
             #expect(page?.createdAt == createdAtBefore)
+        }
+    }
+
+    /// What version 2 adds, asserted on a database that already had pages in it — which
+    /// is the only interesting case, since a page written before credentials existed has
+    /// no owner to attribute it to and must survive the migration saying so.
+    ///
+    /// `token_hash`'s UNIQUE constraint is the one checked by name: it is both the
+    /// integrity rule that stops two credentials sharing a digest *and* the index the
+    /// authentication lookup rides on, so losing it degrades every authenticated request
+    /// to a sequential scan without failing anything.
+    @Test func migrationTwoAddsCredentialsAndLeavesExistingPagesUnowned() async throws {
+        try await PostgresFixture.withThrowawaySchema { database in
+            try await database.store.migrate(Array(PageStore.migrations.prefix(1)))
+            try await database.client.query(
+                """
+                INSERT INTO pages (slug, body, content_type)
+                VALUES ('quiet-cedar-otter', '<h1>before</h1>', 'text/html')
+                """,
+                logger: PostgresFixture.logger
+            )
+
+            try await database.store.migrate()
+
+            let versions = try await PostgresFixture.appliedVersions(on: database.client)
+            #expect(versions == [1, 2])
+
+            var columns: [String: (type: String, nullable: String)] = [:]
+            let rows = try await database.client.query(
+                """
+                SELECT column_name, data_type, is_nullable FROM information_schema.columns
+                WHERE table_schema = \(database.schema) AND table_name = 'clients'
+                """,
+                logger: PostgresFixture.logger
+            )
+            for try await (name, type, nullable) in rows.decode(
+                (String, String, String).self, context: .default
+            ) {
+                columns[name] = (type, nullable)
+            }
+            #expect(
+                Set(columns.keys) == [
+                    "id", "name", "token_hash", "scopes",
+                    "created_at", "last_used_at", "expires_at", "revoked_at",
+                ]
+            )
+            #expect(columns["id"]?.type == "bigint")
+            #expect(columns["name"]?.type == "text")
+            #expect(columns["token_hash"]?.type == "bytea")
+            // information_schema reports every array as "ARRAY"; the element type lives in
+            // `udt_name`, which is `_text` for a `text[]`.
+            #expect(columns["scopes"]?.type == "ARRAY")
+            #expect(columns["name"]?.nullable == "NO")
+            #expect(columns["token_hash"]?.nullable == "NO")
+            #expect(columns["scopes"]?.nullable == "NO")
+            #expect(columns["created_at"]?.nullable == "NO")
+            // The three that record something that may not have happened yet. A NOT NULL
+            // here would force a sentinel date and make "never used" unrepresentable.
+            #expect(columns["last_used_at"]?.nullable == "YES")
+            #expect(columns["expires_at"]?.nullable == "YES")
+            #expect(columns["revoked_at"]?.nullable == "YES")
+
+            // A credential minted with no scopes named gets `publish` and nothing more —
+            // the difference between an agent token and a root token.
+            let scopesDefault = try await PostgresFixture.scalar(
+                """
+                SELECT column_default FROM information_schema.columns
+                WHERE table_schema = \(database.schema) AND table_name = 'clients'
+                  AND column_name = 'scopes'
+                """,
+                as: String.self, on: database.client
+            )
+            #expect(scopesDefault?.contains("{\(ClientScope.publish.rawValue)}") == true)
+
+            let uniqueConstraints: [String] = try await PostgresFixture.column(
+                """
+                SELECT attribute.attname
+                FROM pg_constraint AS constraint_
+                JOIN pg_attribute AS attribute
+                  ON attribute.attrelid = constraint_.conrelid
+                 AND attribute.attnum = ANY (constraint_.conkey)
+                WHERE constraint_.conrelid = 'clients'::regclass
+                  AND constraint_.contype = 'u'
+                ORDER BY attribute.attname
+                """,
+                on: database.client
+            )
+            #expect(uniqueConstraints == ["name", "token_hash"])
+
+            // Declared *and* enforced. `ClientStore.insert` turns this refusal into a nil
+            // through `ON CONFLICT DO NOTHING`, so a raw statement is the only place the
+            // database's own answer is visible — and the constraint is what stops two
+            // credentials resolving to one row, which would make `authenticate` return
+            // whichever the planner reached first.
+            let digest = Data(ClientCredential.hash(ClientCredential.generate()))
+            try await database.client.query(
+                "INSERT INTO clients (name, token_hash) VALUES ('first', \(digest))",
+                logger: PostgresFixture.logger
+            )
+            await #expect(throws: (any Error).self) {
+                _ = try await database.client.query(
+                    "INSERT INTO clients (name, token_hash) VALUES ('second', \(digest))",
+                    logger: PostgresFixture.logger
+                )
+            }
+            // The digest is unique, not the pair: a *different* digest under a different
+            // name is fine, so the failure above was the constraint rather than the table
+            // refusing a second row for some unrelated reason.
+            try await database.client.query(
+                """
+                INSERT INTO clients (name, token_hash)
+                VALUES ('second', \(Data(ClientCredential.hash(ClientCredential.generate()))))
+                """,
+                logger: PostgresFixture.logger
+            )
+
+            // The attribution column, and the foreign key that makes it mean something.
+            #expect(columns["client_id"] == nil)  // it belongs to `pages`, not `clients`
+            let clientIDColumn = try await PostgresFixture.scalar(
+                """
+                SELECT data_type || ' ' || is_nullable FROM information_schema.columns
+                WHERE table_schema = \(database.schema) AND table_name = 'pages'
+                  AND column_name = 'client_id'
+                """,
+                as: String.self, on: database.client
+            )
+            #expect(clientIDColumn == "bigint YES")
+            let foreignKeyTarget = try await PostgresFixture.scalar(
+                """
+                SELECT confrelid::regclass::text FROM pg_constraint
+                WHERE conrelid = 'pages'::regclass AND contype = 'f'
+                """,
+                as: String.self, on: database.client
+            )
+            #expect(foreignKeyTarget == "clients")
+
+            // The page written before the migration keeps its body and gains no owner.
+            let unowned = try await PostgresFixture.scalar(
+                "SELECT client_id IS NULL FROM pages WHERE slug = 'quiet-cedar-otter'",
+                as: Bool.self, on: database.client
+            )
+            #expect(unowned == true)
+        }
+    }
+
+    /// `ClientStore` against the real schema, which is the only place two of its claims
+    /// can be checked: that `bytea` is bound as `Data` rather than as the `char[]`
+    /// PostgresNIO would make of a `[UInt8]`, and that `text[]` decodes back into
+    /// `[String]`. Both fail at runtime and neither is visible to the in-memory fake.
+    @Test func clientStoreReadsBackWhatTheSchemaHolds() async throws {
+        try await PostgresFixture.withThrowawaySchema { database in
+            try await database.store.migrate()
+
+            let token = ClientCredential.generate()
+            try await database.client.query(
+                """
+                INSERT INTO clients (name, token_hash, scopes)
+                VALUES ('claude-code', \(Data(ClientCredential.hash(token))), '{publish}')
+                """,
+                logger: PostgresFixture.logger
+            )
+
+            let store = database.clientStore
+            let client = try #require(try await store.authenticate(token: token))
+            #expect(client.name == "claude-code")
+            #expect(client.scopes == [ClientScope.publish.rawValue])
+            #expect(client.has(.publish))
+            #expect(client.lastUsedAt == nil)
+            #expect(client.expiresAt == nil)
+            #expect(client.revokedAt == nil)
+
+            // A token that was never issued resolves to nothing, rather than to the one
+            // row in the table.
+            let unknown = try await store.authenticate(token: ClientCredential.generate())
+            #expect(unknown == nil)
+
+            try await store.recordUse(clientID: client.id)
+            let used = try #require(try await store.authenticate(token: token))
+            #expect(used.lastUsedAt != nil)
+            #expect(used.createdAt == client.createdAt)
+        }
+    }
+
+    /// `ClientStore`'s write half, which has two more claims only Postgres can settle:
+    /// that `scopes` *binds* as `text[]` on the way in (the read side proved only the way
+    /// out), and that `ON CONFLICT DO NOTHING` with no conflict target catches both unique
+    /// constraints rather than throwing on one of them.
+    ///
+    /// The whole mint-to-authenticate round trip runs through `ClientStoring.create`, so
+    /// the shared policy — generate, hash, store the digest — is exercised against the real
+    /// column types rather than only against the fake's dictionary.
+    @Test func clientStoreMintsListsAndRevokesAgainstTheRealSchema() async throws {
+        try await PostgresFixture.withThrowawaySchema { database in
+            try await database.store.migrate()
+            let store = database.clientStore
+
+            let expiry = Date().addingTimeInterval(3_600)
+            let (agent, agentToken) = try await store.create(
+                name: "claude-code", scopes: [.publish], expiresAt: expiry
+            )
+            let (operator_, operatorToken) = try await store.create(
+                name: "operator", scopes: [.publish, .admin], expiresAt: nil
+            )
+
+            #expect(agent.scopes == [ClientScope.publish.rawValue])
+            #expect(operator_.scopes == [ClientScope.publish.rawValue, ClientScope.admin.rawValue])
+            #expect(operator_.expiresAt == nil)
+            // `timestamptz` is microsecond-resolution, so this is "the instant we asked
+            // for", not "roughly".
+            let storedExpiry = try #require(agent.expiresAt)
+            #expect(abs(storedExpiry.timeIntervalSince(expiry)) < 0.001)
+            // The digest went in, so the plaintext round-trips through the unique index.
+            #expect(try await store.authenticate(token: agentToken) == agent)
+
+            // Both unique constraints, via one untargeted `ON CONFLICT DO NOTHING`: the
+            // name, and the digest. Neither may throw, and neither may insert.
+            #expect(
+                try await store.insert(
+                    name: "claude-code",
+                    tokenHash: ClientCredential.hash(ClientCredential.generate()),
+                    scopes: [ClientScope.publish.rawValue],
+                    expiresAt: nil
+                ) == nil
+            )
+            #expect(
+                try await store.insert(
+                    name: "a-different-name",
+                    tokenHash: ClientCredential.hash(agentToken),
+                    scopes: [ClientScope.publish.rawValue],
+                    expiresAt: nil
+                ) == nil
+            )
+            #expect(try await store.allClients().map(\.name) == ["claude-code", "operator"])
+
+            // `COALESCE(revoked_at, now())`: the second call must return the first call's
+            // timestamp rather than stamping a new one.
+            let firstRevoke = try #require(try await store.revoke(name: "claude-code"))
+            let secondRevoke = try #require(try await store.revoke(name: "claude-code"))
+            #expect(firstRevoke.revokedAt != nil)
+            #expect(firstRevoke.revokedAt == secondRevoke.revokedAt)
+            #expect(try await store.revoke(name: "never-existed") == nil)
+
+            // The row survives revocation and still lists; only the credential's ability to
+            // authenticate is gone.
+            #expect(try await store.allClients().map(\.name) == ["claude-code", "operator"])
+            #expect(try await store.authenticate(token: agentToken) == nil)
+            #expect(try await store.authenticate(token: operatorToken) != nil)
+        }
+    }
+
+    /// `PageStore`'s own three statements against the real table, which until attribution
+    /// landed were the standing gap in this suite.
+    ///
+    /// `client_id` is why the gap had to close. It is a foreign key, so the value the write
+    /// path chooses is checked by the database and by nothing else: the in-memory fake stores
+    /// whatever it is handed, so an `id` with no row behind it — the synthesised shared
+    /// token's `0` — passes every HTTP test in the repo and fails every publish in
+    /// production. The last assertion here is that refusal, which is what makes
+    /// `Client.attributableID`'s nil load-bearing rather than decorative.
+    ///
+    /// The two boolean returns come along for the ride, because they are the same three
+    /// statements: `ON CONFLICT DO NOTHING` reporting a taken slug as false rather than
+    /// throwing, and `UPDATE … RETURNING` reporting an absent one — both of which the router
+    /// turns into a `409` and a `404`.
+    @Test func pagesAreStoredFetchedAndReattributedAgainstTheRealSchema() async throws {
+        try await PostgresFixture.withThrowawaySchema { database in
+            try await database.store.migrate()
+            let store = database.store
+
+            let (first, _) = try await database.clientStore.create(
+                name: "first", scopes: [.publish], expiresAt: nil
+            )
+            let (second, _) = try await database.clientStore.create(
+                name: "second", scopes: [.publish], expiresAt: nil
+            )
+
+            let slug = try Slug(custom: "quiet-cedar-otter")
+            #expect(
+                try await store.insert(
+                    slug: slug,
+                    body: "<h1>one</h1>",
+                    contentType: PageContentType.default,
+                    clientID: first.id
+                )
+            )
+            let published = try #require(try await store.fetch(slug: slug))
+            #expect(published.body == "<h1>one</h1>")
+            #expect(published.clientID == first.id)
+
+            // A second writer takes the attribution with the bytes, and the nil content type
+            // keeps the stored one — the two halves of the UPDATE that are treated
+            // deliberately differently.
+            #expect(
+                try await store.update(
+                    slug: slug, body: "<h1>two</h1>", contentType: nil, clientID: second.id
+                )
+            )
+            let replaced = try #require(try await store.fetch(slug: slug))
+            #expect(replaced.body == "<h1>two</h1>")
+            #expect(replaced.contentType == PageContentType.default)
+            #expect(replaced.clientID == second.id)
+            // And the page is still the same page: `created_at` is the moment it was first
+            // published, which only this suite can check.
+            #expect(replaced.createdAt == published.createdAt)
+
+            // No honest owner is a null, not a zero. This is the shared token's row in the
+            // table, and the row every page predating migration 2 already has.
+            let orphan = try Slug(custom: "amber-willow-heron")
+            #expect(
+                try await store.insert(
+                    slug: orphan,
+                    body: "<h1>unowned</h1>",
+                    contentType: PageContentType.default,
+                    clientID: Client.sharedToken.attributableID
+                )
+            )
+            #expect(try await store.fetch(slug: orphan)?.clientID == nil)
+
+            // The two refusals the router reports as 409 and 404.
+            #expect(
+                try await store.insert(
+                    slug: slug,
+                    body: "<h1>mine now</h1>",
+                    contentType: PageContentType.default,
+                    clientID: first.id
+                ) == false
+            )
+            #expect(try await store.fetch(slug: slug)?.body == "<h1>two</h1>")
+            #expect(
+                try await store.update(
+                    slug: try Slug(custom: "never-published"),
+                    body: "<h1>nowhere</h1>",
+                    contentType: nil,
+                    clientID: first.id
+                ) == false
+            )
+
+            // The foreign key, enforced. `Client.sharedToken.id` refers to no row, so writing
+            // it — rather than the nil above — is the failure that would greet every publish
+            // if `attributableID` ever stopped mapping it.
+            await #expect(throws: (any Error).self) {
+                _ = try await store.insert(
+                    slug: try Slug(custom: "dangling-foreign-key"),
+                    body: "<h1>no</h1>",
+                    contentType: PageContentType.default,
+                    clientID: Client.sharedToken.id
+                )
+            }
         }
     }
 
@@ -309,7 +665,7 @@ struct PageStoreDatabaseTests {
             try await database.store.migrate()
 
             let versions = try await PostgresFixture.appliedVersions(on: database.client)
-            #expect(versions == [1])
+            #expect(versions == [1, 2])
             let appliedAtAfter = try await PostgresFixture.scalar(
                 "SELECT applied_at FROM schema_migrations WHERE version = 1",
                 as: Date.self, on: database.client
@@ -462,7 +818,11 @@ struct PageStoreDatabaseTests {
             )
             #expect(freeAfterSuccess)
 
-            let broken = PageStore.Migration(version: 2, statements: ["THIS IS NOT SQL"])
+            // A version the real list does not contain. `migrate()` above recorded every
+            // version this build ships, and an already-applied version is skipped rather
+            // than run — so reusing one here would assert on a migration that never
+            // executed and never threw.
+            let broken = PageStore.Migration(version: 9999, statements: ["THIS IS NOT SQL"])
             await #expect(throws: (any Error).self) {
                 try await database.store.migrate([broken])
             }

@@ -53,6 +53,22 @@ struct PublishSkillTests {
         )
     }
 
+    /// The rows of the table that follows `anchor`, each split into its `|`-delimited cells,
+    /// with the header and the `| --- |` rule dropped.
+    ///
+    /// Anchored to the sentence that introduces a table rather than to anything inside it, for
+    /// the same reason `line(after:in:)` is — and scoped to *one* table because this document
+    /// has five, several of whose rows are indistinguishable from each other line by line.
+    static func tableRows(after anchor: String, in markdown: String) throws -> [[Substring]] {
+        let lines = markdown.split(separator: "\n", omittingEmptySubsequences: false)
+        let index = try #require(lines.firstIndex { $0.contains(anchor) }, "\(anchor)")
+        let rows = lines[(index + 1)...]
+            .drop { !$0.hasPrefix("|") }
+            .prefix { $0.hasPrefix("|") }
+            .dropFirst(2)
+        return rows.map { $0.split(separator: "|", omittingEmptySubsequences: false) }
+    }
+
     // MARK: - The wire contract
 
     /// The route serves the rendering, not a template: the body equality is against a
@@ -301,6 +317,56 @@ struct PublishSkillTests {
         #expect(Set(Self.backtickedTokens(in: line)) == Set(PageContentType.allowed.keys))
     }
 
+    /// The scope vocabulary, held set-equal to `ClientScope` off the route table's own auth
+    /// column — the third hand-checkable list in this document, after the tones and the
+    /// content types, and pinned the same way for the same reason.
+    ///
+    /// Both directions matter and they fail differently. A scope this build enforces but the
+    /// table never names leaves an agent staring at a `403` with no idea what to ask the user
+    /// for; a scope named here that no longer exists sends them to ask for a credential the
+    /// server cannot mint. The un-backticked `none` and `any credential` are deliberately not
+    /// scopes and must stay outside the backticks, which is what keeps this equality exact.
+    @Test func theRouteTableNamesExactlyTheScopesThatExist() throws {
+        let rows = try Self.tableRows(
+            after: "The tool talks to these so you do not have to.", in: skillDocument.markdown
+        )
+        // The read surface, the two writes, whoami and the three admin routes.
+        #expect(rows.count >= 9)
+
+        let auth = rows.flatMap { row -> [String] in
+            guard row.count > 2 else { return [] }
+            return Self.backtickedTokens(in: row[2])
+        }
+        #expect(!auth.isEmpty)
+        #expect(Set(auth) == Set(ClientScope.allCases.map(\.rawValue)))
+    }
+
+    /// The two places outside that table where a scope is named in prose, and both are places
+    /// an agent has to act on: the `403` row says which scope to ask the user for, and the
+    /// paragraph under the table says which one it already has. Interpolated from
+    /// `ClientScope`, so a rename cannot leave either sentence naming a scope the server has
+    /// never heard of.
+    @Test func namesThePublishScopeWhereARefusalHasToBeActedOn() {
+        #expect(
+            skillDocument.markdown.contains("with the `\(ClientScope.publish.rawValue)` scope")
+        )
+        #expect(
+            skillDocument.markdown.contains("`\(ClientScope.publish.rawValue)` and nothing else")
+        )
+    }
+
+    /// `stele auth status` — the first command the document tells an agent to run — is a
+    /// `GET /admin/whoami`, and it is the one route under `/admin` that any credential may
+    /// reach. A document that listed the admin routes without it would describe a segment
+    /// that is entirely off limits to its reader, which is both wrong and the reason an agent
+    /// would not bother running the check.
+    @Test func documentsTheWhoamiRoute() {
+        #expect(
+            skillDocument.markdown
+                .contains("/\(ServerRoute.admin)/\(ServerRoute.adminWhoami)")
+        )
+    }
+
     /// The single line an agent copies into every page it writes. Interpolated from
     /// `Stylesheet.path`, so this asserts the interpolation happened rather than that
     /// somebody typed the path out and got it right today.
@@ -311,18 +377,97 @@ struct PublishSkillTests {
         )
     }
 
-    /// The single failure that breaks "publish on the first try": a curl pointed at a host
-    /// the agent cannot reach. The negative half matters as much — a placeholder left in the
-    /// literal would still satisfy the positive half, because the real host appears elsewhere
-    /// in the document.
-    @Test func curlTargetsTheConfiguredHost() {
-        #expect(skillDocument.markdown.contains("\(TestFixture.baseURL)/\(ServerRoute.pages)"))
-        #expect(skillDocument.markdown.contains("--data-binary"))
+    /// The single failure that breaks "publish on the first try": an agent authenticated
+    /// against a host it cannot reach, or against the wrong one. `stele auth login --host`
+    /// is where this deployment's address has to arrive, because it is the only command in
+    /// the document that names a host at all — every later command reads it back out of the
+    /// credential file.
+    ///
+    /// The negative half matters as much — a placeholder left in the literal would still
+    /// satisfy the positive half, because the real host appears elsewhere in the document.
+    @Test func authenticatesAgainstTheConfiguredHost() {
+        #expect(skillDocument.markdown.contains("stele auth login --host \(TestFixture.baseURL)"))
         #expect(!skillDocument.markdown.contains("localhost"))
         // The default an unset `STELE_BASE_URL` resolves to — the placeholder most likely
         // to actually ship, so its absence is the half of this test that earns its keep.
         #expect(!skillDocument.markdown.contains("127.0.0.1"))
         #expect(!skillDocument.markdown.contains("example.com"))
+    }
+
+    // MARK: - The CLI
+
+    /// The install sequence, pinned to the constants it is interpolated from.
+    ///
+    /// This is the part of the document that describes a *different repository*, which is
+    /// the new opportunity for it to lie: nothing in a `swift build` of this package would
+    /// notice a clone URL that had moved or a make target that had been renamed. Holding
+    /// the prose to `SteleCLI` is what keeps the two repos' story single-sourced — the
+    /// server states these facts in one place and the document quotes it.
+    @Test(arguments: [
+        SteleCLI.cloneCommand,
+        SteleCLI.installCommand,
+        SteleCLI.completionsCommand,
+        SteleCLI.binaryDirectory,
+        SteleCLI.compatibilityLibraries,
+    ])
+    func documentsTheInstallSequence(fragment: String) {
+        #expect(skillDocument.markdown.contains(fragment), "\(fragment)")
+    }
+
+    /// The document has to assume nothing is installed, so it needs the check that decides
+    /// whether to install at all, and the two commands the agent runs afterwards. A skill
+    /// that named only `stele publish` would leave an agent on a fresh machine with a
+    /// `command not found` and no instruction covering it.
+    @Test(arguments: [
+        "stele auth status", "stele auth login", "stele publish", "stele update",
+    ])
+    func documentsEveryCommandTheAgentNeeds(command: String) {
+        #expect(skillDocument.markdown.contains(command), "\(command)")
+    }
+
+    /// The one version string in the document, and it is the server's.
+    ///
+    /// Set equality over *every* dotted-numeric token the prose contains, rather than a
+    /// `contains` for the current value: a `contains` passes happily alongside a second,
+    /// stale version left behind in a sentence somewhere, which is exactly the drift this
+    /// guards — the document would then tell an agent to reinstall until it reached a build
+    /// number this deployment never asked for. Parsed with the same initialiser the gate
+    /// parses a `User-Agent` with, so "what counts as a version" cannot differ between the
+    /// document and the middleware.
+    @Test func mentionsExactlyTheMinimumCLIVersion() {
+        let punctuation = CharacterSet(charactersIn: "`(),.;:|*")
+        let versions = skillDocument.markdown
+            .split(whereSeparator: \.isWhitespace)
+            .map { $0.trimmingCharacters(in: punctuation) }
+            .compactMap { CLIVersion(parsing: $0) }
+
+        #expect(Set(versions) == [minimumCLIVersion])
+    }
+
+    /// The whole point of the rewrite, asserted negatively because that is the only way a
+    /// custody boundary can be asserted: the document must contain no way for the agent to
+    /// come into possession of a credential.
+    ///
+    /// Every string below was in the previous version of this document. A well-meaning
+    /// "helpful" edit that restores any of them — an env var to export, a header to send, a
+    /// curl to run — hands the token back to the model, in the same context window as a page
+    /// it is about to publish at a guessable URL. That is the failure the CLI exists to make
+    /// impossible, and it would otherwise reappear silently, because a document that teaches
+    /// both routes still works.
+    @Test(arguments: [
+        "STELE_UPLOAD_TOKEN", "Authorization", "Bearer", "--data-binary", "curl -X",
+        "ask the user for it",
+    ])
+    func neverPutsTheCredentialInTheAgentsHands(fragment: String) {
+        #expect(!skillDocument.markdown.contains(fragment), "\(fragment)")
+    }
+
+    /// `stele auth login` prompts on a TTY for a secret. An agent that runs it either hangs
+    /// on a prompt it cannot answer or, worse, decides to source the value from somewhere —
+    /// so the document has to say whose step it is, in words, and not merely list the
+    /// command. Prose-level, like `documentsThatUpdateNeverCreates`.
+    @Test func handsAuthenticationToTheUser() {
+        #expect(skillDocument.markdown.contains("Ask them to run it; do not run it for them."))
     }
 
     /// Rendered with a byte limit no default could produce, so a stale literal in the
@@ -346,8 +491,11 @@ struct PublishSkillTests {
     /// would run it through. A skill that teaches an example the server rejects is worse than
     /// no skill: the agent's first act on the first try is a `400`.
     @Test func exampleSlugsAreValid() throws {
+        // The three places a name can follow: the flag that requests one, the update
+        // command's first argument, and the route table's path. `?slug=` is gone with the
+        // curl it belonged to — the flag replaced it.
         var examples: [String] = []
-        for marker in ["?slug=", "/\(ServerRoute.pages)/"] {
+        for marker in ["--slug ", "stele update ", "/\(ServerRoute.pages)/"] {
             var remainder = Substring(skillDocument.markdown)
             while let found = remainder.range(of: marker) {
                 let tail = remainder[found.upperBound...]
@@ -358,9 +506,12 @@ struct PublishSkillTests {
         }
 
         for example in examples {
-            // A bare marker with nothing after it (`?slug=` used as a noun) names no slug,
-            // and `:slug` is the route table's placeholder rather than an example.
-            guard !example.isEmpty, !example.hasPrefix(":") else { continue }
+            // A bare marker with nothing after it (`--slug` used as a noun) names no slug;
+            // `:slug` is the route table's placeholder, and `<slug>` is a synopsis line's.
+            // Neither placeholder spelling is an example, and neither could be — no slug
+            // may contain `:` or `<`.
+            guard !example.isEmpty, !example.hasPrefix(":"), !example.hasPrefix("<")
+            else { continue }
             #expect(throws: Never.self, "\(example)") { try Slug(custom: example) }
         }
 
@@ -370,7 +521,12 @@ struct PublishSkillTests {
 
     /// An agent handed a status it was never told about has no recovery path and will either
     /// retry a permanent failure or report success it did not get.
-    @Test(arguments: ["400", "401", "404", "409", "413", "415", "503"])
+    ///
+    /// `403` and `426` are the two the credential split added. Both are recoverable and
+    /// neither is retryable as-is, which is precisely the combination an agent gets wrong
+    /// when it has not been told: a `403` is a credential without the `publish` scope and a
+    /// `426` is an install that has fallen behind the deployment.
+    @Test(arguments: ["400", "401", "403", "404", "409", "413", "415", "426", "503"])
     func documentsEveryFailureStatus(code: String) {
         #expect(skillDocument.markdown.contains(code), "\(code)")
     }
@@ -383,14 +539,14 @@ struct PublishSkillTests {
         #expect(skillDocument.markdown.contains("\"url\""))
     }
 
-    /// The asymmetry an agent updating a page will otherwise get wrong: absence of
-    /// `Content-Type` means "text/html" to POST and "leave it alone" to PUT. Prose-level, but
-    /// silently re-typing a stored stylesheet to HTML behind a `200` is the failure.
-    @Test func documentsThePutDifference() {
-        #expect(
-            skillDocument.markdown
-                .contains("omitting `Content-Type` on a PUT keeps the stored type")
-        )
+    /// The asymmetry an agent updating a page will otherwise get wrong: `stele update`
+    /// addresses a page that already exists and refuses to create one, so an agent that
+    /// reaches for it to publish gets a `404` and no page. Prose-level, and it replaces the
+    /// `Content-Type` asymmetry this test used to pin — that one was about headers the
+    /// agent no longer sends, and a document that still explained it would be teaching the
+    /// mechanics of a request the reader never makes.
+    @Test func documentsThatUpdateNeverCreates() {
+        #expect(skillDocument.markdown.contains("`stele update <slug> <file>` **never creates**"))
     }
 
     /// It is a SKILL.md, and the frontmatter is what an agent runtime reads to decide whether
@@ -409,7 +565,7 @@ struct PublishSkillTests {
     /// if the document had been shadowed anyway.
     @Test func skillCannotBeClaimedAsASlug() async throws {
         let headers: HTTPFields = [
-            .authorization: "Bearer \(TestFixture.token)",
+            .authorization: "Bearer \(TestFixture.publishToken)",
             .contentType: "text/html",
         ]
 

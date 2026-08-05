@@ -18,8 +18,14 @@ public protocol PageStoring: Sendable {
     /// Stores a page if the slug is free, as one atomic step — the check and the write
     /// must not leave a window where two concurrent uploads both see the slug as free.
     ///
+    /// - Parameter clientID: the credential that wrote the page, or nil when there is no
+    ///   honest owner to record — see `Client.attributableID`. It is the caller's job to
+    ///   have mapped the synthesised shared-token credential to nil already; a conformer
+    ///   backed by a database has a foreign key here and cannot invent a row.
     /// - Returns: true if the page was stored, false if the slug was already taken.
-    func insert(slug: Slug, body: String, contentType: String) async throws -> Bool
+    func insert(
+        slug: Slug, body: String, contentType: String, clientID: Int64?
+    ) async throws -> Bool
 
     /// Replaces the body — and, when `contentType` is non-nil, the content type — of an
     /// existing page, as one atomic step: the existence check and the write must not
@@ -27,8 +33,15 @@ public protocol PageStoring: Sendable {
     /// on. A nil `contentType` preserves the stored one. Never creates: a slug with no
     /// row stays absent.
     ///
+    /// - Parameter clientID: as `insert`, and it is *written* rather than coalesced: the
+    ///   column records who last wrote the page, not who first published it. A nil
+    ///   therefore clears an existing attribution, which is the honest answer — the page's
+    ///   current bytes came from a credential with no row behind it. (`createdAt` is what
+    ///   stays fixed across a replacement; provenance follows the bytes.)
     /// - Returns: true if the page was replaced, false if no such slug exists.
-    func update(slug: Slug, body: String, contentType: String?) async throws -> Bool
+    func update(
+        slug: Slug, body: String, contentType: String?, clientID: Int64?
+    ) async throws -> Bool
 }
 
 extension PageStoring {
@@ -47,18 +60,23 @@ extension PageStoring {
         requestedSlug: Slug?,
         body: String,
         contentType: String,
+        clientID: Int64?,
         generator: SlugGenerator,
         logger: Logger? = nil
     ) async throws -> Slug {
         if let requestedSlug {
-            guard try await insert(slug: requestedSlug, body: body, contentType: contentType)
+            guard try await insert(
+                slug: requestedSlug, body: body, contentType: contentType, clientID: clientID
+            )
             else { throw PageStoreError.slugTaken(requestedSlug) }
             return requestedSlug
         }
 
         for attempt in 1...Self.maxSlugAttempts {
             let candidate = generator.generate()
-            if try await insert(slug: candidate, body: body, contentType: contentType) {
+            if try await insert(
+                slug: candidate, body: body, contentType: contentType, clientID: clientID
+            ) {
                 return candidate
             }
             logger?.warning(

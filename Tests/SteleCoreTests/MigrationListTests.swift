@@ -31,6 +31,32 @@ struct MigrationListTests {
         #expect(sql.contains { $0.contains("CREATE INDEX IF NOT EXISTS pages_created_at_idx") })
     }
 
+    /// Version 2's two halves. Either one alone compiles and boots: without the table the
+    /// foreign key fails loudly, but without the `client_id` column every write simply
+    /// records no owner and nothing ever says so.
+    @Test func versionTwoAddsClientsAndAttributesPagesToThem() throws {
+        let sql = try #require(PageStore.migrations.first { $0.version == 2 }).statements
+            .map(\.sql)
+        #expect(sql.contains { $0.contains("CREATE TABLE clients") })
+        #expect(sql.contains { $0.contains("token_hash   bytea NOT NULL UNIQUE") })
+        #expect(
+            sql.contains {
+                $0.contains("ALTER TABLE pages ADD COLUMN client_id bigint REFERENCES clients (id)")
+            }
+        )
+    }
+
+    /// The one value in the schema that had to be retyped rather than interpolated — DDL
+    /// cannot take bind parameters, so a `\(…)` in a migration becomes a bind and fails.
+    /// This is the pin that stands in for the interpolation: renaming the scope without
+    /// touching the default fails here instead of silently minting credentials with a
+    /// scope nothing grants.
+    @Test func versionTwoDefaultsNewCredentialsToThePublishScope() throws {
+        let sql = try #require(PageStore.migrations.first { $0.version == 2 }).statements
+            .map(\.sql)
+        #expect(sql.contains { $0.contains("DEFAULT '{\(ClientScope.publish.rawValue)}'") })
+    }
+
     /// Two properties of the statement text, both of which fail confusingly at runtime.
     /// A `\(…)` in a `PostgresQuery` literal becomes a bind parameter rather than SQL
     /// text, and DDL cannot take binds; and PostgresNIO's extended query protocol refuses

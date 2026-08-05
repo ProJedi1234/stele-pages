@@ -52,7 +52,7 @@ struct ServingAndStoreErrorTests {
                 uri: "/pages?slug=\(slug.value)",
                 method: .post,
                 headers: [
-                    .authorization: "Bearer \(TestFixture.token)",
+                    .authorization: "Bearer \(TestFixture.publishToken)",
                     .contentType: "text/html",
                 ],
                 body: ByteBuffer(string: "<h1>replacement</h1>")
@@ -78,7 +78,7 @@ struct ServingAndStoreErrorTests {
                 uri: "/pages",
                 method: .post,
                 headers: [
-                    .authorization: "Bearer \(TestFixture.token)",
+                    .authorization: "Bearer \(TestFixture.publishToken)",
                     .contentType: "text/html",
                 ],
                 body: ByteBuffer(string: "<h1>page</h1>")
@@ -97,7 +97,7 @@ struct ServingAndStoreErrorTests {
                 uri: "/pages?slug=abc_def",
                 method: .post,
                 headers: [
-                    .authorization: "Bearer \(TestFixture.token)",
+                    .authorization: "Bearer \(TestFixture.publishToken)",
                     .contentType: "text/html",
                 ],
                 body: ByteBuffer(string: "<h1>page</h1>")
@@ -117,7 +117,7 @@ struct ServingAndStoreErrorTests {
                 uri: "/pages",
                 method: .post,
                 headers: [
-                    .authorization: "Bearer \(TestFixture.token)",
+                    .authorization: "Bearer \(TestFixture.publishToken)",
                     .contentType: "text/html",
                 ],
                 body: ByteBuffer(string: "")
@@ -138,7 +138,7 @@ struct ServingAndStoreErrorTests {
                 uri: "/pages",
                 method: .post,
                 headers: [
-                    .authorization: "Bearer \(TestFixture.token)",
+                    .authorization: "Bearer \(TestFixture.publishToken)",
                     .contentType: "text/html",
                 ],
                 body: ByteBuffer(bytes: [0xFF, 0xFE, 0xFD])
@@ -158,7 +158,7 @@ struct ServingAndStoreErrorTests {
                 uri: "/pages",
                 method: .post,
                 headers: [
-                    .authorization: "Bearer \(TestFixture.token)",
+                    .authorization: "Bearer \(TestFixture.publishToken)",
                     .contentType: "text/html",
                 ],
                 body: ByteBuffer(bytes: [0x61, 0x00, 0x62])
@@ -180,7 +180,7 @@ struct ServingAndStoreErrorTests {
                 uri: "/pages",
                 method: .post,
                 headers: [
-                    .authorization: "Bearer \(TestFixture.token)",
+                    .authorization: "Bearer \(TestFixture.publishToken)",
                     .contentType: "text/html",
                 ],
                 body: ByteBuffer(string: String(repeating: "x", count: 64))
