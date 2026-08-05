@@ -43,6 +43,90 @@ public enum SteleCLI {
     /// that profile, and the resulting failure is a linker error that names nothing useful.
     public static let compatibilityLibraries = "~/.local/share/swiftly/compat-lib"
 
+    /// The flags the skill has to name, because each one is a capability an agent otherwise
+    /// does not know it has.
+    ///
+    /// `ttl` is why this list exists. It shipped in the client and the document went on
+    /// saying "`stele publish` does not expose this yet" — so an agent asked for a permanent
+    /// page refused a request it could have satisfied, and the refusal read as a considered
+    /// policy rather than a stale sentence. Nothing in a build of this package can see that
+    /// the flag arrived; naming the flags here at least gives the document one place to be
+    /// wrong instead of six, and `PublishSkillTests.documentsEveryFlagTheAgentCanUse` fails
+    /// if a name added here never reaches the prose.
+    public static let slugFlag = "--slug"
+    public static let ttlFlag = "--ttl"
+    public static let contentTypeFlag = "--content-type"
+    public static let hostFlag = "--host"
+    public static let jsonFlag = "--json"
+
+    /// Every flag above, which is what the document is held to.
+    public static let flags = [slugFlag, ttlFlag, contentTypeFlag, hostFlag, jsonFlag]
+
+    /// How the CLI reports an outcome, and the *only* thing about a failure that is stable
+    /// enough to branch on.
+    ///
+    /// The document used to answer "what does a failure look like?" with the server's HTTP
+    /// statuses, which is not what the caller sees: the CLI collapses those onto a dozen exit
+    /// codes, rewrites the message in its own words, and — outside `unexpectedStatus` — never
+    /// prints the number at all. An agent told to watch for `409` watched for a string that
+    /// does not arrive. Two of the likeliest outcomes have no status behind them in the first
+    /// place: `noCredential`, which is decided before a request is built, and `unreachable`,
+    /// where no server ever answered.
+    ///
+    /// A table here rather than prose in `PublishSkill` for the reason the whole file exists:
+    /// these are facts about another repository, and one place to state them is the most this
+    /// package can offer. `Exit` in the client is the authority — this is a transcription of
+    /// it, and the two are checked against each other by a human reading both.
+    public static let exits: [CLIExit] = [
+        CLIExit(0, "It worked.", "Report the URL it printed, with the page's deadline."),
+        CLIExit(
+            1,
+            "The input was wrong, or the server refused it for a reason with no better answer.",
+            "Read the message and fix the input. Do not retry it unchanged."
+        ),
+        CLIExit(
+            2,
+            "No usable credential on this machine.",
+            "Ask the user to run `stele auth login`. Never go looking for a token yourself."
+        ),
+        CLIExit(
+            3,
+            "The server refused the stored credential — revoked, expired, or never valid.",
+            "Do not retry. Ask the user to run `stele auth login` again."
+        ),
+        CLIExit(
+            4,
+            "The credential is valid but does not carry the scope the command needs.",
+            "Do not retry. An operator has to run it; yours is a publishing credential."
+        ),
+        CLIExit(
+            5,
+            "That slug is taken.",
+            "Choose another `\(slugFlag)`, or omit it and take a generated one."
+        ),
+        CLIExit(
+            6,
+            "The page itself was refused: too large, or a type the server will not store.",
+            "Drop inline images, or publish one of the accepted types."
+        ),
+        CLIExit(
+            7,
+            "Nothing is published at that slug — or it has expired.",
+            "Publish it instead: `stele publish <file> \(slugFlag) <name>`."
+        ),
+        CLIExit(
+            8,
+            "This build is older than the deployment accepts.",
+            "Run `\(installCommand)`, then retry once."
+        ),
+        CLIExit(
+            9,
+            "The request never reached a server. The credential was not sent.",
+            "Retryable. Check the host first — this is usually the wrong address, not an outage."
+        ),
+        CLIExit(10, "The server failed.", "Retry once, then stop and say so."),
+    ]
+
     /// What a request's `User-Agent` says about the client that sent it.
     ///
     /// Three cases rather than an optional, because "not a stele CLI at all" and "a stele
@@ -63,6 +147,20 @@ public enum SteleCLI {
             return .version(version)
         }
         return .notTheCLI
+    }
+}
+
+/// One row of `SteleCLI.exits`: a status the CLI exits with, what it means, and what the
+/// agent that received it should do next.
+public struct CLIExit: Sendable, Equatable {
+    public let code: Int32
+    public let meaning: String
+    public let remedy: String
+
+    public init(_ code: Int32, _ meaning: String, _ remedy: String) {
+        self.code = code
+        self.meaning = meaning
+        self.remedy = remedy
     }
 }
 

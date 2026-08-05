@@ -57,10 +57,22 @@ against an in-memory `PageStoring` fake, so no curl and no database are needed.
 rendered SKILL.md as data and pins its prose to the constants it documents — the component,
 tone and syntax-token vocabularies against `Stylesheet`, the accepted types against `PageContentType.allowed`,
 the example slugs through `Slug(custom:)`, the lifetime table and `?ttl=` grammar against
-`PageLifetime`, the install sequence against `SteleCLI`, and
+`PageLifetime`, the install sequence, the flag set and the exit-code table against
+`SteleCLI`, and
 every dotted-numeric token in the whole document against `minimumCLIVersion` — so changing
 the contract without changing the document fails the build rather than shipping stale
-instructions. Two of its assertions are *negative* and are the ones to leave alone:
+instructions.
+
+The client-facing half of that is newer and exists because it failed once. `--ttl` shipped
+in `stele-cli` while the document still read "`stele publish` does not expose this yet", so
+an agent asked for a permanent page refused a request it could have satisfied — and the
+refusal read as policy rather than staleness, which is why nobody noticed. No test in this
+package can see the other repository, so `documentsEveryFlagTheAgentCanUse` and
+`theExitTableMatchesTheClientsExitCodes` do the only thing that is available: hold the
+document to `SteleCLI.flags` and `SteleCLI.exits`, so the document and this package cannot
+disagree and there is exactly one place left to update when the client moves. The exit table
+is order-sensitive on purpose — an agent reads it top to bottom, and a code out of sequence
+reads as a severity ranking that is not there. Two of its assertions are *negative* and are the ones to leave alone:
 `neverPutsTheCredentialInTheAgentsHands` fails if the document ever again mentions
 `STELE_UPLOAD_TOKEN`, an `Authorization` header or a `curl -X`, and `handsAuthenticationToTheUser`
 pins the sentence that says whose step `stele auth login` is. The skill's job is to keep
@@ -217,9 +229,13 @@ gap, asserted today only against the in-memory fake.
   only notice it later. **This now reaches across repositories.** The skill documents a
   tool built in `stele-cli`, and nothing in a build of *this* package would notice a clone
   URL that had moved or a make target that had been renamed — so those facts live in
-  `Sources/SteleCore/SteleCLI.swift` and the document quotes them. Two facts and only two
-  are hardcoded about that repo: its clone URL and `minimumCLIVersion`. Everything else is
-  derived. The deliberate exceptions are the component-class table and the syntax-token
+  `Sources/SteleCore/SteleCLI.swift` and the document quotes them: the clone URL and
+  `minimumCLIVersion` are hardcoded, the install and completions commands are derived from
+  the checkout path, and `flags` and `exits` are transcriptions of the client's own
+  `ArgumentParser` options and `Exit` table. A transcription is the most this package can
+  offer — it cannot verify the other repo, only refuse to hold two copies of its own answer
+  — and it is what `--ttl` needed and did not have. **Anything the skill says about the
+  client goes here first and is interpolated from here.** The deliberate exceptions are the component-class table and the syntax-token
   list — each row carries hand-written prose no constant could generate, so the class
   names are typed out and `PublishSkillTests.componentTableMatchesTheStylesheet` /
   `.documentsEverySyntaxTokenClass` hold them set-equal to `Stylesheet.componentClasses`
