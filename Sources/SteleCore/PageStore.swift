@@ -151,7 +151,7 @@ extension PageStore {
     /// ever booted this code; editing an entry diverges the databases that already ran it
     /// from the ones that haven't, with nothing to detect the difference. Change the
     /// schema by adding the next version. Issue #6's TTL column ships as
-    /// `Migration(version: 3, statements: ["ALTER TABLE pages ADD COLUMN expires_at
+    /// `Migration(version: 4, statements: ["ALTER TABLE pages ADD COLUMN expires_at
     /// timestamptz"])`, not as another idempotent `ALTER` bolted onto version 1.
     ///
     /// Statements are not limited to DDL. Because a version runs exactly once and commits
@@ -214,6 +214,36 @@ extension PageStore {
                 // right answer — and keeping that separation is worth more than a tidier
                 // backfill.
                 "ALTER TABLE pages ADD COLUMN client_id bigint REFERENCES clients (id)",
+            ]
+        ),
+        Migration(
+            version: 3,
+            statements: [
+                // Version 2 made `name` unique across the whole table, and rows are never
+                // deleted — so revoking `claude-code` retired that name permanently and the
+                // replacement had to be called `claude-code-2`. Rotation is the ordinary
+                // reason to revoke, and a name that survives it is the whole point of having
+                // one: it is the handle `DELETE /admin/clients/:name` addresses and the
+                // string an operator recognises in a listing.
+                //
+                // Uniqueness moves to the live rows rather than being dropped. Two *usable*
+                // credentials sharing a name would make revocation ambiguous at exactly the
+                // wrong moment, which is the thing version 2 was right about; the history
+                // beside them is what an incident is reconstructed from and does not need to
+                // be unique to be read. `ClientStore.revoke` is what resolves the resulting
+                // several-rows-one-name to a single row — live first, newest revocation
+                // otherwise.
+                //
+                // The constraint is dropped by the name Postgres generates for a column-level
+                // UNIQUE (`<table>_<column>_key`), not by one version 2 chose. No
+                // `IF EXISTS`: on any database that ran version 2 it is there, and on one
+                // where it is not, something has edited the schema by hand and the boot
+                // should say so.
+                "ALTER TABLE clients DROP CONSTRAINT clients_name_key",
+                """
+                CREATE UNIQUE INDEX clients_live_name_idx
+                ON clients (name) WHERE revoked_at IS NULL
+                """,
             ]
         ),
     ]

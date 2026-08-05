@@ -233,8 +233,9 @@ struct AdminClientsTests {
         }
     }
 
-    /// Names are unique because they are the revocation handle: two rows sharing one would
-    /// make `DELETE /admin/clients/:name` ambiguous at exactly the wrong moment.
+    /// Live names are unique because the name is the revocation handle: two *usable* rows
+    /// sharing one would make `DELETE /admin/clients/:name` ambiguous at exactly the wrong
+    /// moment. Revoked rows are the other case — see `aRevokedNameCanBeReissued`.
     @Test func aDuplicateNameIs409AndMintsNothing() async throws {
         try await Self.makeApp().test(.router) { client in
             #expect(try await Self.create(client, body: #"{"name":"twice"}"#).status == .created)
@@ -372,6 +373,90 @@ struct AdminClientsTests {
             // And the row survives revocation: the history is the point.
             let names = try await Self.list(client).clients.compactMap { $0["name"] as? String }
             #expect(names == ["leaked"])
+        }
+    }
+
+    /// Rotation, end to end and through the routes an operator actually types: mint, revoke,
+    /// mint again under the same name. The name is the handle their tooling stores, so a
+    /// scheme where revoking retired it would make every rotation a rename — and the only
+    /// way out would be `claude-code-2`, then `-3`.
+    ///
+    /// The three assertions that matter are that the second mint is a `201` rather than the
+    /// `409` this used to be, that the revoked token stays dead, and that the history keeps
+    /// both rows.
+    @Test func aRevokedNameCanBeReissued() async throws {
+        try await Self.makeApp().test(.router) { client in
+            let first = try await Self.create(client, body: #"{"name":"claude-code"}"#)
+            let firstToken = try #require(first.json["token"] as? String)
+
+            try await client.execute(
+                uri: "\(Self.collection)/claude-code",
+                method: .delete,
+                headers: Self.authorized
+            ) { #expect($0.status == .ok) }
+
+            let second = try await Self.create(client, body: #"{"name":"claude-code"}"#)
+            #expect(second.status == .created)
+            let secondToken = try #require(second.json["token"] as? String)
+            #expect(secondToken != firstToken)
+
+            func publish(with token: String) async throws -> HTTPResponse.Status {
+                try await client.execute(
+                    uri: "/\(ServerRoute.pages)",
+                    method: .post,
+                    headers: [.authorization: "Bearer \(token)", .contentType: "text/html"],
+                    body: ByteBuffer(string: "<h1>rotated</h1>")
+                ) { $0.status }
+            }
+            #expect(try await publish(with: secondToken) == .created)
+            #expect(try await publish(with: firstToken) == .unauthorized)
+
+            // Two rows, one name: the retired credential is still the record of what was
+            // revoked and when, which is the question the listing exists to answer.
+            let listed = try await Self.list(client).clients
+            #expect(listed.compactMap { $0["name"] as? String } == ["claude-code", "claude-code"])
+            #expect(listed.first?["revokedAt"] is String)
+            #expect(listed.last?["revokedAt"] == nil || listed.last?["revokedAt"] is NSNull)
+
+            // A second *live* one is still refused, and the message says which half of the
+            // rotation is missing.
+            let third = try await Self.create(client, body: #"{"name":"claude-code"}"#)
+            #expect(third.status == .conflict)
+            #expect(third.raw.contains("Revoke it first"))
+        }
+    }
+
+    /// Which of several rows sharing a name a `DELETE` lands on. Reaching the already-retired
+    /// one would answer `200` with a `revokedAt` the operator recognises while leaving the
+    /// live token publishing.
+    @Test func revokingAReissuedNameTakesTheLiveCredential() async throws {
+        try await Self.makeApp().test(.router) { client in
+            _ = try await Self.create(client, body: #"{"name":"claude-code"}"#)
+            try await client.execute(
+                uri: "\(Self.collection)/claude-code", method: .delete, headers: Self.authorized
+            ) { #expect($0.status == .ok) }
+
+            let reissued = try await Self.create(client, body: #"{"name":"claude-code"}"#)
+            let token = try #require(reissued.json["token"] as? String)
+
+            try await client.execute(
+                uri: "\(Self.collection)/claude-code", method: .delete, headers: Self.authorized
+            ) { #expect($0.status == .ok) }
+
+            try await client.execute(
+                uri: "/\(ServerRoute.pages)",
+                method: .post,
+                headers: [.authorization: "Bearer \(token)", .contentType: "text/html"],
+                body: ByteBuffer(string: "<h1>after</h1>")
+            ) { #expect($0.status == .unauthorized) }
+
+            // Nothing live left, and the retry still answers rather than 404ing.
+            try await client.execute(
+                uri: "\(Self.collection)/claude-code", method: .delete, headers: Self.authorized
+            ) { #expect($0.status == .ok) }
+
+            let revocations = try await Self.list(client).clients.map { $0["revokedAt"] is String }
+            #expect(revocations == [true, true])
         }
     }
 

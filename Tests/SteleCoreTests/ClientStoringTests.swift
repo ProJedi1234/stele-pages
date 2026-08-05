@@ -173,6 +173,58 @@ struct ClientStoringTests {
         #expect(try await store.revoke(name: "never-existed") == nil)
     }
 
+    /// Rotation, which is the ordinary reason to revoke anything: the name is the handle the
+    /// operator and their tooling know, so retiring it along with the credential would make
+    /// every rotation rename the agent. Uniqueness holds over live rows only — the revoked
+    /// row stays in the listing and stops authenticating, which is the part that matters.
+    @Test func aRevokedNameCanBeReissued() async throws {
+        let store = InMemoryClientStore()
+        let (_, firstToken) = try await store.create(
+            name: "claude-code", scopes: [.publish], expiresAt: nil
+        )
+        _ = try await store.revoke(name: "claude-code")
+
+        let (reissued, secondToken) = try await store.create(
+            name: "claude-code", scopes: [.publish], expiresAt: nil
+        )
+        #expect(reissued.revokedAt == nil)
+        #expect(try await store.authenticate(token: secondToken, at: now) == reissued)
+        // The old token does not come back to life with the name.
+        #expect(try await store.authenticate(token: firstToken, at: now) == nil)
+        #expect(try await store.allClients().map(\.name) == ["claude-code", "claude-code"])
+
+        // And a second live one is still refused, which is what keeps `DELETE
+        // /admin/clients/:name` unambiguous.
+        await #expect(throws: ClientStoreError.nameTaken("claude-code")) {
+            try await store.create(name: "claude-code", scopes: [.publish], expiresAt: nil)
+        }
+    }
+
+    /// Which row a `DELETE` lands on once a name has history behind it. The live credential
+    /// is the only one revoking can mean; reaching the retired row instead would report a
+    /// success while leaving the working token working.
+    @Test func revokingANameWithHistoryTakesTheLiveCredential() async throws {
+        let store = InMemoryClientStore()
+        _ = try await store.create(name: "claude-code", scopes: [.publish], expiresAt: nil)
+        let firstRevoke = try #require(try await store.revoke(name: "claude-code"))
+        let (reissued, token) = try await store.create(
+            name: "claude-code", scopes: [.publish], expiresAt: nil
+        )
+
+        let secondRevoke = try #require(try await store.revoke(name: "claude-code"))
+        #expect(secondRevoke.id == reissued.id)
+        #expect(try await store.authenticate(token: token, at: now) == nil)
+
+        // With nothing live left, a retry still answers rather than 404ing — and answers
+        // with the row it just revoked, at the timestamp it already had.
+        let retry = try #require(try await store.revoke(name: "claude-code"))
+        #expect(retry.id == secondRevoke.id)
+        #expect(retry.revokedAt == secondRevoke.revokedAt)
+        // The older row is untouched: its own moment of revocation is still its own.
+        let stored = try await store.allClients()
+        #expect(stored.first { $0.id == firstRevoke.id }?.revokedAt == firstRevoke.revokedAt)
+    }
+
     @Test func theListingIsOldestFirst() async throws {
         let store = InMemoryClientStore()
         for name in ["first", "second", "third"] {

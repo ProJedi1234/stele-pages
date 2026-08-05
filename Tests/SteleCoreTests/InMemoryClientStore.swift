@@ -81,13 +81,17 @@ actor InMemoryClientStore: ClientStoring {
         // is no honest value to write here — `recordedUses` is what tests assert on.
     }
 
-    /// Both unique constraints, in the order Postgres would hit them: the digest first
-    /// (which is what the dictionary is keyed by) and then the name.
+    /// Both unique indexes, in the order Postgres would hit them: the digest first (which is
+    /// what the dictionary is keyed by) and then the name — but the name only among *live*
+    /// rows, which is the fake's copy of `clients_live_name_idx`'s `WHERE revoked_at IS
+    /// NULL`. A revoked credential keeps its name in the listing without reserving it.
     func insert(
         name: String, tokenHash: [UInt8], scopes: [String], expiresAt: Date?
     ) async throws -> Client? {
         guard clientsByTokenHash[tokenHash] == nil,
-              !clientsByTokenHash.values.contains(where: { $0.name == name })
+              !clientsByTokenHash.values.contains(where: {
+                  $0.name == name && $0.revokedAt == nil
+              })
         else { return nil }
 
         // A real `Date()`, unlike `seed`'s fixed epoch: the store's `now()` is what makes
@@ -111,9 +115,20 @@ actor InMemoryClientStore: ClientStoring {
         clientsByTokenHash.values.sorted { $0.id < $1.id }
     }
 
+    /// The fake's copy of the store's subselect: the live row holding this name if there is
+    /// one, and otherwise the most recently revoked one. `id` descending breaks the tie the
+    /// store breaks the same way — two rows revoked inside one clock tick — and stands in
+    /// for `revoked_at DESC` here, since ids are minted in order.
     func revoke(name: String) async throws -> Client? {
-        guard let key = clientsByTokenHash.first(where: { $0.value.name == name })?.key
-        else { return nil }
+        let matching = clientsByTokenHash
+            .filter { $0.value.name == name }
+            .sorted { left, right in
+                let leftLive = left.value.revokedAt == nil
+                let rightLive = right.value.revokedAt == nil
+                if leftLive != rightLive { return leftLive }
+                return left.value.id > right.value.id
+            }
+        guard let key = matching.first?.key else { return nil }
         // The fake's copy of `COALESCE(revoked_at, now())`. Written as a policy the store
         // also implements rather than inherited from the seam, because it is one SQL
         // expression there and cannot be shared — `ClientStoringTests` pins both.

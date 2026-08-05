@@ -160,11 +160,18 @@ public struct ClientStore: Sendable {
 
     /// Stores a credential if the name and the digest are both free.
     ///
-    /// `ON CONFLICT DO NOTHING` with no conflict target, so *either* unique constraint —
-    /// `name` or `token_hash` — turns into an empty result rather than a thrown error. As
-    /// with `PageStore.insert`, the check and the write are one statement: reading the
-    /// names first and inserting after would leave a window where two concurrent mints
-    /// both see a name as free.
+    /// `ON CONFLICT DO NOTHING` with no conflict target, so *either* unique index —
+    /// `token_hash`'s constraint or `clients_live_name_idx` — turns into an empty result
+    /// rather than a thrown error. Untargeted is also what lets the name index be a
+    /// *partial* one: a conflict target would have to restate its `WHERE revoked_at IS
+    /// NULL` predicate here, in a second place, to be inferred at all. As with
+    /// `PageStore.insert`, the check and the write are one statement: reading the names
+    /// first and inserting after would leave a window where two concurrent mints both see a
+    /// name as free.
+    ///
+    /// "Free" means no *live* credential holds it — a revoked row keeps its name in the
+    /// history without reserving it, so rotating a credential can reuse the name the
+    /// operator already knows.
     ///
     /// - Returns: the stored row, or nil if the name was taken.
     public func insert(
@@ -203,11 +210,27 @@ public struct ClientStore: Sendable {
     /// row it returned the first time rather than resetting the moment the credential
     /// stopped being trusted. One statement again, so the existence check cannot land on a
     /// row a concurrent write has since changed, and `RETURNING` reports the miss.
+    ///
+    /// Since version 3 a name can be held by several rows — one live credential and the
+    /// retired ones it replaced — so the subselect picks which. `revoked_at DESC NULLS
+    /// FIRST` reads as "the live one, or else the most recently retired one", and the
+    /// partial unique index is what guarantees the first branch matches at most one row.
+    /// The second branch is what keeps a repeated `DELETE` a `200` rather than a `404`
+    /// after the last live credential of that name is gone, and it returns the same row —
+    /// and so the same `revoked_at` — every time.
+    ///
+    /// Updating *every* row with the name would be harmless under `COALESCE` and is still
+    /// wrong: it would return whichever row the planner reached first, so a retry could
+    /// answer with a different credential than the call it is retrying.
     public func revoke(name: String) async throws -> Client? {
         let rows = try await postgres.query(
             """
             UPDATE clients SET revoked_at = COALESCE(revoked_at, now())
-            WHERE name = \(name)
+            WHERE id = (
+                SELECT id FROM clients WHERE name = \(name)
+                ORDER BY revoked_at DESC NULLS FIRST, id DESC
+                LIMIT 1
+            )
             RETURNING id, name, scopes, created_at, last_used_at, expires_at, revoked_at
             """,
             logger: logger

@@ -38,6 +38,11 @@ public protocol ClientStoring: Sendable {
     /// the uniqueness check and the write must not leave a window where two concurrent
     /// mints both see a name as available.
     ///
+    /// A name is free when no *live* credential holds it. Revoked rows keep their names —
+    /// the listing is the record of what was revoked and when — but do not reserve them,
+    /// because rotating a credential means minting a replacement under the name the
+    /// operator and their tooling already know.
+    ///
     /// Takes the digest, never a token: the plaintext exists in exactly one function
     /// (`create(name:scopes:expiresAt:)` below) and does not cross this seam, so no
     /// conformer is ever in a position to store one by accident.
@@ -59,6 +64,10 @@ public protocol ClientStoring: Sendable {
     /// than moving it. That is what makes `DELETE` idempotent in the way that matters: a
     /// second call must not rewrite the moment a credential stopped being trusted, because
     /// that moment is the boundary an incident is reconstructed from.
+    ///
+    /// Several rows can share a name once one has been rotated. This revokes the live one
+    /// if there is one — there is at most one — and otherwise reports the most recently
+    /// revoked, which is what keeps a repeated call idempotent rather than a 404.
     ///
     /// - Returns: the row as it now stands, or nil if there is no such credential.
     func revoke(name: String) async throws -> Client?

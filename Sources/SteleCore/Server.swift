@@ -330,9 +330,15 @@ public func buildRouter(
                     name: name, scopes: scopes, expiresAt: expiresAt
                 )
             } catch ClientStoreError.nameTaken(let taken) {
+                // "still live", because a revoked one does not hold the name — rotating a
+                // credential is revoke-then-mint under the same name, and the operator who
+                // hits this needs to know which half they skipped.
                 throw HTTPError(
                     .conflict,
-                    message: "A client named '\(taken)' already exists."
+                    message: """
+                        A client named '\(taken)' is still live. Revoke it first to \
+                        reissue that name.
+                        """
                 )
             }
 

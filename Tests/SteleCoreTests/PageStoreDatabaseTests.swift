@@ -185,7 +185,8 @@ struct PageStoreDatabaseTests {
     /// Runs version 1 *alone*, through the `migrate(_:)` seam, so the assertions stay
     /// about what version 1 produces as the list grows past it. Every later version is
     /// pinned by its own test, and the full-list boot is covered by
-    /// `migrationTwoAddsCredentialsAndLeavesExistingPagesUnowned`.
+    /// `migrationThreeMovesNameUniquenessOntoLiveRows` and by
+    /// `upgradesADatabaseCreatedByTheOldBootstrap`.
     @Test func virginDatabaseGetsTheVersionOneSchema() async throws {
         try await PostgresFixture.withThrowawaySchema { database in
             try await database.store.migrate(Array(PageStore.migrations.prefix(1)))
@@ -294,8 +295,11 @@ struct PageStoreDatabaseTests {
 
             try await database.store.migrate()
 
+            // The whole list, named by the list rather than by a literal: this test is about
+            // an old database catching up to *current*, so appending a version must extend
+            // what it expects rather than fail it.
             let versions = try await PostgresFixture.appliedVersions(on: database.client)
-            #expect(versions == [1, 2])
+            #expect(versions == PageStore.migrations.map(\.version))
             let page = try await database.store.fetch(slug: Slug(unchecked: "quiet-cedar-otter"))
             #expect(page?.body == "<h1>before</h1>")
             #expect(page?.contentType == "text/html")
@@ -311,6 +315,10 @@ struct PageStoreDatabaseTests {
     /// integrity rule that stops two credentials sharing a digest *and* the index the
     /// authentication lookup rides on, so losing it degrades every authenticated request
     /// to a sequential scan without failing anything.
+    ///
+    /// Driven with a two-version prefix rather than the whole list, because version 3
+    /// deliberately replaces the `name` constraint asserted below — running to current here
+    /// would make this test fail for the one reason that is not a regression.
     @Test func migrationTwoAddsCredentialsAndLeavesExistingPagesUnowned() async throws {
         try await PostgresFixture.withThrowawaySchema { database in
             try await database.store.migrate(Array(PageStore.migrations.prefix(1)))
@@ -322,7 +330,7 @@ struct PageStoreDatabaseTests {
                 logger: PostgresFixture.logger
             )
 
-            try await database.store.migrate()
+            try await database.store.migrate(Array(PageStore.migrations.prefix(2)))
 
             let versions = try await PostgresFixture.appliedVersions(on: database.client)
             #expect(versions == [1, 2])
@@ -442,6 +450,92 @@ struct PageStoreDatabaseTests {
                 as: Bool.self, on: database.client
             )
             #expect(unowned == true)
+        }
+    }
+
+    /// What version 3 replaces, and the behaviour that replacement exists for. Runs the whole
+    /// list, so it is also the full-list boot: version 3 is an `ALTER` against a table version
+    /// 2 built, and an ordering mistake between them fails here.
+    ///
+    /// Two halves, and both need the database. The schema half is that `clients_name_key` is
+    /// gone and a partial unique index has taken its place — an index whose predicate cannot
+    /// be checked anywhere but in `pg_indexes`. The behavioural half is that `ON CONFLICT DO
+    /// NOTHING` still catches a *partial* index without a conflict target, which is not
+    /// obvious from the SQL and is the one thing that would turn a duplicate name from a
+    /// clean nil into a thrown error reaching the operator as a 500.
+    @Test func migrationThreeMovesNameUniquenessOntoLiveRows() async throws {
+        try await PostgresFixture.withThrowawaySchema { database in
+            // A credential minted under version 2's rules, so this is an upgrade of a
+            // database with data in it rather than a fresh build.
+            try await database.store.migrate(Array(PageStore.migrations.prefix(2)))
+            try await database.client.query(
+                """
+                INSERT INTO clients (name, token_hash)
+                VALUES ('claude-code', \(Data(ClientCredential.hash(ClientCredential.generate()))))
+                """,
+                logger: PostgresFixture.logger
+            )
+
+            try await database.store.migrate()
+            #expect(
+                try await PostgresFixture.appliedVersions(on: database.client)
+                    == PageStore.migrations.map(\.version)
+            )
+
+            let nameConstraints: [String] = try await PostgresFixture.column(
+                """
+                SELECT conname::text FROM pg_constraint
+                WHERE conrelid = 'clients'::regclass AND contype = 'u'
+                ORDER BY conname
+                """,
+                on: database.client
+            )
+            #expect(nameConstraints == ["clients_token_hash_key"])
+
+            let indexDefinition = try await PostgresFixture.scalar(
+                """
+                SELECT indexdef FROM pg_indexes
+                WHERE schemaname = \(database.schema) AND indexname = 'clients_live_name_idx'
+                """,
+                as: String.self, on: database.client
+            )
+            #expect(indexDefinition?.contains("UNIQUE") == true)
+            #expect(indexDefinition?.contains("(name)") == true)
+            #expect(indexDefinition?.contains("WHERE (revoked_at IS NULL)") == true)
+
+            // The rotation the whole migration is for, through the store rather than through
+            // raw SQL: revoke, then mint the same name again.
+            let store = database.clientStore
+            #expect(try await store.revoke(name: "claude-code") != nil)
+            let (reissued, token) = try await store.create(
+                name: "claude-code", scopes: [.publish], expiresAt: nil
+            )
+            #expect(reissued.revokedAt == nil)
+            #expect(try await store.authenticate(token: token) == reissued)
+            #expect(try await store.allClients().map(\.name) == ["claude-code", "claude-code"])
+
+            // And a *second* live one is still refused — as a nil from the untargeted
+            // `ON CONFLICT DO NOTHING`, which is the part a partial index could have broken.
+            #expect(
+                try await store.insert(
+                    name: "claude-code",
+                    tokenHash: ClientCredential.hash(ClientCredential.generate()),
+                    scopes: [ClientScope.publish.rawValue],
+                    expiresAt: nil
+                ) == nil
+            )
+
+            // `revoke` resolves the two rows to one: the live credential, not the retired
+            // row with the same name. Reaching the wrong one would report success and leave
+            // the working token working.
+            let revoked = try #require(try await store.revoke(name: "claude-code"))
+            #expect(revoked.id == reissued.id)
+            #expect(try await store.authenticate(token: token) == nil)
+            // With nothing live left the retry still answers, and answers with the same row
+            // at the same instant rather than 404ing or moving the boundary.
+            let retry = try #require(try await store.revoke(name: "claude-code"))
+            #expect(retry.id == reissued.id)
+            #expect(retry.revokedAt == revoked.revokedAt)
         }
     }
 
@@ -664,8 +758,10 @@ struct PageStoreDatabaseTests {
 
             try await database.store.migrate()
 
+            // Named by the list: this test is about a re-run applying *nothing*, whatever
+            // "everything" currently is.
             let versions = try await PostgresFixture.appliedVersions(on: database.client)
-            #expect(versions == [1, 2])
+            #expect(versions == PageStore.migrations.map(\.version))
             let appliedAtAfter = try await PostgresFixture.scalar(
                 "SELECT applied_at FROM schema_migrations WHERE version = 1",
                 as: Date.self, on: database.client

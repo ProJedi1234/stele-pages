@@ -85,11 +85,14 @@ STELE_TEST_DATABASE_URL=postgres://stele:stele_dev_password@localhost:5432/postg
 
 It creates and drops a throwaway schema per test, and is `.serialized` because Postgres
 advisory locks are scoped to the database, which per-test schemas do not divide. It
-covers the migration runner: the schema version 1 produces, what version 2 adds, the
-upgrade path from a database created by the pre-migration bootstrap, skipping, ordering,
-exactly-once backfills, rollback of a failed migration, and the advisory lock. Tests that
-pin one version's shape drive `migrate(_:)` with a prefix of the list rather than
-`migrate()`, so they keep meaning what they say as versions are appended.
+covers the migration runner: the schema version 1 produces, what version 2 adds, what
+version 3 replaces, the upgrade path from a database created by the pre-migration
+bootstrap, skipping, ordering, exactly-once backfills, rollback of a failed migration, and
+the advisory lock. Tests that pin one version's shape drive `migrate(_:)` with a prefix of
+the list rather than `migrate()`, so they keep meaning what they say as versions are
+appended — version 2's test in particular, since version 3 deliberately drops the `name`
+constraint it asserts. The ones that are about the *runner* rather than a version compare
+against `PageStore.migrations.map(\.version)` rather than a literal, for the same reason.
 
 It also covers `ClientStore` against real Postgres, which is where its type claims can
 actually be checked: that `token_hash` binds as `Data` — PostgresNIO encodes a `[UInt8]`
@@ -257,6 +260,19 @@ Don't "fix" these without a reason; the README argues them out in full.
   `DELETE` that moved it would erase the only record of when trust ended. The row itself is
   never deleted, and revoked credentials stay in `GET /admin/clients` — "which did I revoke,
   and when?" is the question that list exists to answer.
+- **A credential name is unique among *live* rows, not across the table.** Migration 3
+  replaced version 2's `name UNIQUE` with `clients_live_name_idx`, a partial index over
+  `WHERE revoked_at IS NULL`. Rows are never deleted, so table-wide uniqueness meant
+  revoking `claude-code` retired the name permanently and rotation — revoke, then mint the
+  replacement — answered `409` forever, with `claude-code-2` as the only way out. Two
+  consequences to keep straight. `ClientStore.insert` must stay an *untargeted*
+  `ON CONFLICT DO NOTHING`: a conflict target would have to restate the index's predicate to
+  infer it at all. And `revoke` resolves several-rows-one-name to a single row with
+  `ORDER BY revoked_at DESC NULLS FIRST` — the live one, or else the most recently retired
+  one, which is what keeps a repeated `DELETE` a `200` rather than a `404`. Updating every
+  row with that name is harmless under `COALESCE` and still wrong: it would return whichever
+  row the planner reached first, so a retry could answer with a different credential than the
+  call it retries.
 - **`expiresIn` is bounded above, and that bound is not a policy.** `validatedExpiry` caps it
   at `maxExpiresInSeconds` (a century). PostgresNIO encodes a `Date` as microseconds in an
   `Int64` via a plain `Int64(_:)` over a `Double`, which **traps** past roughly the year

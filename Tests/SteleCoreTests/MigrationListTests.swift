@@ -57,6 +57,20 @@ struct MigrationListTests {
         #expect(sql.contains { $0.contains("DEFAULT '{\(ClientScope.publish.rawValue)}'") })
     }
 
+    /// Version 3's two halves, which only mean anything together: the column constraint has
+    /// to go or the partial index adds nothing, and the partial index has to arrive or two
+    /// live credentials could share the revocation handle. An entry carrying only the `DROP`
+    /// would migrate cleanly and leave the schema with no uniqueness on names at all.
+    @Test func versionThreeMovesNameUniquenessOntoLiveRows() throws {
+        let sql = try #require(PageStore.migrations.first { $0.version == 3 }).statements
+            .map(\.sql)
+        #expect(sql.contains { $0.contains("ALTER TABLE clients DROP CONSTRAINT clients_name_key") })
+        let index = try #require(sql.first { $0.contains("CREATE UNIQUE INDEX clients_live_name_idx") })
+        // The predicate is the whole migration. Without it this is version 2's constraint
+        // again, wearing an index's name.
+        #expect(index.contains("WHERE revoked_at IS NULL"))
+    }
+
     /// Two properties of the statement text, both of which fail confusingly at runtime.
     /// A `\(…)` in a `PostgresQuery` literal becomes a bind parameter rather than SQL
     /// text, and DDL cannot take binds; and PostgresNIO's extended query protocol refuses

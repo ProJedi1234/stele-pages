@@ -224,6 +224,13 @@ Revoking is `DELETE /admin/clients/:name`; it keeps the first `revoked_at` rathe
 moving it on a retry, and the row is never deleted — "which did I revoke, and when?" is the
 question the listing exists to answer.
 
+Rotating a credential is revoke, then mint again under the same name. Names are unique
+among *live* credentials only: a revoked row keeps its name in the listing without
+reserving it, so `claude-code` stays `claude-code` across a rotation instead of becoming
+`claude-code-2`. Uniqueness still holds where it matters — there is at most one live
+credential per name, which is what keeps `DELETE /admin/clients/:name` unambiguous, and it
+always takes the live one.
+
 Every write records the credential that made it in `pages.client_id`, on `POST` and on
 `PUT` alike — the column says who wrote the bytes currently being served, so replacing a
 page re-attributes it rather than leaving the original publisher credited for content they
