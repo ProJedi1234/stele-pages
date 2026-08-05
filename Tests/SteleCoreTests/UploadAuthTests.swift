@@ -79,7 +79,10 @@ struct UploadAuthTests {
     }
 
     /// The happy path end to end: the JSON payload, the `Location` header, and a
-    /// follow-up read that returns the bytes that were uploaded.
+    /// follow-up read that returns the bytes that were uploaded. Every field of the body is
+    /// read, including the expiry this upload never asked for — the response has to be
+    /// complete for a caller who reads it whole, not merely correct in the fields a test
+    /// happens to look at.
     @Test func uploadWithCorrectTokenSucceeds() async throws {
         let uploaded = "<h1>hello stele</h1>"
 
@@ -95,17 +98,15 @@ struct UploadAuthTests {
             ) { response -> String in
                 #expect(response.status == .created)
 
-                // Decoded loosely rather than through a mirror of `PageLocationResponse`:
-                // the wire shape is what this test is about.
-                let payload = try #require(
-                    try JSONSerialization.jsonObject(with: Data(buffer: response.body))
-                        as? [String: String]
-                )
-                let slug = try #require(payload["slug"])
-                let url = try #require(payload["url"])
+                let payload = try TestFixture.writeResponse(response.body)
+                let slug = try #require(payload["slug"] as? String)
+                let url = try #require(payload["url"] as? String)
                 #expect(!slug.isEmpty)
                 #expect(url == "\(TestFixture.baseURL)/\(slug)")
                 #expect(response.headers[.location] == url)
+                // No `?ttl=`, so this page carries the default lifetime — non-nil is the
+                // assertion, and `PageExpiryTests` is where the instant itself is pinned.
+                #expect(try TestFixture.expiry(in: payload) != nil)
                 return slug
             }
 

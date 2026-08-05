@@ -115,7 +115,7 @@ extension Client {
     /// `id` is 0, which `bigserial` never issues, so it cannot collide with a real row.
     /// Nothing may write it to `pages.client_id` — that column is a foreign key, and this
     /// credential has no referent. A page published with the shared token is one with no
-    /// honest owner to record, exactly as every page predating migration 2 is.
+    /// honest owner to record, exactly as every page predating migration 3 is.
     ///
     /// It lives on `Client` rather than on the middleware because a generic type cannot
     /// hold a static stored property, and one copy per store type is one copy too many for
@@ -134,7 +134,7 @@ extension Client {
     /// so its `id` refers to no row, and `pages.client_id` is a foreign key — writing the 0
     /// would be a constraint violation on every publish, which is a 500 where a null is the
     /// truth. A page written by the shared token has exactly the provenance every page
-    /// predating migration 2 has, and records it the same way.
+    /// predating migration 3 has, and records it the same way.
     ///
     /// A computed property rather than an `if client.id == 0` at each write site, because
     /// there are two write sites today and the rule has to be the same at both — and because

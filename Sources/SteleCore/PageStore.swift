@@ -8,8 +8,15 @@ public struct Page: Sendable, Equatable {
     public var body: String
     public var contentType: String
     public var createdAt: Date
+    /// When the page stops being served, or nil if it never does.
+    ///
+    /// Nil means one thing only: somebody asked for `PageLifetime.neverKeyword`. Pages that
+    /// predate expiry are not a second meaning — migration 2 gave them a real deadline as it
+    /// added the column, which is why that backfill had to happen in the same migration.
+    /// Once the column exists, a NULL is a decision rather than an absence of one.
+    public var expiresAt: Date?
     /// The credential that last wrote this page, or nil for one written by the shared token
-    /// or published before migration 2 added the column.
+    /// or published before migration 3 added the column.
     ///
     /// Read back rather than write-only so attribution is *observable* — a column nothing
     /// ever selects is one whose writes no test can check, which is how it came to be
@@ -39,24 +46,40 @@ public struct PageStore: Sendable {
         self.logger = logger
     }
 
-    /// Fetches a page, or nil if no such slug exists.
+    /// Fetches a page, or nil if no such slug exists — or if it has expired.
     public func fetch(slug: Slug) async throws -> Page? {
+        // The deadline is tested in the query rather than by the caller, and that is the
+        // whole correctness half of expiry. Reclamation only runs on upload, so a row can
+        // outlive its `expires_at` by any amount of time; filtering here means a page stops
+        // being served at exactly its deadline no matter when — or whether — anything gets
+        // around to deleting it.
         let rows = try await client.query(
             """
-            SELECT body, content_type, created_at, client_id
+            SELECT body, content_type, created_at, expires_at, client_id
             FROM pages WHERE slug = \(slug.value)
+              AND (expires_at IS NULL OR expires_at > now())
             """,
             logger: logger
         )
 
-        for try await (body, contentType, createdAt, clientID) in rows.decode(
-            (String, String, Date, Int64?).self, context: .default
+        // `Date?`, not `Date`. Every page published with `?ttl=never` holds NULL here, so
+        // decoding this as non-optional would compile, pass any test written against a page
+        // with a deadline, and throw at runtime on precisely the pages someone chose to keep
+        // forever. Version 2's backfill removed the *other* source of NULLs — pages older
+        // than the column — but not this one, and this one is permanent by design.
+        //
+        // `client_id` is optional for a different reason and permanently so: the shared
+        // token has no row to point at, and pages written before migration 3 have no owner
+        // to name.
+        for try await (body, contentType, createdAt, expiresAt, clientID) in rows.decode(
+            (String, String, Date, Date?, Int64?).self, context: .default
         ) {
             return Page(
                 slug: slug,
                 body: body,
                 contentType: contentType,
                 createdAt: createdAt,
+                expiresAt: expiresAt,
                 clientID: clientID
             )
         }
@@ -65,19 +88,20 @@ public struct PageStore: Sendable {
 
     /// - Returns: true if the row was inserted, false if the slug was already taken.
     public func insert(
-        slug: Slug, body: String, contentType: String, clientID: Int64?
+        slug: Slug, body: String, contentType: String, expiresAt: Date?, clientID: Int64?
     ) async throws -> Bool {
         // ON CONFLICT DO NOTHING makes the uniqueness check and the insert one atomic
         // step. Checking first and then inserting would leave a window where two
-        // concurrent uploads both see the slug as free.
+        // concurrent uploads both see the slug as free. Note that an *expired* row still
+        // conflicts — it is a row — which is why `create` reclaims before it gets here.
         //
         // `client_id` is a foreign key into `clients`, so a nil here is the only way to
         // record a page whose writer has no row — the shared token's. `Client.attributableID`
         // is what turns that credential into the nil, upstream of this call.
         let rows = try await client.query(
             """
-            INSERT INTO pages (slug, body, content_type, client_id)
-            VALUES (\(slug.value), \(body), \(contentType), \(clientID))
+            INSERT INTO pages (slug, body, content_type, expires_at, client_id)
+            VALUES (\(slug.value), \(body), \(contentType), \(expiresAt), \(clientID))
             ON CONFLICT (slug) DO NOTHING
             RETURNING slug
             """,
@@ -90,20 +114,29 @@ public struct PageStore: Sendable {
         return false
     }
 
-    /// - Returns: true if the row was replaced, false if no such slug exists.
+    /// - Returns: `.replaced` with the page's unchanged expiry, or `.noSuchPage` if no live
+    ///   row exists at that slug.
     public func update(
         slug: Slug, body: String, contentType: String?, clientID: Int64?
-    ) async throws -> Bool {
+    ) async throws -> PageUpdateOutcome {
         // A single UPDATE is its own existence check: the WHERE clause and the write are
         // one statement, and RETURNING tells us whether a row matched. `created_at` is
         // left alone, so a replaced page keeps the moment it was first published, and a
         // nil content type COALESCEs to the stored value rather than overwriting it.
         //
-        // `client_id` is assigned rather than COALESCEd, which is the opposite treatment
-        // and deliberate: an absent content type means "the caller expressed no opinion",
-        // whereas the writer is never absent — it is whoever's credential just replaced
-        // these bytes. Coalescing it would leave a page attributed to a credential that
-        // wrote none of what it now serves.
+        // `expires_at` is left alone for exactly the reason `created_at` is: a replacement
+        // is a new body at an old address, not a new page. If editing extended the deadline,
+        // a link's lifetime would depend on how often somebody happened to touch it.
+        //
+        // `client_id` gets the opposite treatment to both, and deliberately: it is
+        // *assigned* rather than left or COALESCEd. An absent content type means "the caller
+        // expressed no opinion", whereas the writer is never absent — it is whoever's
+        // credential just replaced these bytes. Coalescing it would leave a page attributed
+        // to a credential that wrote none of what it now serves.
+        //
+        // The same expired-row exclusion the fetch uses appears here so that a PUT to an
+        // expired-but-unreclaimed page is a 404 exactly as a GET of it is — the write
+        // surface and the read surface agree on which pages exist.
         let rows = try await client.query(
             """
             UPDATE pages
@@ -111,15 +144,44 @@ public struct PageStore: Sendable {
                 content_type = COALESCE(\(contentType), content_type),
                 client_id = \(clientID)
             WHERE slug = \(slug.value)
+              AND (expires_at IS NULL OR expires_at > now())
+            RETURNING expires_at
+            """,
+            logger: logger
+        )
+
+        for try await expiresAt in rows.decode(Date?.self, context: .default) {
+            return .replaced(expiresAt: expiresAt)
+        }
+        return .noSuchPage
+    }
+
+    /// Deletes every row whose deadline has passed, returning their slugs to the pool.
+    ///
+    /// - Returns: how many rows were removed.
+    public func deleteExpired() async throws -> Int {
+        // `expires_at <= now()` is the exact complement of the `expires_at > now()` the
+        // reads use, so nothing this deletes was still visible and nothing visible is
+        // deleted. The partial index on `expires_at` — `WHERE expires_at IS NOT NULL` —
+        // is what keeps this cheap on a table that is mostly permanent pages.
+        //
+        // Counted by iterating `RETURNING slug` rather than read off a command tag:
+        // `PostgresRowSequence` exposes no affected-row count, and the returned rows are
+        // pages that no longer exist, so the sequence is only ever as long as the work was.
+        let rows = try await client.query(
+            """
+            DELETE FROM pages
+            WHERE expires_at IS NOT NULL AND expires_at <= now()
             RETURNING slug
             """,
             logger: logger
         )
 
+        var deleted = 0
         for try await _ in rows.decode(String.self, context: .default) {
-            return true
+            deleted += 1
         }
-        return false
+        return deleted
     }
 }
 
@@ -150,9 +212,13 @@ extension PageStore {
     /// **Append only.** An applied version is a fact recorded in every database that has
     /// ever booted this code; editing an entry diverges the databases that already ran it
     /// from the ones that haven't, with nothing to detect the difference. Change the
-    /// schema by adding the next version. Issue #6's TTL column ships as
-    /// `Migration(version: 4, statements: ["ALTER TABLE pages ADD COLUMN expires_at
-    /// timestamptz"])`, not as another idempotent `ALTER` bolted onto version 1.
+    /// schema by adding the next version — version 2 is what that looks like, and it is
+    /// deliberately not another idempotent `ALTER` bolted onto version 1.
+    ///
+    /// The number is claimed by whatever merges first, and that is not a formality: two
+    /// branches that both append a "version 3" produce databases where version 3 means two
+    /// different things and `schema_migrations` cannot tell them apart. Rebasing onto a list
+    /// that has grown means renumbering, not keeping the number the branch was written with.
     ///
     /// Statements are not limited to DDL. Because a version runs exactly once and commits
     /// with the row recording it, a data backfill belongs in a migration too and will run
@@ -179,6 +245,55 @@ extension PageStore {
         ),
         Migration(
             version: 2,
+            statements: [
+                // No `IF NOT EXISTS` here, unlike version 1. Version 1 needed it because it
+                // retroactively described a schema that already existed in production;
+                // version 2 has never run anywhere, so `schema_migrations` alone decides
+                // whether it runs. A conditional form would hide a divergence rather than
+                // fail on it.
+                //
+                // Nullable with no default. The nullability is the vocabulary — NULL means
+                // "never expires" — and no default is what makes this a catalog-only change:
+                // Postgres rewrites no rows for a nullable column with no default, so the
+                // `ALTER` is instant on a table of any size.
+                "ALTER TABLE pages ADD COLUMN expires_at timestamptz",
+                // Existing pages become ephemeral too, and this statement is the only moment
+                // in the schema's whole history when that can be said accurately. One
+                // statement ago the column did not exist, so *every* NULL here is a page that
+                // predates expiry. A backfill written any later could not tell those apart
+                // from a page whose author asked for `never` — the two are the same value —
+                // and would quietly put a deadline on pages someone had deliberately made
+                // permanent.
+                //
+                // `now()`, not `created_at`: a page older than the default would otherwise
+                // land with a deadline already in the past and be deleted by the next upload,
+                // so a feature meant to bound storage would begin by destroying the archive
+                // it was pointed at. Everything already published instead gets one full
+                // default lifetime measured from the upgrade, which is also the only reading
+                // under which nobody's link dies before they could have heard about it.
+                //
+                // The interval is written out rather than interpolated from
+                // `PageLifetime.defaultDays`, and must stay that way. A migration is a record
+                // of what was done once; if the default later becomes fourteen days, this
+                // statement must still say seven, because seven days is what the databases
+                // that already ran it actually wrote. Interpolating a constant here would
+                // silently rewrite history every time the constant moved.
+                "UPDATE pages SET expires_at = now() + interval '7 days' WHERE expires_at IS NULL",
+                // Built last, after the backfill, so the `UPDATE` above has no index to
+                // maintain while it runs.
+                //
+                // Partial, on exactly the predicate the reclaiming DELETE uses. Permanent
+                // pages never enter the index at all, so a table that is mostly permanent
+                // pages pays almost nothing to keep it — which is what makes running the
+                // cleanup on every single upload affordable.
+                """
+                CREATE INDEX pages_expires_at_idx ON pages (expires_at)
+                WHERE expires_at IS NOT NULL
+                """,
+            ]
+        ),
+        Migration(
+            version: 3,
             statements: [
                 // Per-client credentials. No `IF NOT EXISTS`: unlike version 1 this
                 // describes a table that has never existed anywhere, so a name collision
@@ -217,9 +332,9 @@ extension PageStore {
             ]
         ),
         Migration(
-            version: 3,
+            version: 4,
             statements: [
-                // Version 2 made `name` unique across the whole table, and rows are never
+                // Version 3 made `name` unique across the whole table, and rows are never
                 // deleted — so revoking `claude-code` retired that name permanently and the
                 // replacement had to be called `claude-code-2`. Rotation is the ordinary
                 // reason to revoke, and a name that survives it is the whole point of having
@@ -228,15 +343,15 @@ extension PageStore {
                 //
                 // Uniqueness moves to the live rows rather than being dropped. Two *usable*
                 // credentials sharing a name would make revocation ambiguous at exactly the
-                // wrong moment, which is the thing version 2 was right about; the history
+                // wrong moment, which is the thing version 3 was right about; the history
                 // beside them is what an incident is reconstructed from and does not need to
                 // be unique to be read. `ClientStore.revoke` is what resolves the resulting
                 // several-rows-one-name to a single row — live first, newest revocation
                 // otherwise.
                 //
                 // The constraint is dropped by the name Postgres generates for a column-level
-                // UNIQUE (`<table>_<column>_key`), not by one version 2 chose. No
-                // `IF EXISTS`: on any database that ran version 2 it is there, and on one
+                // UNIQUE (`<table>_<column>_key`), not by one version 3 chose. No
+                // `IF EXISTS`: on any database that ran version 3 it is there, and on one
                 // where it is not, something has edited the schema by hand and the boot
                 // should say so.
                 "ALTER TABLE clients DROP CONSTRAINT clients_name_key",
@@ -378,7 +493,7 @@ extension PageStore {
 }
 
 /// `PageStore` is the database-backed conformer of the seam the router talks to. Only
-/// the storage primitives — insert-if-free and update-if-present — live here; the retry
-/// and requested-slug policy come from `PageStoring`'s extension, shared with every
-/// other conformer.
+/// the storage primitives — insert-if-free, update-if-present, delete-what-has-expired —
+/// live here; the retry policy, the requested-slug policy and the order reclamation runs
+/// in come from `PageStoring`'s extension, shared with every other conformer.
 extension PageStore: PageStoring {}

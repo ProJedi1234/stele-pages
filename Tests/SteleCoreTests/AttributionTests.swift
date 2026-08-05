@@ -8,7 +8,7 @@ import Testing
 
 /// `pages.client_id` — who wrote the page.
 ///
-/// The column has existed since migration 2 and, until this suite, nothing ever wrote it: a
+/// The column has existed since migration 3 and, until this suite, nothing ever wrote it: a
 /// schema that *looked* like it recorded provenance while every row published after the
 /// migration was as anonymous as the ones that predate it. That failure is invisible from the
 /// HTTP surface — attribution is never served — so it can only be caught by reading the write
@@ -126,6 +126,7 @@ struct AttributionTests {
             requestedSlug: try Slug(custom: "orphan-page"),
             body: "<h1>hi</h1>",
             contentType: PageContentType.default,
+            expiresAt: nil,
             clientID: Client.sharedToken.attributableID,
             generator: SlugGenerator(wordCount: 3)
         )

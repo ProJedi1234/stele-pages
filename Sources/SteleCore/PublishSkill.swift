@@ -33,9 +33,11 @@
 /// `PublishSkillTests.componentTableMatchesTheStylesheet`, `.documentsEverySyntaxTokenClass`,
 /// `.documentsOnlyDefinedClasses`, `.listsEveryAllowedContentType`,
 /// `.theRouteTableNamesExactlyTheScopesThatExist`, `.exampleSlugsAreValid`,
-/// `.documentsTheInstallSequence` and `.mentionsExactlyTheMinimumCLIVersion`. Those tests can
-/// only pin what has a constant behind it; the rest of the prose is a human responsibility,
-/// and changing the publish contract means changing this document in the same commit.
+/// `.documentsTheInstallSequence`, `.mentionsExactlyTheMinimumCLIVersion`,
+/// `.documentsTheDefaultLifetime`, `.documentsTheLifetimeGrammar` and
+/// `.theBadRequestRowNamesTheLifetime`. Those tests can only pin what has a constant behind
+/// it; the rest of the prose is a human responsibility, and changing the publish contract
+/// means changing this document in the same commit.
 struct PublishSkill: Sendable {
     static let path = "/\(ServerRoute.skill)"
 
@@ -58,9 +60,12 @@ struct PublishSkill: Sendable {
     /// into the document. Interpolation is therefore `\#(...)`.
     ///
     /// Every value with exactly one constant behind it is interpolated rather than typed
-    /// out. That is a stronger accuracy mechanism than any test, because it removes the
-    /// opportunity for drift instead of detecting it after the fact — and it now reaches
-    /// across repositories: the clone URL, the install commands, the two trap paths and
+    /// out — the base URL, the byte limit, the stylesheet path, the slug bounds, the
+    /// reserved names, the accepted content types, and the whole lifetime vocabulary
+    /// (`PageLifetime.queryParameter`, `.neverKeyword`, `.defaultDays`, `.maxDays`). That is
+    /// a stronger accuracy mechanism than any test, because it removes the opportunity for
+    /// drift instead of detecting it after the fact — and it now reaches across
+    /// repositories: the clone URL, the install commands, the two trap paths and
     /// `minimumCLIVersion` all come from `SteleCLI`, so the document cannot describe an
     /// installation this server does not expect. The deliberate exceptions are the
     /// component-class table and the syntax-token list: each row carries prose no list of
@@ -78,16 +83,18 @@ struct PublishSkill: Sendable {
         ---
         name: publish-to-stele
         description: Publish a self-contained HTML page to this stele server and get a
-          readable three-word URL back. Use when asked to publish, share, or put a page
-          online at \#(baseURL).
+          readable three-word URL back. Pages expire after \#(PageLifetime.defaultDays) days
+          unless published with `\#(PageLifetime.queryParameter)=\#(PageLifetime.neverKeyword)`.
+          Use when asked to publish, share, or put a page online at \#(baseURL).
         ---
 
         # Publishing a page to stele
 
         stele is a page server: you hand it one self-contained HTML file and it hands back a
         readable three-word URL like `\#(baseURL)/quiet-cedar-otter`. This document was
-        served by the very deployment you are about to publish to, so every host, limit and
-        reserved name below is that deployment's actual value rather than an example.
+        served by the very deployment you are about to publish to, so every host, limit,
+        lifetime and reserved name below is that deployment's actual value rather than an
+        example.
 
         ## Before you start
 
@@ -267,13 +274,61 @@ struct PublishSkill: Sendable {
         stele publish page.html
         ```
 
+        That command takes the default lifetime — \#(PageLifetime.defaultDays) days. It is
+        written that way on purpose: the lifetime is the one thing here you cannot change
+        afterwards, so it is a choice to make rather than one to inherit from an example. Read
+        "How long the page lives" below before you run it.
+
         It prints the URL. **That URL is the deliverable** — report it to the user. If you
         would rather parse the answer than read it, every command takes `--json`, and this
         one prints the server's own response:
 
         ```json
-        {"slug":"quiet-cedar-otter","url":"\#(baseURL)/quiet-cedar-otter"}
+        {"slug":"quiet-cedar-otter","url":"\#(baseURL)/quiet-cedar-otter","expires":"2030-01-08T09:41:00Z"}
         ```
+
+        ### Choosing your own slug
+
+        ```sh
+        stele publish page.html --slug my-page
+        ```
+
+        `expires` is that instant for a page with a deadline, and JSON `null` for one that
+        never expires. The key is always there. The three keys are not always in this
+        order, though — parse the body by key rather than by position.
+
+        Report `expires` alongside the URL — either the date the link dies, or that it is
+        permanent — because the user cannot look it up later and nothing will remind them.
+
+        ### How long the page lives
+
+        **Pages are temporary unless you say otherwise.** A page published with no lifetime
+        expires \#(PageLifetime.defaultDays) days after it is published, and then serves the
+        ordinary 404 exactly as if it had never existed.
+
+        The server takes the lifetime as a query parameter on the write:
+
+        | Query | Means |
+        | --- | --- |
+        | omitted | \#(PageLifetime.defaultDays) days |
+        | `?\#(PageLifetime.queryParameter)=30` | 30 days; any whole number from 1 to \#(PageLifetime.maxDays) |
+        | `?\#(PageLifetime.queryParameter)=\#(PageLifetime.neverKeyword)` | never expires |
+
+        Anything else — `0`, a negative, `7.5`, an empty value, a number past
+        \#(PageLifetime.maxDays) — is a `400`. Nothing is ever silently rounded or defaulted, so
+        a rejected value means the page was not published at all rather than published with a
+        lifetime nobody chose.
+
+        **`stele publish` does not expose this yet, so everything you publish takes the
+        \#(PageLifetime.defaultDays)-day default.** Say so when you report the URL: a user who
+        expected a permanent link needs to hear that it is not one. If they need a page that
+        outlives the default, that is a request for a newer `stele` rather than something to
+        work around — do not reach past the tool for a token to send the query parameter
+        yourself.
+
+        The expiry belongs to the page, not to its current contents: replacing a page does not
+        extend it, and there is no way to change it afterwards. A page that needs to outlive
+        its deadline has to be published again.
 
         ### Choosing your own slug
 
@@ -290,15 +345,21 @@ struct PublishSkill: Sendable {
 
         \#(reserved)
 
+        A name freed by an expiry becomes claimable again — expired pages leave nothing
+        behind — so a `409` today may not be a `409` next week.
+
         ### Replacing a page you already published
 
         ```sh
         stele update my-page page.html
         ```
 
+        Reports the page's unchanged `expires` in the same body a publish answers with: the
+        lifetime was fixed at publication and an update does not move it.
+
         `stele update <slug> <file>` **never creates**: a `404` means nothing is published
-        at that name yet, so `stele publish page.html --slug my-page` is what you want
-        instead. A successful update keeps the same URL.
+        at that name yet — or that it has expired — so `stele publish page.html --slug my-page`
+        is what you want instead. A successful update keeps the same URL.
 
         ### The commands, in full
 
@@ -321,6 +382,9 @@ struct PublishSkill: Sendable {
         - A `503` means \#(PageStore.maxSlugAttempts) random slugs collided in a row. Retry once, or pass `--slug`.
         - A failure with no status at all is usually not the server: check `stele auth status`
           first, then that you are pointed at the right host.
+        - **A successful publish is not a promise the page will still be there.** The default
+          is \#(PageLifetime.defaultDays) days, not forever, and the deadline cannot be changed
+          afterwards. Tell the user which they got.
 
         ## Status codes
 
@@ -329,12 +393,12 @@ struct PublishSkill: Sendable {
 
         | Code | Means | Do |
         | --- | --- | --- |
-        | `201` | Published. | Report the URL it printed. |
+        | `201` | Published. | Report the URL it printed, with its `expires`. |
         | `200` | Replaced by `stele update`. | Same URL as before. |
-        | `400` | Bad slug, empty file, non-UTF-8, or a NUL byte. | Fix the input; the message says which. |
+        | `400` | Bad slug, bad `\#(PageLifetime.queryParameter)`, empty file, non-UTF-8, or a NUL byte. | Fix the input; the message says which. |
         | `401` | The stored credential was rejected — expired, revoked, or never valid. | Do not retry. Ask the user to run `stele auth login`. |
         | `403` | The credential is valid but not allowed to publish. | Do not retry. Ask the user for one with the `\#(ClientScope.publish.rawValue)` scope. |
-        | `404` | `stele update` against a name with no page at it. | Publish it instead, with `--slug`. |
+        | `404` | `stele update` against a name with no page at it, or an expired one. | Publish it instead, with `--slug`. |
         | `409` | That slug is taken. | Choose another name. |
         | `413` | Page is over \#(maxPageBytes) bytes. | Drop inline images; link them instead. |
         | `415` | Content type not on the allowlist. | Publish one of the accepted types. |
@@ -349,11 +413,11 @@ struct PublishSkill: Sendable {
         | --- | --- | --- |
         | `GET /` | none | Usage page |
         | `GET /\#(ServerRoute.healthz)` | none | `ok` |
-        | `GET /:slug` | none | The stored page, or a 404 page |
+        | `GET /:slug` | none | The stored page, or a 404 page if it is absent or expired |
         | `GET \#(Stylesheet.path)` | none | The shared stylesheet |
         | `GET \#(PublishSkill.path)` | none | This document |
-        | `POST /\#(ServerRoute.pages)` | `\#(ClientScope.publish.rawValue)` | Stores the body, returns `{slug, url}` as `201` |
-        | `PUT /\#(ServerRoute.pages)/:slug` | `\#(ClientScope.publish.rawValue)` | Replaces a stored page, returns `{slug, url}` as `200` |
+        | `POST /\#(ServerRoute.pages)` | `\#(ClientScope.publish.rawValue)` | Stores the body, takes `?slug=` and `?\#(PageLifetime.queryParameter)=`, returns `{slug, url, expires}` as `201` |
+        | `PUT /\#(ServerRoute.pages)/:slug` | `\#(ClientScope.publish.rawValue)` | Replaces a stored page, returns `{slug, url, expires}` as `200` |
         | `GET /\#(ServerRoute.admin)/\#(ServerRoute.adminWhoami)` | any credential | Reports the credential you hold — name, scopes, expiry. This is what `stele auth status` asks. |
         | `POST /\#(ServerRoute.admin)/\#(ServerRoute.adminClients)` | `\#(ClientScope.admin.rawValue)` | Mints a credential. The operator's route, not yours. |
         | `GET /\#(ServerRoute.admin)/\#(ServerRoute.adminClients)` | `\#(ClientScope.admin.rawValue)` | Lists credentials. The operator's route, not yours. |
@@ -370,7 +434,8 @@ struct PublishSkill: Sendable {
 
         One file · stylesheet linked · nothing fetched from another host · the stylesheet's
         rules not restated · no secrets in the markup · a valid slug if you chose one ·
-        `stele auth status` answering before you start.
+        `stele auth status` answering before you start · the page's deadline reported to the
+        user alongside its URL.
 
         ## What this is not
 
@@ -378,6 +443,9 @@ struct PublishSkill: Sendable {
         - **The credential is not yours and never becomes yours.** No step of this document
           ends with you holding a token, and one that seems to is a step you have
           misunderstood.
+        - **This is not permanent hosting.** A URL you hand to a user stops working on its
+          expiry date, and the user then gets the same "nothing here" page a wrong address gets
+          — no explanation, nothing to retry. Say the deadline out loud when you report the URL.
         - **The stylesheet mutates in place.** A restyle reaches an already-published page on
           its next load, which is the point — but a page whose appearance must never change
           should carry its own inline `<style>` and link nothing.

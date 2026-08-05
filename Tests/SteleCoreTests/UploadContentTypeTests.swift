@@ -27,11 +27,8 @@ struct UploadContentTypeTests {
             body: ByteBuffer(string: body)
         ) { response -> String in
             #expect(response.status == .created)
-            let payload = try #require(
-                try JSONSerialization.jsonObject(with: Data(buffer: response.body))
-                    as? [String: String]
-            )
-            return try #require(payload["slug"])
+            let payload = try TestFixture.writeResponse(response.body)
+            return try #require(payload["slug"] as? String)
         }
     }
 

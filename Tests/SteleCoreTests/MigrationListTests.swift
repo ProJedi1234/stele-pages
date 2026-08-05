@@ -31,11 +31,34 @@ struct MigrationListTests {
         #expect(sql.contains { $0.contains("CREATE INDEX IF NOT EXISTS pages_created_at_idx") })
     }
 
-    /// Version 2's two halves. Either one alone compiles and boots: without the table the
+    /// Version 2 adds the column *and* backfills it, and the backfill is the half with no
+    /// compiler behind it: delete that one statement and everything still builds, every
+    /// hermetic test still passes, and the only symptom is that pages published before the
+    /// upgrade quietly keep an unbounded lifetime on every deployment that has already run
+    /// the migration — where it can never be corrected, because by then a NULL is
+    /// indistinguishable from a deliberate `never`.
+    ///
+    /// Pinned here rather than only in `PageStoreDatabaseTests`, which needs Postgres and so
+    /// does not run in CI's default path. The literal `7 days` is matched deliberately
+    /// against the text and not against `PageLifetime.defaultDays`: a shipped migration
+    /// records what was written once, so this assertion must keep failing if someone
+    /// "helpfully" re-derives the interval from a constant that is free to move.
+    @Test func versionTwoBackfillsTheColumnItAdds() {
+        let sql = PageStore.migrations[1].statements.map(\.sql)
+        #expect(sql.contains { $0.contains("ADD COLUMN expires_at") })
+        #expect(
+            sql.contains {
+                $0.contains("UPDATE pages SET expires_at = now() + interval '7 days'")
+                    && $0.contains("WHERE expires_at IS NULL")
+            }
+        )
+    }
+
+    /// Version 3's two halves. Either one alone compiles and boots: without the table the
     /// foreign key fails loudly, but without the `client_id` column every write simply
     /// records no owner and nothing ever says so.
-    @Test func versionTwoAddsClientsAndAttributesPagesToThem() throws {
-        let sql = try #require(PageStore.migrations.first { $0.version == 2 }).statements
+    @Test func versionThreeAddsClientsAndAttributesPagesToThem() throws {
+        let sql = try #require(PageStore.migrations.first { $0.version == 3 }).statements
             .map(\.sql)
         #expect(sql.contains { $0.contains("CREATE TABLE clients") })
         #expect(sql.contains { $0.contains("token_hash   bytea NOT NULL UNIQUE") })
@@ -51,22 +74,22 @@ struct MigrationListTests {
     /// This is the pin that stands in for the interpolation: renaming the scope without
     /// touching the default fails here instead of silently minting credentials with a
     /// scope nothing grants.
-    @Test func versionTwoDefaultsNewCredentialsToThePublishScope() throws {
-        let sql = try #require(PageStore.migrations.first { $0.version == 2 }).statements
+    @Test func versionThreeDefaultsNewCredentialsToThePublishScope() throws {
+        let sql = try #require(PageStore.migrations.first { $0.version == 3 }).statements
             .map(\.sql)
         #expect(sql.contains { $0.contains("DEFAULT '{\(ClientScope.publish.rawValue)}'") })
     }
 
-    /// Version 3's two halves, which only mean anything together: the column constraint has
+    /// Version 4's two halves, which only mean anything together: the column constraint has
     /// to go or the partial index adds nothing, and the partial index has to arrive or two
     /// live credentials could share the revocation handle. An entry carrying only the `DROP`
     /// would migrate cleanly and leave the schema with no uniqueness on names at all.
-    @Test func versionThreeMovesNameUniquenessOntoLiveRows() throws {
-        let sql = try #require(PageStore.migrations.first { $0.version == 3 }).statements
+    @Test func versionFourMovesNameUniquenessOntoLiveRows() throws {
+        let sql = try #require(PageStore.migrations.first { $0.version == 4 }).statements
             .map(\.sql)
         #expect(sql.contains { $0.contains("ALTER TABLE clients DROP CONSTRAINT clients_name_key") })
         let index = try #require(sql.first { $0.contains("CREATE UNIQUE INDEX clients_live_name_idx") })
-        // The predicate is the whole migration. Without it this is version 2's constraint
+        // The predicate is the whole migration. Without it this is version 3's constraint
         // again, wearing an index's name.
         #expect(index.contains("WHERE revoked_at IS NULL"))
     }
