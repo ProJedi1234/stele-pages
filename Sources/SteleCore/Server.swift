@@ -31,9 +31,39 @@ public enum PageContentType {
     }
 }
 
+/// The JSON body both write routes answer with.
+///
+/// The document at `GET /skill` shows a sample of this body, but the sample cannot promise
+/// a key *order*: `JSONEncoder` emits a keyed container's members in an unspecified order,
+/// and three consecutive uploads really do come back ordered three different ways. What the
+/// skill promises instead — and what the encoding below actually guarantees — is that all
+/// three keys are always present. Anything reading this body must read it by key.
 struct PageLocationResponse: Encodable {
     let slug: String
     let url: String
+    /// The page's deadline as an RFC 3339 instant in UTC, or nil for a page that never
+    /// expires.
+    let expires: String?
+
+    enum CodingKeys: String, CodingKey {
+        case slug, url, expires
+    }
+
+    /// Hand-written rather than synthesised for one reason, in one line. The synthesised
+    /// `Encodable` calls `encodeIfPresent` for an optional property, which *omits the key
+    /// entirely* when it is nil — so a permanent page would answer `{"slug":…,"url":…}`,
+    /// and a caller reading `expires` could not tell "this page never expires" from "this
+    /// server has no opinion about lifetimes". An explicit null says the first thing.
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(slug, forKey: .slug)
+        try container.encode(url, forKey: .url)
+        if let expires {
+            try container.encode(expires, forKey: .expires)
+        } else {
+            try container.encodeNil(forKey: .expires)
+        }
+    }
 }
 
 /// First path segments the server claims for itself.
@@ -88,12 +118,23 @@ public func buildRouter(
             let requestedSlug = try request.uri.queryParameters["slug"]
                 .map { try validatedSlug(String($0)) }
 
+            // The lifetime is checked here, with the slug and after the body, rather than
+            // first. POST already decided once that its *optional* query parameters come
+            // after the body — the opposite of PUT, whose slug is the address being written
+            // to and so is worth rejecting before a megabyte streams at it. `?ttl=` is an
+            // optional query parameter of exactly that kind, so it inherits that decision
+            // instead of making POST's precedence two decisions to keep straight.
+            let lifetime = try validatedLifetime(
+                request.uri.queryParameters[Substring(PageLifetime.queryParameter)]
+            )
+
             let slug: Slug
             do {
                 slug = try await store.create(
                     requestedSlug: requestedSlug,
                     body: body,
                     contentType: contentType ?? PageContentType.default,
+                    expiresAt: lifetime.expiresAt,
                     generator: generator,
                     logger: context.logger
                 )
@@ -106,6 +147,7 @@ public func buildRouter(
 
             return try pageResponse(
                 slug: slug,
+                expiresAt: lifetime.expiresAt,
                 configuration: configuration,
                 status: .created,
                 includeLocation: true
@@ -118,6 +160,24 @@ public func buildRouter(
         .put(":slug") { request, context -> Response in
             let slug = try validatedSlug(context.parameters.require("slug"))
 
+            // Refused, not ignored. A replacement cannot move a deadline (see below), so
+            // there is nothing this verb could do with the value — but accepting and
+            // discarding it would be exactly the silent default the POST parser exists to
+            // prevent: `?ttl=never` here would answer `200`, and a caller who believed they
+            // had just made the page permanent would have no signal at all. Checked with the
+            // slug, before the body, for the same reason the slug is: a request that cannot
+            // succeed should not first stream a megabyte.
+            guard request.uri.queryParameters[Substring(PageLifetime.queryParameter)] == nil
+            else {
+                throw HTTPError(
+                    .badRequest,
+                    message: """
+                        PUT does not take ?\(PageLifetime.queryParameter)=. A page's lifetime \
+                        is fixed when it is published; publish again with POST to change it.
+                        """
+                )
+            }
+
             let (body, contentType) = try await readValidatedPage(
                 request: request,
                 configuration: configuration
@@ -126,13 +186,25 @@ public func buildRouter(
             // Update-only: an absent slug is a 404, never an implicit create. A PUT that
             // could create would hand the caller a way to claim names without going
             // through the generator's — and POST's — collision reporting.
-            guard try await store.update(slug: slug, body: body, contentType: contentType) else {
+            //
+            // A replacement reports the stored deadline and does not move it — the expiry
+            // belongs to the page, not to its current body — so the value reported below is
+            // the one the store handed back, never one recomputed here. That is why a
+            // `?ttl=` on this verb was rejected above rather than applied.
+            let expiresAt: Date?
+            switch try await store.update(slug: slug, body: body, contentType: contentType) {
+            case .replaced(let stored):
+                expiresAt = stored
+            case .noSuchPage:
+                // An expired page that has not been reclaimed yet arrives here too, so this
+                // verb and `GET /:slug` agree about which pages exist.
                 throw HTTPError(.notFound, message: "No page exists at \(slug.value).")
             }
 
             // No Location header: the resource is where the caller already addressed it.
             return try pageResponse(
                 slug: slug,
+                expiresAt: expiresAt,
                 configuration: configuration,
                 status: .ok,
                 includeLocation: false
@@ -276,6 +348,31 @@ private func validatedSlug(_ raw: String) throws -> Slug {
     }
 }
 
+/// Resolves the `?ttl=` query parameter into an expiry, reporting a rejection the way every
+/// other write-side validation failure is reported.
+///
+/// Takes the raw `Substring?` straight off the query rather than a `String`, because the
+/// difference between the two nil-ish inputs is the whole point: an *absent* parameter means
+/// "no opinion" and gets the default lifetime, while `?ttl=` with nothing after it arrives
+/// as `""` and is a mistake. Collapsing them — with `?? ""`, or by trimming — would publish
+/// a week-long page for somebody who thought they had asked for something else, which is
+/// exactly the silent defaulting this parameter exists to prevent.
+private func validatedLifetime(_ raw: Substring?) throws -> PageLifetime {
+    do {
+        return try PageLifetime(raw: raw.map(String.init))
+        // A bare `catch`, where `validatedSlug` above writes `catch let error as SlugError`
+        // for the same shape — and not as a style preference. The `as` form crashes the
+        // 6.3.3 compiler in SILGen ("Found ownership error") on this error type. The bare
+        // form is equivalent, because `PageLifetime.init` uses typed throws and `error` is
+        // therefore already a `PageLifetimeError`. Revisit when the toolchain moves; there
+        // is nothing here worth keeping but the workaround.
+    } catch {
+        throw HTTPError(
+            .badRequest, message: "Invalid \(PageLifetime.queryParameter): \(error)."
+        )
+    }
+}
+
 /// The request checks every write shares: an allowed content type, and a body that fits,
 /// isn't empty, and is text. Shared by POST and PUT so the two cannot drift into
 /// accepting different things into the same table.
@@ -337,17 +434,29 @@ private func readValidatedPage(
     return (body, contentType)
 }
 
-/// The `{slug, url}` body both writes answer with. POST adds `Location` and a `201`; PUT
-/// returns `200` without one, since the caller already knows the address.
+/// The `{slug, url, expires}` body both writes answer with. POST adds `Location` and a
+/// `201`; PUT returns `200` without one, since the caller already knows the address.
+///
+/// `expiresAt` is undefaulted deliberately. There are exactly two call sites and they get
+/// the value from different places — POST from the lifetime it just parsed, PUT from what
+/// the store reported — so a default would let either one silently answer "permanent" for a
+/// page that is not.
 private func pageResponse(
     slug: Slug,
+    expiresAt: Date?,
     configuration: Configuration,
     status: HTTPResponse.Status,
     includeLocation: Bool
 ) throws -> Response {
     let payload = PageLocationResponse(
         slug: slug.value,
-        url: "\(configuration.baseURL)/\(slug.value)"
+        url: "\(configuration.baseURL)/\(slug.value)",
+        // RFC 3339 in UTC, formatted here rather than left to the encoder's
+        // `dateEncodingStrategy`, whose default is a Cocoa reference-date `Double` — a
+        // number no other language's JSON client would recognise as a time. A format
+        // *style* rather than an `ISO8601DateFormatter`, which is a non-`Sendable` class
+        // that could not be hoisted to a constant under strict concurrency anyway.
+        expires: expiresAt.map { $0.formatted(.iso8601) }
     )
     let encoder = JSONEncoder()
     // Without this, Foundation emits "http:\/\/host\/slug". Legal JSON, but the URL is
@@ -458,10 +567,15 @@ func landingPage(baseURL: String) -> String {
     <p>Returns a slug like <code>quiet-cedar-otter</code>, served at
     <code>\(baseURL)/quiet-cedar-otter</code>. Add <code>?slug=my-page</code> to choose
     your own.</p>
+    <p>A page expires \(PageLifetime.defaultDays) days after it is published unless you say
+    otherwise. Add <code>?\(PageLifetime.queryParameter)=30</code> for a different number of
+    days, or <code>?\(PageLifetime.queryParameter)=\(PageLifetime.neverKeyword)</code> to
+    keep it for good.</p>
     <div class="grid">
     <div class="card"><h3><span class="badge">POST</span> /pages</h3>
     <p>Publish a page and get a fresh slug back, or ask for one with
-    <code>?slug=</code>.</p></div>
+    <code>?slug=</code>. Choose how long it lives with
+    <code>?\(PageLifetime.queryParameter)=</code>.</p></div>
     <div class="card"><h3><span class="badge">PUT</span> /pages/:slug</h3>
     <p>Replace the page already published at a slug. Never creates one.</p></div>
     </div>

@@ -178,9 +178,13 @@ struct PageStoreDatabaseTests {
     /// What version 1 produces when there was nothing there before. The runner's own
     /// `IF NOT EXISTS` forms mean a wrong shape would never announce itself — this is the
     /// only place the schema's actual columns, constraints and index are pinned.
+    ///
+    /// Driven through `migrate(_:)` with version 1 alone rather than the real `migrate()`,
+    /// so it stays a statement about version 1 as the list grows. What every *later*
+    /// migration adds is asserted by its own test, against the real list.
     @Test func virginDatabaseGetsTheVersionOneSchema() async throws {
         try await PostgresFixture.withThrowawaySchema { database in
-            try await database.store.migrate()
+            try await database.store.migrate([PageStore.migrations[0]])
 
             let versions = try await PostgresFixture.appliedVersions(on: database.client)
             #expect(versions == [1])
@@ -248,13 +252,79 @@ struct PageStoreDatabaseTests {
         }
     }
 
+    /// What version 2 adds, through the real `migrate()` — so this also pins that the
+    /// shipped list actually reaches version 2 rather than that the statements would work if
+    /// anyone ran them.
+    ///
+    /// Three things, each of which fails silently on its own. The column has to exist, or
+    /// every query in `PageStore` errors on boot. It has to be **nullable**, because NULL is
+    /// how a permanent page is stored and a `NOT NULL` column would force every page to
+    /// carry a deadline. And the index has to be **partial** — asserting only its name would
+    /// pass on a full index over `expires_at`, which is the same index over a table's worth
+    /// of NULLs for permanent pages, quietly paying for what the `WHERE` clause was added to
+    /// avoid.
+    @Test func virginDatabaseGetsTheVersionTwoExpiryColumnAndPartialIndex() async throws {
+        try await PostgresFixture.withThrowawaySchema { database in
+            try await database.store.migrate()
+
+            let versions = try await PostgresFixture.appliedVersions(on: database.client)
+            #expect(versions == [1, 2])
+
+            let expiresAt = try await PostgresFixture.scalar(
+                """
+                SELECT data_type || ' ' || is_nullable FROM information_schema.columns
+                WHERE table_schema = \(database.schema) AND table_name = 'pages'
+                  AND column_name = 'expires_at'
+                """,
+                as: String.self, on: database.client
+            )
+            #expect(expiresAt == "timestamp with time zone YES")
+
+            // No default either: a default would give every future row a deadline the caller
+            // never chose, and `ttl=never` would have nothing to store.
+            let expiresAtDefault = try await PostgresFixture.scalar(
+                """
+                SELECT column_default IS NULL FROM information_schema.columns
+                WHERE table_schema = \(database.schema) AND table_name = 'pages'
+                  AND column_name = 'expires_at'
+                """,
+                as: Bool.self, on: database.client
+            )
+            #expect(expiresAtDefault == true)
+
+            let indexDefinition = try await PostgresFixture.scalar(
+                """
+                SELECT indexdef FROM pg_indexes
+                WHERE schemaname = \(database.schema) AND indexname = 'pages_expires_at_idx'
+                """,
+                as: String.self, on: database.client
+            )
+            #expect(indexDefinition?.contains("(expires_at)") == true)
+            #expect(indexDefinition?.contains("WHERE (expires_at IS NOT NULL)") == true)
+        }
+    }
+
     /// The production upgrade, proved without a dump and restore.
     ///
     /// The DDL below is a verbatim snapshot of the bootstrap `migrate()` this runner
     /// replaced, so the fixture is a database in exactly the state every live deployment
     /// is in today: the right tables, and no `schema_migrations` at all. Booting the new
-    /// code must record version 1, run nothing, and leave the existing rows — including
-    /// `created_at`, the one column an accidental table rewrite would disturb — untouched.
+    /// code must record version 1, run nothing for it, apply version 2, and leave the
+    /// existing rows — including `created_at`, the one column an accidental table rewrite
+    /// would disturb — untouched.
+    ///
+    /// This is also where version 2's backfill is proved, and it is the only place it can be:
+    /// the statement only does anything to rows that were already there when the column
+    /// appeared, which is a state no other test can construct. The page inserted before
+    /// migrating must come back with a deadline about a week out — not NULL, which would mean
+    /// the backfill never ran and every existing deployment kept an unbounded archive, and not
+    /// a date in the past, which would mean the interval was measured from `created_at` and
+    /// the next upload would delete pages the upgrade was supposed to preserve.
+    ///
+    /// "Still served" is the other load-bearing half. The fetch now filters on the deadline,
+    /// so a backfill that wrote a bad instant would make every page on a live deployment
+    /// vanish on the first boot after this deploy, and the assertion on the body is what
+    /// notices.
     @Test func upgradesADatabaseCreatedByTheOldBootstrap() async throws {
         try await PostgresFixture.withThrowawaySchema { database in
             try await database.client.query(
@@ -287,12 +357,115 @@ struct PageStoreDatabaseTests {
             try await database.store.migrate()
 
             let versions = try await PostgresFixture.appliedVersions(on: database.client)
-            #expect(versions == [1])
+            #expect(versions == [1, 2])
             let page = try await database.store.fetch(slug: Slug(unchecked: "quiet-cedar-otter"))
             #expect(page?.body == "<h1>before</h1>")
             #expect(page?.contentType == "text/html")
             #expect(page?.createdAt == createdAtBefore)
+            // Expiring in a week, not permanent. The window is generous because the assertion
+            // is about *which* instant the backfill chose, and the two wrong choices are far
+            // outside it: a NULL fails the unwrap, and `created_at + 7 days` on a row inserted
+            // moments ago would land a whole week earlier than this range starts.
+            let deadline = try #require(page?.expiresAt)
+            let expected = Date().addingTimeInterval(
+                Double(PageLifetime.defaultDays) * PageLifetime.secondsPerDay
+            )
+            #expect(abs(deadline.timeIntervalSince(expected)) < 60)
+            // And it is a real deadline rather than a formality: the same row read back
+            // through the deadline-filtering fetch is still served today.
+            #expect(deadline > Date())
         }
+    }
+
+    /// The two expiry predicates, executed as SQL — the only place they ever are.
+    ///
+    /// Everything else that exercises expiry runs against `InMemoryPageStore`, whose
+    /// `hasExpired` is hand-written Swift sharing nothing with `PageStore`'s `WHERE` clauses,
+    /// so it cannot notice a comparison pointing the wrong way. Invert either one and the rest
+    /// of the suite still passes: `expires_at < now()` in the fetch makes every page published
+    /// under the default lifetime 404 from the instant it is created, and `expires_at > now()`
+    /// in the delete makes every upload destroy every *live* page that carries a deadline.
+    /// Neither raises an error anywhere, and the second is silent data loss.
+    ///
+    /// Three rows — a past deadline, a future one, and NULL — are the smallest fixture that
+    /// pins the direction of both comparisons and the NULL branch at once. This is also the
+    /// only Postgres coverage `insert`, `update` and `deleteExpired` have.
+    @Test func expiryPredicatesHideReclaimAndSpareTheRightRows() async throws {
+        try await PostgresFixture.withThrowawaySchema { database in
+            let store = database.store
+            try await store.migrate()
+
+            let dead = Slug(unchecked: "quiet-cedar-otter")
+            let live = Slug(unchecked: "amber-willow-heron")
+            let permanent = Slug(unchecked: "brisk-maple-compass")
+            let deadline = Date().addingTimeInterval(3600)
+
+            for (slug, body, expiresAt) in [
+                (dead, "<h1>dead</h1>", Date().addingTimeInterval(-3600)),
+                (live, "<h1>live</h1>", deadline),
+                (permanent, "<h1>permanent</h1>", nil),
+            ] as [(Slug, String, Date?)] {
+                let inserted = try await store.insert(
+                    slug: slug,
+                    body: body,
+                    contentType: PageContentType.default,
+                    expiresAt: expiresAt
+                )
+                #expect(inserted, "\(slug.value)")
+            }
+
+            // The read predicate. The expired row is still physically present — nothing has
+            // reclaimed anything yet — so this is a statement about the query rather than
+            // about cleanup that happened to have run.
+            #expect(try await store.fetch(slug: dead) == nil)
+            let livePage = try await store.fetch(slug: live)
+            #expect(livePage?.body == "<h1>live</h1>")
+            // `timestamptz` keeps microseconds and `Date` keeps a `Double` of seconds, so the
+            // instant comes back near-identical rather than identical.
+            #expect(Self.isNear(livePage?.expiresAt, deadline))
+            let permanentPage = try await store.fetch(slug: permanent)
+            #expect(permanentPage?.body == "<h1>permanent</h1>")
+            #expect(permanentPage?.expiresAt == nil)
+
+            // The same predicate on the write side, so `PUT` and `GET` agree about which
+            // pages exist — and the expired row is not resurrected with a new body.
+            let deadOutcome = try await store.update(
+                slug: dead, body: "<h1>zombie</h1>", contentType: nil
+            )
+            #expect(deadOutcome == .noSuchPage)
+            let deadBody = try await PostgresFixture.scalar(
+                "SELECT body FROM pages WHERE slug = 'quiet-cedar-otter'",
+                as: String.self, on: database.client
+            )
+            #expect(deadBody == "<h1>dead</h1>")
+
+            switch try await store.update(slug: live, body: "<h1>replaced</h1>", contentType: nil) {
+            case .replaced(let stored):
+                // Reported and unmoved: a replacement is a new body at an old address.
+                #expect(Self.isNear(stored, deadline))
+            case .noSuchPage:
+                Issue.record("the live page should have been replaced")
+            }
+
+            // And the reclaiming DELETE takes exactly the row the reads were already hiding.
+            let reclaimed = try await store.deleteExpired()
+            #expect(reclaimed == 1)
+            let remaining: [String] = try await PostgresFixture.column(
+                "SELECT slug FROM pages ORDER BY slug", on: database.client
+            )
+            #expect(remaining == [live.value, permanent.value].sorted())
+
+            // A second sweep with nothing left to take reports nothing, rather than counting
+            // rows it did not delete.
+            #expect(try await store.deleteExpired() == 0)
+        }
+    }
+
+    /// Equality for an instant that has been through `timestamptz`, whose microsecond
+    /// resolution is coarser than `Date`'s.
+    static func isNear(_ actual: Date?, _ expected: Date) -> Bool {
+        guard let actual else { return false }
+        return abs(actual.timeIntervalSince(expected)) < 0.001
     }
 
     /// Genuine skipping, not "a re-insert that happened to bounce off the primary key":
@@ -309,7 +482,7 @@ struct PageStoreDatabaseTests {
             try await database.store.migrate()
 
             let versions = try await PostgresFixture.appliedVersions(on: database.client)
-            #expect(versions == [1])
+            #expect(versions == [1, 2])
             let appliedAtAfter = try await PostgresFixture.scalar(
                 "SELECT applied_at FROM schema_migrations WHERE version = 1",
                 as: Date.self, on: database.client
@@ -462,7 +635,15 @@ struct PageStoreDatabaseTests {
             )
             #expect(freeAfterSuccess)
 
-            let broken = PageStore.Migration(version: 2, statements: ["THIS IS NOT SQL"])
+            // One past the end of the shipped list, computed rather than typed. A version the
+            // real list already contains would be recorded as applied by the `migrate()`
+            // above, so the runner would *skip* this migration, never execute the nonsense,
+            // and the expectation below would fail on a perfectly working runner — a
+            // trap that springs the day somebody appends a version.
+            let unusedVersion = (PageStore.migrations.last?.version ?? 0) + 1
+            let broken = PageStore.Migration(
+                version: unusedVersion, statements: ["THIS IS NOT SQL"]
+            )
             await #expect(throws: (any Error).self) {
                 try await database.store.migrate([broken])
             }

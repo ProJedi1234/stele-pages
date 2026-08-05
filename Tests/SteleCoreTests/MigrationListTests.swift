@@ -31,6 +31,29 @@ struct MigrationListTests {
         #expect(sql.contains { $0.contains("CREATE INDEX IF NOT EXISTS pages_created_at_idx") })
     }
 
+    /// Version 2 adds the column *and* backfills it, and the backfill is the half with no
+    /// compiler behind it: delete that one statement and everything still builds, every
+    /// hermetic test still passes, and the only symptom is that pages published before the
+    /// upgrade quietly keep an unbounded lifetime on every deployment that has already run
+    /// the migration — where it can never be corrected, because by then a NULL is
+    /// indistinguishable from a deliberate `never`.
+    ///
+    /// Pinned here rather than only in `PageStoreDatabaseTests`, which needs Postgres and so
+    /// does not run in CI's default path. The literal `7 days` is matched deliberately
+    /// against the text and not against `PageLifetime.defaultDays`: a shipped migration
+    /// records what was written once, so this assertion must keep failing if someone
+    /// "helpfully" re-derives the interval from a constant that is free to move.
+    @Test func versionTwoBackfillsTheColumnItAdds() {
+        let sql = PageStore.migrations[1].statements.map(\.sql)
+        #expect(sql.contains { $0.contains("ADD COLUMN expires_at") })
+        #expect(
+            sql.contains {
+                $0.contains("UPDATE pages SET expires_at = now() + interval '7 days'")
+                    && $0.contains("WHERE expires_at IS NULL")
+            }
+        )
+    }
+
     /// Two properties of the statement text, both of which fail confusingly at runtime.
     /// A `\(…)` in a `PostgresQuery` literal becomes a bind parameter rather than SQL
     /// text, and DDL cannot take binds; and PostgresNIO's extended query protocol refuses

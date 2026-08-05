@@ -1,17 +1,19 @@
 # stele
 
-Publish an HTML file, get a readable link back.
+Publish an HTML file, get a readable link back. It expires in a week unless you say
+otherwise.
 
 ```
-$ curl -X POST localhost:8080/pages \
+$ curl -X POST "localhost:8080/pages?ttl=never" \
     -H "Authorization: Bearer $STELE_UPLOAD_TOKEN" \
     -H "Content-Type: text/html" \
     --data-binary @index.html
-{"url":"http://localhost:8080/radiant-surf-gecko","slug":"radiant-surf-gecko"}
+{"slug":"radiant-surf-gecko","url":"http://localhost:8080/radiant-surf-gecko","expires":null}
 ```
 
-Anyone can then load `/radiant-surf-gecko` and get the page. Pages live in Postgres, so
-the server holds no state and can be restarted or moved freely.
+Anyone can then load `/radiant-surf-gecko` and get the page, for as long as the page
+lives — see "How long a page lives". Pages live in Postgres, so the server holds no state
+and can be restarted or moved freely.
 
 A *stele* is the stone slab you put up in public for people to read — which is the job.
 
@@ -33,7 +35,9 @@ instead of three adjacent words. Pools are 253 / 208 / 224 words, so:
 | `4`                | `quiet-mossy-cedar-otter`   | 2,982,307,328 |
 
 Slugs are drawn at random, not derived from a row counter, so one slug never reveals
-another. On the rare collision the server simply redraws (five attempts, then 503).
+another. On the rare collision the server simply redraws (five attempts, then 503). A slug
+freed by an expiry goes back into the pool and can be drawn or claimed again — expired
+pages leave no tombstone behind them.
 
 ### Slugs are pretty, not secret
 
@@ -46,6 +50,11 @@ a page's contents should stay private — an unguessable URL would be doing acce
 work it can't do at this size. If you need that, set `STELE_SLUG_WORDS=4` (~3 billion,
 meaningfully harder) and treat even that as obscurity rather than security. Real privacy
 needs an auth check on reads, which this server deliberately does not have.
+
+Expiry adds nothing to that risk. A page past its deadline answers with the byte-identical
+404 that a malformed, reserved or never-published slug answers with, so a scanner cannot
+learn that a name *used to* be a page — which would otherwise hand it the publication
+history of the namespace for free.
 
 ## Running it locally
 
@@ -96,21 +105,19 @@ parameter, and DDL can't take binds. Statements aren't limited to DDL — becaus
 runs exactly once, a data backfill belongs in a migration too. `CREATE INDEX CONCURRENTLY`
 doesn't, because each migration runs inside a transaction.
 
-The TTL column (issue #6) would ship as:
-
-```swift
-Migration(version: 2, statements: [
-    "ALTER TABLE pages ADD COLUMN expires_at timestamptz",
-    "CREATE INDEX pages_expires_at_idx ON pages (expires_at) WHERE expires_at IS NOT NULL",
-])
-```
-
-— a versioned step, not another idempotent `ALTER` accumulating in a bootstrap function.
-Nullable with no default, so it's a catalog-only change with no table rewrite.
-
 Version 1 is the original schema written with `IF NOT EXISTS`, so a database created
 before there was a version table simply records version 1 and carries on. Nothing is
 dumped or restored.
+
+Version 2 is the page-expiry column, and it is what every later migration should look
+like: a versioned step with no `IF NOT EXISTS`, rather than another idempotent `ALTER`
+accumulating in a bootstrap function. Only version 1 needs the conditional forms, because
+only version 1 describes a schema that already existed before the runner did. Version 2
+adds `expires_at` as nullable with no default, backfills every row already in the table to
+seven days out, then builds a *partial* index on it. It is also the example of why a
+backfill belongs in a migration rather than in application code: the statement is only
+accurate in the one moment it runs, when a `NULL` still provably means "published before
+expiry existed" rather than "published with `?ttl=never`".
 
 ### The two compose files
 
@@ -130,34 +137,97 @@ happens to run the app, which is rarely the machine you chose for durable storag
 | ------------------ | ------ | ------------------------------------------------------ |
 | `GET /`            | none   | Usage page                                             |
 | `GET /healthz`     | none   | `ok`                                                   |
-| `GET /:slug`       | none   | The stored page, or a 404 page                         |
+| `GET /:slug`       | none   | The stored page, or a 404 page if it's absent or expired |
 | `GET /assets/stele.css` | none | The shared stylesheet (see "A shared look")         |
 | `GET /skill`       | none   | The publish skill, as Markdown (see "Teaching an agent to publish") |
-| `POST /pages`      | bearer | Stores the request body, returns `{slug, url}` as `201` |
-| `PUT /pages/:slug` | bearer | Replaces a stored page's body and content type, returns `{slug, url}` as `200` |
+| `POST /pages`      | bearer | Stores the request body, takes `?slug=` and `?ttl=`, returns `{slug, url, expires}` as `201` |
+| `PUT /pages/:slug` | bearer | Replaces a stored page's body and content type, returns `{slug, url, expires}` as `200` |
 
 `POST /pages` takes the page as the raw request body, up to `STELE_MAX_PAGE_BYTES`
 (default 1 MiB; larger is `413`). Add `?slug=my-page` to choose the name yourself — it's
 validated by the same rules as a generated one, returning `400` if invalid and `409` if
-taken. Accepted content types are `text/html` (default), `text/plain`, `text/css`, and
-`text/markdown`; anything else is `415`. An empty or non-UTF-8 body is `400`, a missing
-or wrong bearer token is `401`, and if five random draws in a row collide with existing
-slugs the server gives up with `503` rather than retrying forever.
+taken. Add `?ttl=` to choose how long it lives, described below. Accepted content types
+are `text/html` (default), `text/plain`, `text/css`, and `text/markdown`; anything else is
+`415`. An empty body, a non-UTF-8 one, a NUL byte, an invalid slug and an invalid `ttl`
+are each `400`, a missing or wrong bearer token is `401`, and if five random draws in a
+row collide with existing slugs the server gives up with `503` rather than retrying
+forever.
 
 `PUT /pages/:slug` replaces an existing page's body and content type, and shares POST's
 request semantics — the same size limit (`413`), content-type allowlist (`415`), empty or
 non-UTF-8 body (`400`), and bearer token (`401`) — with one deliberate difference:
 omitting `Content-Type` keeps the page's stored type instead of defaulting to HTML, so a
 re-upload that forgets the header can't silently turn a stylesheet into a page browsers
-refuse to apply. The slug in the path obeys the
+refuse to apply. It reports the page's `expires` and never moves it, for the same reason it
+never touches `created_at`, and a `?ttl=` on this verb is a `400` rather than a value
+quietly dropped — accepting `?ttl=never` with a `200` and changing nothing would be the one
+silent default the `POST` parser exists to prevent. The slug in the path obeys the
 same grammar as a custom slug below; malformed or reserved is `400` rather than the
 public `404`, because this side of the API is behind the upload token and has nothing to
-hide from its caller. A well-formed slug with no page at it is `404`: `PUT` never
-creates, so publishing a new page is always `POST`.
+hide from its caller. A well-formed slug with no *live* page at it is `404` — absent, or
+expired and not yet cleaned up: `PUT` never creates, so publishing a new page is always
+`POST`.
 
 Custom slugs are lowercase letters, digits and single interior hyphens, 3–64 characters.
 Names the server uses for itself (`pages`, `healthz`, …) are rejected rather than
 accepted-then-shadowed.
+
+### How long a page lives
+
+**Pages are ephemeral by default.** A `POST` with no `?ttl=` expires 7 days after it is
+published; permanence is the deliberate opt-out, not the default.
+
+| Query        | Lifetime                                   |
+| ------------ | ------------------------------------------ |
+| omitted      | 7 days                                     |
+| `?ttl=30`    | 30 days; any whole number from 1 to 36500  |
+| `?ttl=never` | Never expires                              |
+
+Anything else — `0`, a negative, `7.5`, an empty value, a count past the maximum — is a
+`400`. Nothing is silently rounded or defaulted: a rejected `ttl` means the page was not
+published at all, because a caller who mistyped a lifetime and got a week-long page would
+not find out until the link died. The upper bound exists because an unbounded day count is
+`Date` arithmetic waiting to overflow, and because "effectively never" should be spelled
+`never`.
+
+Both writes report the result as an `expires` field: an RFC 3339 instant in UTC, or JSON
+`null` for a page that never expires. It is always present — an absent key would read as
+"the server has no opinion", and it always has one.
+
+The default is the part worth arguing about, so: a page server whose links all last
+forever accumulates every draft, preview and one-off anybody ever published, and nothing
+about a link tells you afterwards which it was. Making the common case temporary costs one
+query parameter on the pages that matter, and nothing at all on the ones that don't.
+
+Expiry is enforced in two places, for two different reasons:
+
+- **On read, for correctness.** The fetch query treats a page past its deadline as absent,
+  so it stops being served at exactly the right moment regardless of cleanup — and it 404s
+  with the same bytes every other miss does.
+- **On write, to reclaim.** Each successful upload first deletes expired rows, which is
+  what returns their slugs to the pool. A partial index (`WHERE expires_at IS NOT NULL`)
+  keeps that cheap, since permanent pages never enter it. There is no cron and no
+  scheduler: cleanup frequency scales with usage, and an idle server holding invisible
+  expired rows is fine, because nothing can read them anyway.
+
+A `NULL` expiry means "never expires", and that is the only thing it means: it is what
+`?ttl=never` stores, and nothing else produces one.
+
+**Pages published before this feature existed are not exempt.** Migration 2 backfills them
+in the same breath as it adds the column, so they expire seven days after the upgrade runs.
+That backfill has to live in that migration and nowhere else — one statement earlier the
+column did not exist, so every `NULL` it sees is provably a pre-expiry page, whereas the
+same `UPDATE` written any later could not tell those apart from a page whose author asked
+for `never`. The interval is measured from the migration rather than from `created_at`,
+because a page older than the default would otherwise arrive with a deadline already behind
+it and be deleted by the very next upload — a feature meant to bound storage would open by
+destroying the archive. Everything already published gets one full lifetime from the
+upgrade, and anything worth keeping should be re-published with `?ttl=never` inside that
+window.
+
+Expired slugs return to the pool. Once the row is deleted the generator may draw the name
+again, or a caller may claim it with `?slug=`. There are no tombstones: a name that expired
+is a name that is free.
 
 ### A shared look
 
@@ -242,13 +312,19 @@ curl https://stele.example.com/skill
 The document is served by the deployment it documents, and is rendered from that
 deployment's configuration rather than being a compile-time constant. Every value with exactly one constant behind
 it — the base URL, `STELE_MAX_PAGE_BYTES`, the stylesheet path, the slug length bounds,
-the reserved names, the accepted content types — is interpolated from that constant, so
+the reserved names, the accepted content types, and the whole `ttl` vocabulary (the
+parameter's name, the `never` keyword, the default lifetime and its maximum) — is
+interpolated from that constant, so
 the `curl` an agent copies out is already pointed at the right host with the right limits.
 That removes the opportunity for drift rather than detecting it afterwards: there is no
 second copy of those values to fall out of step. What is left is prose, and the prose is
 pinned by tests to the code it describes — the component table against the stylesheet's
 own class list, the content types against the allowlist, the example slugs against
-`Slug(custom:)` itself.
+`Slug(custom:)` itself, and the lifetime table against `PageLifetime`.
+
+This README is the one document that *cannot* interpolate any of that — it is a static
+file, so every route, limit, keyword and lifetime in it is typed by hand. Changing the
+contract therefore means changing this file in the same commit that changes the code.
 
 Like the stylesheet, it ships with the app rather than living in Postgres: it changes by
 deploy, not by upload, and a database copy could serve one version's documentation from a
@@ -304,8 +380,10 @@ docker compose -f docker-compose.deploy.yml up -d --build
 
 Nothing else changes — any unapplied migrations run on boot, exactly as they do locally.
 An existing deployment needs no dump and restore: version 1 describes the schema it
-already has, so the first boot after a version table exists records version 1 and does
-nothing else. All three of those variables are required and the stack refuses to start without them,
+already has, so the first boot after a version table exists records version 1 without
+running anything, then applies whatever versions come after it. Today that means version
+2, which adds a nullable column and a partial index — catalog-only, no table rewrite — and
+leaves every page already published permanent. All three of those variables are required and the stack refuses to start without them,
 rather than defaulting to something that would quietly be wrong.
 
 **Point `DATABASE_URL` at a host whose storage you trust.** Development machines often

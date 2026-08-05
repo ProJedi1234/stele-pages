@@ -3,9 +3,10 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 A Hummingbird 2 HTTP server that stores an uploaded HTML file in Postgres and serves it
-back at a readable three-word slug (`quiet-cedar-otter`). Swift 6, SwiftPM. The README
-covers the API, the slug design, and deployment; source files carry the reasoning for
-their own decisions in doc comments.
+back at a readable three-word slug (`quiet-cedar-otter`), for seven days unless the
+uploader asked for something else. Swift 6, SwiftPM. The README covers the API, the slug
+design, page lifetimes, and deployment; source files carry the reasoning for their own
+decisions in doc comments.
 
 ## Commands
 
@@ -42,20 +43,27 @@ lock, so it is safe to run repeatedly and concurrently.
 
 ## Testing
 
-Router behavior — routing, auth, status codes, the content-type allowlist, 404
-uniformity, and the headers pages are served with — is covered by HTTP-level tests. They
+Router behavior — routing, auth, status codes, the content-type allowlist, `?ttl=`
+parsing (including its refusal on `PUT`), expired reads, 404 uniformity, and the headers
+pages are served with — is covered by HTTP-level tests. Note the shape of
+`theReportedLifetimeIsTheStoredOne`: `POST` builds its `expires` from the same value it
+hands to `create`, so reading that field back proves only the parse — it takes a follow-up
+`PUT`, which reports what the *store* returned, to prove the expiry was written at all.
+They
 run `buildRouter` through `HummingbirdTesting`'s `.router` mode (no listening socket)
 against an in-memory `PageStoring` fake, so no curl and no database are needed.
 
 `PublishSkillTests` is the odd one out: alongside the usual route assertions it reads the
 rendered SKILL.md as data and pins its prose to the constants it documents — the component,
-tone and syntax-token vocabularies against `Stylesheet`, the accepted types against `PageContentType.allowed`,
-the example slugs through `Slug(custom:)` — so changing the contract without changing the
+tone and syntax-token vocabularies against `Stylesheet`, the accepted types against
+`PageContentType.allowed`, the example slugs through `Slug(custom:)`, the lifetime table and
+`?ttl=` grammar against `PageLifetime` — so changing the contract without changing the
 document fails the build rather than shipping stale instructions.
 
-The slug-retry and requested-slug policy is shared code in `PageStoring`'s extension, so
-the router tests exercise the real thing (the 503 test runs the retry loop to genuine
-exhaustion).
+The slug-retry policy, the requested-slug policy and the reclaim-before-insert ordering
+are shared code in `PageStoring`'s extension, so the router tests exercise the real thing
+(the 503 test runs the retry loop to genuine exhaustion, and the reclamation test proves a
+just-expired slug is claimable by the very upload that freed it).
 
 `PageStoreDatabaseTests` is the one suite that needs Postgres, gated on
 `STELE_TEST_DATABASE_URL` so a plain `swift test` stays hermetic:
@@ -67,12 +75,35 @@ STELE_TEST_DATABASE_URL=postgres://stele:stele_dev_password@localhost:5432/postg
 
 It creates and drops a throwaway schema per test, and is `.serialized` because Postgres
 advisory locks are scoped to the database, which per-test schemas do not divide. It
-covers the migration runner: the schema version 1 produces, the upgrade path from a
-database created by the pre-migration bootstrap, skipping, ordering, exactly-once
-backfills, rollback of a failed migration, and the advisory lock. It deliberately does
-**not** cover `insert` / `fetch` / `update` against real Postgres — the `ON CONFLICT DO
-NOTHING` insert and the `UPDATE … RETURNING` existence check remain the standing gap,
-asserted today only against the in-memory fake.
+covers the migration runner: the schema version 1 produces, what version 2 adds (the
+nullable `expires_at` and its *partial* index — assert the `indexdef`, not just the index
+name, or a full index passes), the upgrade path from a database created by the
+pre-migration bootstrap, skipping, ordering, exactly-once backfills, rollback of a failed
+migration, and the advisory lock. A probe migration in that suite must use a version the
+real list does not contain, or the runner skips it and the test asserting it fails passes
+nothing — `theLockIsReleasedWhetherTheRunSucceedsOrFails` computes one past the end for
+exactly that reason.
+
+`upgradesADatabaseCreatedByTheOldBootstrap` is what proves version 2's backfill actually
+ran on a live-shaped database: the page it inserts before migrating comes back with a
+deadline seven days out rather than a NULL, and with `created_at` untouched. `Date?` from a
+genuine NULL — the mistake that compiles, passes every in-memory test and 500s in
+production — is decoded in `expiryPredicatesHideReclaimAndSpareTheRightRows` instead, on the
+row it inserts with a nil expiry. Between them both branches of that decode are covered
+against real Postgres; do not let a refactor collapse them into one.
+
+`expiryPredicatesHideReclaimAndSpareTheRightRows` is the one test that runs the data path
+against real Postgres, and it is there because the expiry predicates exist **only** as SQL:
+`InMemoryPageStore.hasExpired` is independent hand-written Swift, so an inverted comparison
+in `PageStore` is invisible to every other test. Inverting `fetch`'s makes every page 404
+from the moment it is published; inverting `deleteExpired`'s makes every upload destroy
+every live page that carries a deadline. Both are silent, and the second is data loss. It
+seeds a past, a future and a NULL deadline and pins `insert`, `fetch`, `update` and
+`deleteExpired` against all three.
+
+What remains uncovered against real Postgres is narrower than it was: the
+`ON CONFLICT DO NOTHING` *collision* branch of `insert` (the success branch is covered
+above) is the standing gap, asserted today only against the in-memory fake.
 
 ## Conventions
 
@@ -96,11 +127,12 @@ asserted today only against the in-memory fake.
 - **A generated document that quotes the code belongs in the same module as the code, and
   quotes it by interpolation.** `PublishSkill` renders the SKILL.md served at `GET /skill`
   from `Slug.reserved`, `PageContentType.allowed`, `Stylesheet.toneClasses`, the
-  configured base URL and the byte limit. Never retype one of those values into the
-  prose: interpolation removes the chance of drift, where a test can only notice it
-  later. The deliberate exceptions are the component-class table and the syntax-token
-  list — each row carries hand-written prose no constant could generate, so the class
-  names are typed out and `PublishSkillTests.componentTableMatchesTheStylesheet` /
+  configured base URL, the byte limit and `PageLifetime`'s lifetime vocabulary
+  (`queryParameter`, `neverKeyword`, `defaultDays`, `maxDays`). Never retype one of those
+  values into the prose: interpolation removes the chance of drift, where a test can only
+  notice it later. The deliberate exceptions are the component-class table and the
+  syntax-token list — each row carries hand-written prose no constant could generate, so the
+  class names are typed out and `PublishSkillTests.componentTableMatchesTheStylesheet` /
   `.documentsEverySyntaxTokenClass` hold them set-equal to `Stylesheet.componentClasses`
   / `.syntaxTokenClasses` in both directions. For the rest of the prose that has no
   constant behind it, `PublishSkillTests` pins what it can — extend those tests rather
@@ -115,11 +147,15 @@ asserted today only against the in-memory fake.
   migration runs exactly once, so data backfills belong there too.
 - **Routes take `some PageStoring`, not a concrete store.** That seam is what lets the
   HTTP tests run without Postgres. A conformer implements only `fetch` and the atomic
-  storage primitives — insert-if-free and update-if-present; `create`'s retry and
-  requested-slug policy lives in the
-  protocol extension and must stay there, shared. `PageStore` is the only conformer that
-  talks to a database; keep new persistence behind the protocol rather than reaching
-  past it.
+  storage primitives — insert-if-free, update-if-present, delete-what-has-expired;
+  `create`'s retry policy, requested-slug policy and reclaim-*before*-insert ordering live
+  in the protocol extension and must stay there, shared. The ordering is load-bearing:
+  reclaiming first is what frees an expired slug in time for the upload happening now, and
+  a delete failure must propagate rather than be swallowed. `deleteExpired` deliberately
+  has no default implementation — a default would be a no-op every conformer inherits in
+  silence, and every reclamation test would pass against a store that reclaims nothing.
+  `PageStore` is the only conformer that talks to a database; keep new persistence behind
+  the protocol rather than reaching past it.
 
 ## Decisions that look like bugs
 
@@ -127,12 +163,30 @@ Don't "fix" these without a reason; the README argues them out in full.
 
 - **Reads are unauthenticated.** Slugs are pretty, not secret — an 11.8M keyspace is
   scannable. Access control would need a real auth check, not a longer slug.
-- **Every 404 on the public read surface is identical.** Malformed, reserved, and absent
-  slugs return the same page so a scanner can't map the namespace faster than guessing.
+- **Every 404 on the public read surface is identical.** Malformed, reserved, absent and
+  *expired* slugs return the same page so a scanner can't map the namespace faster than
+  guessing — an expired page answering differently would reveal that a name used to be a
+  page, handing over the namespace's publication history for free.
   This is deliberately *not* true behind the upload token: `PUT /pages/:slug` returns
   distinguishing `400`/`404` errors, because that caller has nothing left to leak to.
 - **`STELE_UPLOAD_TOKEN` has no default.** A default would be a published credential; an
   absent one would silently open the upload endpoint.
+- **Pages expire by default, and permanence is the opt-out.** `?ttl=` is 7 days when
+  absent, `never` for permanent, and a `400` for anything else — never a silent default.
+  A `NULL` `expires_at` means "never expires" and nothing else — pages that predate the
+  feature are **not** exempt, because migration 2 backfills them to seven days from the
+  upgrade as it adds the column. That backfill belongs in that migration and nowhere else:
+  one statement earlier the column did not exist, so every `NULL` it sees is provably a
+  pre-expiry page, while the same `UPDATE` written later could not distinguish those from a
+  deliberate `never`. It measures from `now()` rather than `created_at` so a page older than
+  the default does not arrive already dead and get reclaimed by the next upload. Expired
+  slugs return to the pool
+  with no tombstone, so a name that expired can be drawn or claimed again. Reclamation
+  happens on upload only; there is no cron, and an idle server holding invisible expired
+  rows is fine because nothing can read them. `PUT` refuses `?ttl=` with a `400` rather
+  than ignoring it — a replacement cannot move a deadline, and answering `200` to
+  `?ttl=never` would leave the caller believing it had. All of these look like bugs and
+  are not.
 - **The shared stylesheet and the publish skill are Swift strings, not SwiftPM
   resources.** They live as raw literals in `Sources/SteleCore/Stylesheet.swift` and
   `Sources/SteleCore/PublishSkill.swift`. The Dockerfile's runtime stage copies
