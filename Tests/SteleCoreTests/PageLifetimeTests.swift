@@ -38,9 +38,21 @@ struct PageLifetimeTests {
         #expect(try PageLifetime(raw: PageLifetime.neverKeyword, from: Self.reference).expiresAt == nil)
     }
 
-    /// Days are counted as 86,400 seconds each, from the moment of the upload. One day and
-    /// the bound both, because a unit mistake (hours for days) and an off-by-one at the
-    /// ceiling are the two ways this arithmetic goes wrong quietly.
+    /// The one expectation in the codebase that spells the number out, and the reason it has
+    /// to exist: every other instant asserted here and in `PageExpiryTests` is *derived* from
+    /// `secondsPerDay`, so all of them agree with a day of any length. Change the constant to
+    /// 3,600 and the entire suite still passes while every page dies seven hours after
+    /// publication. This line is what makes a day a day; the derived expectations catch a
+    /// unit mistake at the arithmetic site, where code and expectation would disagree.
+    @Test func aDayIsEightySixThousandFourHundredSeconds() throws {
+        #expect(PageLifetime.secondsPerDay == 86_400)
+        let lifetime = try PageLifetime(raw: "1", from: Self.reference)
+        #expect(lifetime.expiresAt == Self.reference.addingTimeInterval(86_400))
+    }
+
+    /// Days are counted from the moment of the upload, at whatever length the constant above
+    /// pins. One day and the bound both, because a unit mistake in the arithmetic and an
+    /// off-by-one at the ceiling are the two ways it goes wrong quietly from here.
     @Test(arguments: [1, 7, 30, 365, PageLifetime.maxDays])
     func aPositiveDayCountIsThatManyDaysOut(days: Int) throws {
         let lifetime = try PageLifetime(raw: "\(days)", from: Self.reference)

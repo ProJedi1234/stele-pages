@@ -37,9 +37,12 @@ struct PageExpiryTests {
 
     /// Tolerance for an instant the server computed from its own clock. A minute is loose
     /// enough that a slow CI machine and the format's one-second truncation cannot fail it,
-    /// and tight enough that every wrong answer worth catching — hours mistaken for days,
-    /// the reference date taken from the epoch, an off-by-one in the day count — is far
-    /// outside it.
+    /// and tight enough that every wrong answer worth catching — hours mistaken for days in
+    /// the arithmetic, the reference date taken from the epoch, an off-by-one in the day
+    /// count — is far outside it. What the tolerance cannot catch is a wrong value for
+    /// `secondsPerDay` itself, because the expectations below are derived from that constant
+    /// and move with it; `PageLifetimeTests.aDayIsEightySixThousandFourHundredSeconds` is
+    /// the one place that pins it to a literal.
     static let tolerance: TimeInterval = 60
 
     static func expectInstant(_ actual: Date?, roughly expected: Date, _ label: Comment) throws {

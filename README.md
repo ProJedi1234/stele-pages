@@ -378,13 +378,23 @@ EOF
 docker compose -f docker-compose.deploy.yml up -d --build
 ```
 
+All three of those variables are required and the stack refuses to start without them,
+rather than defaulting to something that would quietly be wrong.
+
 Nothing else changes — any unapplied migrations run on boot, exactly as they do locally.
 An existing deployment needs no dump and restore: version 1 describes the schema it
 already has, so the first boot after a version table exists records version 1 without
-running anything, then applies whatever versions come after it. Today that means version
-2, which adds a nullable column and a partial index — catalog-only, no table rewrite — and
-leaves every page already published permanent. All three of those variables are required and the stack refuses to start without them,
-rather than defaulting to something that would quietly be wrong.
+running anything, then applies whatever versions come after it.
+
+Today that means version 2, and **it is not a schema-only migration: it puts a deadline on
+every page you have already published.** Alongside the nullable `expires_at` and its
+partial index, version 2 backfills every existing row to expire seven days after the
+upgrade runs. When that week is up, the next upload reclaims them, and expired slugs leave
+no tombstone — the pages and their names are gone. Re-publish anything worth keeping with
+`?ttl=never` inside that window; "Page lifetimes" above argues out why the backfill belongs
+in that migration and measures from the upgrade rather than from `created_at`. Budget for
+it on a large table, too: the `ALTER` and the index are catalog-only, but the backfill
+`UPDATE` rewrites every row before the server starts serving.
 
 **Point `DATABASE_URL` at a host whose storage you trust.** Development machines often
 run with durability tradeoffs that are fine for rebuildable data and not fine for the
