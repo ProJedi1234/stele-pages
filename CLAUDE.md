@@ -44,8 +44,13 @@ lock, so it is safe to run repeatedly and concurrently.
 ## Testing
 
 Router behavior — routing, auth, status codes, the content-type allowlist, `?ttl=`
-parsing (including its refusal on `PUT`), expired reads, 404 uniformity, and the headers
-pages are served with — is covered by HTTP-level tests. Note the shape of
+parsing (including its refusal on `PUT` and its "leave it alone" reading on `PATCH`),
+expired reads, 404 uniformity, and the headers
+pages are served with — is covered by HTTP-level tests. `AmendPageTests` covers the rename
+and retime verb; its sharpest assertions are the ones about what an amendment must *not*
+disturb — `renamingAloneDoesNotTouchTheDeadline` is the guard against the router reaching
+`PageLifetime(raw: nil)` and quietly putting seven days on a permanent page, and
+`amendingDoesNotReattributeThePage` pins the deliberate inversion of `PUT`'s behaviour. Note the shape of
 `theReportedLifetimeIsTheStoredOne`: `POST` builds its `expires` from the same value it
 hands to `create`, so reading that field back proves only the parse — it takes a follow-up
 `PUT`, which reports what the *store* returned, to prove the expiry was written at all.
@@ -78,6 +83,15 @@ reads as a severity ranking that is not there. Two of its assertions are *negati
 pins the sentence that says whose step `stele auth login` is. The skill's job is to keep
 the credential out of the model's reach; prose that hands it back would pass every other
 test in the suite.
+
+`PATCH /pages/:slug` lands in the same trap and is resolved the same way — see
+`documentsTheAmendRoute`, which pins the route-table row, the sentence saying no `stele`
+command runs it, and the sentence attributing that to the *tool* rather than the server. Its
+negative counterpart `doesNotClaimALifetimeIsUnchangeable` is the one to keep: the document
+used to state four separate times that a lifetime could never change, and every one of those
+had to become a claim about the client ("no command you can run"). A future edit drifting
+back to the absolute would read fine, pass everything else here, and teach an agent to refuse
+something the server does.
 
 `documentsTheDeleteRoute` is where those two jobs pull against each other, and the shape it
 settled on is deliberate. `DELETE /pages/:slug` exists on the server, but the CLI ships no
@@ -179,6 +193,22 @@ the right row" and "matched every row" are the same observation, and `removeValu
 cannot express that bug at all), that the freed slug can be claimed again, and that an
 expired row is refused rather than removed.
 
+`amendmentsMoveAndRetimeAPageWithoutDisturbingIt` is the third, and it exists mainly for one
+branch. `applyAmendment` is the only statement in the store whose outcome comes from an
+*error* rather than a row count: it carries no `NOT EXISTS` guard on the target name —
+deliberately, since any such sub-select reads the statement's snapshot and can be overtaken
+by a concurrent insert committing before the index is touched — so a taken name arrives as
+SQLSTATE `23505` off the primary key and `.slugTaken` is that error caught and translated.
+`InMemoryPageStore` reaches the same verdict from a dictionary, so it agrees by construction
+and proves nothing; if the catch clause ever stops matching, every rename onto a taken name
+becomes a `500` and only this suite would notice. It also pins the two expiry binds in both
+directions (a bind that can clear a deadline but not set one passes every test that only
+amends toward `never`) and the `CASE … ELSE expires_at` arm that a single nullable bind would
+turn into "make it permanent", plus the `created_at` and `client_id` an amendment must leave
+alone. `amendmentsRefuseAnExpiredPageRatherThanRevivingIt` is split out because its
+interesting half is what does *not* happen, and it proves refusal rather than a silent sweep
+the way the delete test does — by watching `deleteExpired` still find the row.
+
 What remains uncovered against real Postgres is narrower than it was: the
 `ON CONFLICT DO NOTHING` *collision* branch of `PageStore.insert` (its success branch is
 covered above, and `ClientStore`'s collision branch is covered separately) is the standing
@@ -221,6 +251,17 @@ gap, asserted today only against the in-memory fake.
   `admin`-scoped group answers both with a `403` from a credential that works perfectly.
   `WhoamiTests.aPublishOnlyCredentialIsAnsweredHereAndStillRefusedOnTheAdminRoutes` holds
   the two halves together.
+- **`PATCH /pages/:slug` changes a page's address and deadline; it is not a small `PUT`.**
+  It reads no body and rewrites none — contents, content type, `created_at` and `client_id`
+  all survive, the last deliberately (see "A write records who wrote it"). Keep it a
+  separate verb: `PUT`'s `400` on `?ttl=` is still correct, because *a replacement* still
+  cannot retime a page. The trap is `PageLifetime(raw:)`, whose nil resolves to
+  `defaultDays` — right for a publish, catastrophic here, where an absent `?ttl=` must mean
+  "leave it alone" or a rename would put a week's deadline on a permanent page. That is what
+  `PageExpiry` is for: nil is the absence of an instruction and `.never` is the instruction
+  to be permanent, which a `Date?` cannot say and a `Date??` can only say by accident. A
+  rename is a *hard move* — old name freed, no redirect, no tombstone — on the same
+  reasoning as `delete`.
 - **A write records who wrote it.** Both write routes pass
   `context.client?.attributableID` down through `PageStoring`'s primitives into
   `pages.client_id`, and `update` *assigns* it rather than coalescing — the column is who
@@ -272,12 +313,17 @@ gap, asserted today only against the in-memory fake.
   migration runs exactly once, so data backfills belong there too.
 - **Routes take `some PageStoring`, not a concrete store.** That seam is what lets the
   HTTP tests run without Postgres. A conformer implements only `fetch` and the atomic
-  storage primitives — insert-if-free, update-if-present, delete-if-live,
+  storage primitives — insert-if-free, update-if-present, amend-if-live, delete-if-live,
   delete-what-has-expired;
   `create`'s retry policy, requested-slug policy and reclaim-*before*-insert ordering live
   in the protocol extension and must stay there, shared. The ordering is load-bearing:
   reclaiming first is what frees an expired slug in time for the upload happening now, and
-  a delete failure must propagate rather than be swallowed. `deleteExpired` deliberately
+  a delete failure must propagate rather than be swallowed. `amend` is the second policy
+  method and exists only to run that same reclamation ahead of `applyAmendment`, so a rename
+  onto a just-expired name succeeds instead of `409`ing against a page no verb admits
+  exists. The policy and the primitive carry **different names on purpose**: a defaulted
+  `logger` argument letting them share one would make the un-logged call site resolve
+  silently to the primitive, skipping reclamation with nothing to notice. `deleteExpired` deliberately
   has no default implementation — a default would be a no-op every conformer inherits in
   silence, and every reclamation test would pass against a store that reclaims nothing.
   The two deletes are separate primitives on purpose: `delete(slug:)` answers one caller
@@ -416,8 +462,11 @@ Don't "fix" these without a reason; the README argues them out in full.
   happens on upload only; there is no cron, and an idle server holding invisible expired
   rows is fine because nothing can read them. `PUT` refuses `?ttl=` with a `400` rather
   than ignoring it — a replacement cannot move a deadline, and answering `200` to
-  `?ttl=never` would leave the caller believing it had. All of these look like bugs and
-  are not.
+  `?ttl=never` would leave the caller believing it had. `PATCH` is where a deadline moves,
+  and it measures from the request rather than from `created_at`, so `?ttl=30` grants thirty
+  days rather than whatever is left of them. It cannot revive an expired page: the same
+  live-row predicate applies, so `?ttl=never` on a dead page is a `404`. All of these look
+  like bugs and are not.
 - **The shared stylesheet and the publish skill are Swift strings, not SwiftPM
   resources.** They live as raw literals in `Sources/SteleCore/Stylesheet.swift` and
   `Sources/SteleCore/PublishSkill.swift`. The Dockerfile's runtime stage copies

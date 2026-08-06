@@ -7,11 +7,11 @@ import Foundation
 /// so an actor conforms directly, and `Mutex` would need macOS 15 while the manifest
 /// declares macOS 14.
 ///
-/// Only the seam's primitives — insert-if-free, update-if-present, delete-if-live and
-/// delete-what-has-expired — are implemented here, so the requested-vs-generated policy,
-/// the collision-retry loop and the reclaim-before-insert ordering the router tests
-/// exercise are the real shared ones from `PageStoring`'s extension, not a
-/// reimplementation.
+/// Only the seam's primitives — insert-if-free, update-if-present, amend-if-live,
+/// delete-if-live and delete-what-has-expired — are implemented here, so the
+/// requested-vs-generated policy, the collision-retry loop and the reclaim-before-insert
+/// ordering the router tests exercise are the real shared ones from `PageStoring`'s
+/// extension, not a reimplementation.
 ///
 /// Where expiry is concerned this fake follows the SQL rather than doing whatever is
 /// convenient, because the router tests are the only place several of those rules are
@@ -150,6 +150,52 @@ actor InMemoryPageStore: PageStoring {
                     expiresAt: $0.expiresAt
                 )
             }
+    }
+
+    func applyAmendment(
+        slug: Slug, newSlug: Slug?, newExpiry: PageExpiry?
+    ) async throws -> PageAmendOutcome {
+        guard let existing = pages[slug], !hasExpired(existing) else { return .noSuchPage }
+
+        let target = newSlug ?? slug
+        // `pages[target] != nil`, not "a *live* page at target": an expired row holds its
+        // name here exactly as it does in Postgres, which is what makes `amend`'s
+        // reclaim-first ordering observable instead of decorative. Renaming to the name the
+        // page already has is excluded, mirroring an UPDATE that sets a row's key to its own
+        // value — a fake that reported that as taken would turn a harmless no-op into a 409.
+        if target != slug, pages[target] != nil { return .slugTaken(target) }
+
+        // Spelled out rather than written as `newExpiry.map(\.date) ?? existing.expiresAt`:
+        // that expression is a `Date??` collapsing correctly by accident, and the accident is
+        // exactly the nil-means-two-things confusion `PageExpiry` exists to prevent.
+        let expiresAt: Date?
+        if let newExpiry {
+            expiresAt = newExpiry.date
+        } else {
+            expiresAt = existing.expiresAt
+        }
+
+        // Built directly rather than through `page(…)`, for the reason `update` is: that
+        // helper stamps the next tick of `clock`, and an amendment must not restamp
+        // `createdAt`. Renaming a page is not republishing it, so a rename must not move the
+        // page to the top of the landing page's list — a fake that used the helper here would
+        // let that reordering pass while real Postgres, whose UPDATE never touches the
+        // column, kept the page where it was.
+        //
+        // Body, content type and `clientID` are carried across too. That last one is worth
+        // stating: `update` above deliberately *assigns* it, and a fake that copied that
+        // behaviour here would let the router quietly re-attribute a page to whoever renamed
+        // it.
+        pages.removeValue(forKey: slug)
+        pages[target] = Page(
+            slug: target,
+            body: existing.body,
+            contentType: existing.contentType,
+            createdAt: existing.createdAt,
+            expiresAt: expiresAt,
+            clientID: existing.clientID
+        )
+        return .amended(slug: target, expiresAt: expiresAt)
     }
 
     func delete(slug: Slug) async throws -> Bool {

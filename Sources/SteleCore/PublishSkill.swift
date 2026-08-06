@@ -45,7 +45,8 @@
 /// `.documentsTheInstallSequence`, `.mentionsExactlyTheMinimumCLIVersion`,
 /// `.documentsEveryCommandTheAgentNeeds`, `.documentsEveryFlagTheAgentCanUse`,
 /// `.theExitTableMatchesTheClientsExitCodes`, `.documentsTheDefaultLifetime`,
-/// `.documentsTheLifetimeGrammar` and `.theBadRequestRowNamesTheLifetime`. Those tests can
+/// `.documentsTheLifetimeGrammar`, `.theBadRequestRowNamesTheLifetime`,
+/// `.documentsTheAmendRoute` and `.doesNotClaimALifetimeIsUnchangeable`. Those tests can
 /// only pin what has a constant behind it; the rest of the prose is a human responsibility,
 /// and changing the publish contract means changing this document in the same commit.
 struct PublishSkill: Sendable {
@@ -296,8 +297,8 @@ struct PublishSkill: Sendable {
 
         That command takes the default lifetime — \#(PageLifetime.defaultDays) days — and the
         page stops being served when it runs out. Read "How long the page lives" below before
-        you run it; `\#(SteleCLI.ttlFlag)` is how you choose something else, and it cannot be
-        chosen later.
+        you run it; `\#(SteleCLI.ttlFlag)` is how you choose something else, and no command
+        you can run will change it afterwards.
 
         The URL goes to stdout and nothing else does, so `url=$(stele publish page.html)`
         captures it cleanly; the page's deadline is printed under it on stderr. **That URL is
@@ -336,9 +337,9 @@ struct PublishSkill: Sendable {
 
         A page's deadline is stored to the day, so anything finer is refused rather than
         rounded to a lifetime you did not ask for: `12h` is an error, not half a day. Ask for
-        the lifetime the user actually wants — this is the one thing about a page that cannot
-        be changed afterwards, so it is a choice to make rather than one to inherit from an
-        example, and a user expecting a permanent link needs to hear if they did not get one.
+        the lifetime the user actually wants — nothing you can run changes it once the page
+        exists, so it is a choice to make rather than one to inherit from an example, and a
+        user expecting a permanent link needs to hear if they did not get one.
 
         Underneath, the server reads the lifetime as a query parameter on the write, and that
         is where the bounds live:
@@ -355,11 +356,16 @@ struct PublishSkill: Sendable {
         lifetime nobody chose. You do not send that parameter yourself; `\#(SteleCLI.ttlFlag)`
         is how it gets there.
 
-        The expiry belongs to the page, not to its current contents: replacing a page does not
-        extend it, and there is no way to change it afterwards — which is why `stele update`
-        has no `\#(SteleCLI.ttlFlag)` and refuses the query parameter with a `400` rather than
-        accepting it and moving nothing. A page that needs to outlive its deadline has to be
-        published again.
+        The expiry belongs to the page, not to its current contents: **replacing a page does
+        not extend it**, which is why `stele update` has no `\#(SteleCLI.ttlFlag)` and the
+        server refuses that query parameter on a `PUT` with a `400` rather than accepting it
+        and moving nothing. A deadline is a property of the page, and rewriting the page's
+        contents is not a reason to move it.
+
+        The server does have a verb that retimes a page — `PATCH /\#(ServerRoute.pages)/:slug`,
+        in the route table below — but see "Renaming a page, and changing its deadline": no
+        `stele` command reaches it, so from where you are standing a lifetime is still chosen
+        once, at publication.
 
         ### Choosing your own slug
 
@@ -391,6 +397,36 @@ struct PublishSkill: Sendable {
         `stele update <slug> <file>` **never creates**: exit `7` means nothing is published
         at that name yet — or that it has expired — so `stele publish page.html --slug my-page`
         is what you want instead. A successful update keeps the same URL.
+
+        ### Renaming a page, and changing its deadline
+
+        **`stele` has no rename command and no retime command**, so neither is something you
+        can do. The server grew a `PATCH /\#(ServerRoute.pages)/:slug` that takes `?slug=` to
+        move a page to a new name and `?\#(PageLifetime.queryParameter)=` to give it a new
+        deadline — either, or both in one request — and the route table below lists it, but
+        reaching it means holding a credential, which is the one thing this arrangement exists
+        to spare you. A user who wants a published page renamed, or wants its deadline moved,
+        is asking for a newer `stele`; say so, and do not work around it.
+
+        Say it as a limitation of the tool rather than of the server, because that is what it
+        is. "There is no way to do that" would be the same wrong answer that once had an agent
+        refuse a permanent page over a flag that already existed.
+
+        What to tell them in the meantime:
+
+        - **A deadline is the case with no workaround.** You cannot republish over the page —
+          `stele publish \#(SteleCLI.slugFlag) <taken-name>` is a `409` — and you cannot take
+          the old one down first, because there is no delete command either. A page that must
+          outlive its date has to be published again at a *different* name.
+        - **A rename usually is not what the user needs.** If the page is not published yet,
+          `stele publish page.html \#(SteleCLI.slugFlag) <name>` picks the name up front,
+          which is the moment to ask. If it is, `stele update` gives them new content at the
+          name they already have.
+
+        And renaming is the harsher tool anyway, for the same reason deleting is. The move is
+        hard: the old name is released the instant it commits, with no redirect and nothing
+        left behind, so a link already in somebody's hands starts serving the ordinary 404 and
+        the name goes back into the pool for the next page — anybody's — to claim.
 
         ### Deleting a page
 
@@ -445,8 +481,8 @@ struct PublishSkill: Sendable {
         - A failure with no status at all — exit `9` — is usually not the server being down:
           check `stele auth status` first, then that you are pointed at the right host.
         - **A successful publish is not a promise the page will still be there.** The default
-          is \#(PageLifetime.defaultDays) days, not forever, and the deadline cannot be changed
-          afterwards. Tell the user which they got.
+          is \#(PageLifetime.defaultDays) days, not forever, and no command you can run moves
+          that date once it is set. Tell the user which they got.
 
         ## What a failure looks like
 
@@ -492,6 +528,7 @@ struct PublishSkill: Sendable {
         | `GET \#(PublishSkill.path)` | none | This document |
         | `POST /\#(ServerRoute.pages)` | `\#(ClientScope.publish.rawValue)` | Stores the body, takes `?slug=` and `?\#(PageLifetime.queryParameter)=`, returns `{slug, url, expires}` as `201` |
         | `PUT /\#(ServerRoute.pages)/:slug` | `\#(ClientScope.publish.rawValue)` | Replaces a stored page, returns `{slug, url, expires}` as `200` |
+        | `PATCH /\#(ServerRoute.pages)/:slug` | `\#(ClientScope.publish.rawValue)` | Renames a page with `?slug=` and retimes it with `?\#(PageLifetime.queryParameter)=`, leaving its contents alone; returns `{slug, url, expires}` as `200`. No command reaches it — see "Renaming a page, and changing its deadline". |
         | `DELETE /\#(ServerRoute.pages)/:slug` | `\#(ClientScope.publish.rawValue)` | Removes a stored page and frees the slug, returns `204`. No command reaches it — see "Deleting a page". |
         | `GET /\#(ServerRoute.admin)/\#(ServerRoute.adminWhoami)` | any credential | Reports the credential you hold — name, scopes, expiry. This is what `stele auth status` asks. |
         | `POST /\#(ServerRoute.admin)/\#(ServerRoute.adminClients)` | `\#(ClientScope.admin.rawValue)` | Mints a credential. The operator's route, not yours. |
@@ -530,10 +567,10 @@ struct PublishSkill: Sendable {
           should carry its own inline `<style>` and link nothing.
         - **There is no listing endpoint.** Keep the URL you were handed; nothing else will
           give it back to you.
-        - **A URL is not a permanent address.** Deleting retires the page, not the name, so
-          a link you published can be occupied by somebody else's page afterwards. If a
-          link has already gone where you cannot reach it, replace the page with PUT rather
-          than deleting it.
+        - **A URL is not a permanent address.** Deleting and renaming both retire the page
+          rather than the name, so a link you published can be occupied by somebody else's
+          page afterwards. If a link has already gone where you cannot reach it, replace the
+          page with PUT rather than deleting or moving it.
         """#
     }
 }

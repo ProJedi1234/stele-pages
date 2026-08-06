@@ -41,6 +41,7 @@ struct ScopeEnforcementTests {
         ("/\(ServerRoute.pages)", HTTPRequest.Method.post),
         ("/\(ServerRoute.pages)/quiet-cedar-otter", HTTPRequest.Method.put),
         ("/\(ServerRoute.pages)/quiet-cedar-otter", HTTPRequest.Method.delete),
+        ("/\(ServerRoute.pages)/quiet-cedar-otter?slug=renamed", HTTPRequest.Method.patch),
     ])
     func sharedTokenIsForbiddenOnWrites(uri: String, method: HTTPRequest.Method) async throws {
         let store = InMemoryPageStore()

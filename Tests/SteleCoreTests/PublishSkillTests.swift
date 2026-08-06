@@ -616,6 +616,74 @@ struct PublishSkillTests {
         #expect(!markdown.contains("| `204` |"))
     }
 
+    /// `PATCH` is the delete row's problem a second time, and it is settled the same way:
+    /// the route table has to name the verb, because a verb missing from that table is one
+    /// the agent will not use, and the prose has to say in the same breath that no command
+    /// runs it. Naming it and stopping there is the failure — the only way to act on the row
+    /// would be to go find a credential.
+    ///
+    /// Where it differs from delete is what the agent should *say*. A user asking to change a
+    /// deadline has no workaround at all: republishing over the name is a `409` and there is
+    /// no delete command to clear it first. So the section has to be honest that this is the
+    /// tool lagging the server rather than the server refusing — the distinction the `--ttl`
+    /// incident turned on, where prose describing a limitation that had stopped existing read
+    /// as policy. When `stele` grows these commands, this test is where to start.
+    @Test func documentsTheAmendRoute() {
+        let markdown = skillDocument.markdown
+        #expect(
+            markdown.contains(
+                "| `PATCH /\(ServerRoute.pages)/:slug` | `\(ClientScope.publish.rawValue)` |"
+            )
+        )
+        #expect(markdown.contains("**`stele` has no rename command and no retime command**"))
+        // Both query parameters are named, because the row is the only place an agent
+        // learns the verb takes them — and `?ttl=` here is a different contract from
+        // `?ttl=` on POST, which is the one an agent already knows.
+        #expect(markdown.contains("`?slug=` to"))
+        #expect(markdown.contains("`?\(PageLifetime.queryParameter)=` to give it a new"))
+        // The limitation is attributed to the client, not the server. This is the sentence
+        // that keeps a future reader from "simplifying" the section into "the server cannot
+        // do that", which is the exact shape of the bug this whole arrangement exists for.
+        #expect(
+            markdown.contains(
+                "Say it as a limitation of the tool rather than of the server"
+            )
+        )
+    }
+
+    /// The negative half of `documentsTheAmendRoute`, and the one that would rot silently.
+    ///
+    /// The document used to state four times that a page's lifetime could never change, in
+    /// prose confident enough to be quoted back at a user as policy. The server can change it
+    /// now. Every one of those sentences had to become a claim about the *client* — "no
+    /// command you can run" — and the failure mode of a future edit is drifting back to the
+    /// absolute, which reads fine, passes every other test here, and teaches an agent to
+    /// refuse something that will by then be possible.
+    ///
+    /// Phrases rather than whole sentences, because the point is the shape of the claim
+    /// rather than any particular wording of it.
+    @Test(arguments: [
+        "cannot be changed afterwards",
+        "there is no way to change it afterwards",
+        "the deadline cannot be changed",
+        "cannot be chosen later",
+    ])
+    func doesNotClaimALifetimeIsUnchangeable(phrase: String) {
+        #expect(!skillDocument.markdown.contains(phrase), "\(phrase)")
+    }
+
+    /// A rename frees the old name exactly as a delete does, and an agent that did not know
+    /// that would hand a user a rename as if it were free. Pinned as a sentence for the same
+    /// reason `documentsThatDeletionIsPermanent` is: it is the consequence no status code
+    /// carries, and the one that changes whether the agent should offer the operation at all.
+    @Test func documentsThatRenamingReleasesTheOldName() {
+        #expect(
+            skillDocument.markdown.contains(
+                "the old name is released the instant it commits, with no redirect"
+            )
+        )
+    }
+
     /// The consequence no status code can carry, pinned as exact sentences the way
     /// `documentsThePutDifference` is. A delete here frees the name rather than retiring it,
     /// so a page taken down is a URL that may one day serve a stranger's page — and it is
