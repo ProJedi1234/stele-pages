@@ -29,6 +29,25 @@ public enum PageContentType {
         } ?? ""
         return allowed[base]
     }
+
+    /// A short tag for a stored content type — "CSS", "PLAIN", "MARKDOWN" — or nil for HTML,
+    /// which is what a page is unless it says otherwise and so is worth no ink.
+    ///
+    /// Derived from the subtype rather than looked up in a second table keyed by the same
+    /// strings `allowed` is. A table would be a list of every content type this server
+    /// serves, sitting next to the list of every content type this server serves, and adding
+    /// a type would silently produce a page in the index labelled with nothing. There is
+    /// nothing here to keep in agreement with anything.
+    static func label(for stored: String) -> String? {
+        let base = stored.split(separator: ";").first.map {
+            $0.trimmingCharacters(in: .whitespaces).lowercased()
+        } ?? ""
+        guard base != "text/html" else { return nil }
+        // The subtype, which is the part that distinguishes these from each other — every
+        // allowed type is `text/…`, so the type half would be the same word on every badge.
+        guard let subtype = base.split(separator: "/").last, !subtype.isEmpty else { return nil }
+        return subtype.uppercased()
+    }
 }
 
 /// The JSON body both write routes answer with.
@@ -184,8 +203,35 @@ public func buildRouter(
 
     router.get(RouterPath("/\(ServerRoute.healthz)")) { _, _ -> String in "ok" }
 
-    router.get("/") { _, _ -> Response in
-        htmlResponse(status: .ok, html: landingPage(baseURL: configuration.baseURL))
+    // The one read on the public surface that touches the store without being addressed at a
+    // slug. Unauthenticated like every other read, which is a decision and not an inherited
+    // default: it publishes the live half of the namespace to anyone who loads the root URL.
+    // The README argues that out — slugs are already guessable by a script, and the index
+    // shows only pages that are still being served, so it costs a scanner time rather than
+    // telling it anything a scan would not.
+    router.get("/") { _, context -> Response in
+        // A store that cannot be read degrades the index rather than the page. Everything
+        // else here is documentation — how to publish, what the lifetimes are, where the
+        // skill lives — and all of it is still true and still worth serving while Postgres is
+        // down. A 500 would replace a working answer to "how do I use this" with nothing.
+        //
+        // The error is logged rather than swallowed: this is the one branch where the page
+        // looks fine and the server is not, so the signal has to come from somewhere.
+        let recent: [PageSummary]?
+        do {
+            recent = try await store.recent(limit: recentPageCount)
+        } catch {
+            context.logger.error(
+                "could not read the recent-pages index",
+                metadata: ["error": "\(error)"]
+            )
+            recent = nil
+        }
+
+        return htmlResponse(
+            status: .ok,
+            html: landingPage(baseURL: configuration.baseURL, recent: recent)
+        )
     }
 
     router.group(RouterPath(ServerRoute.pages))
@@ -982,54 +1028,5 @@ func notFoundPage() -> String {
     """
 }
 
-/// The landing page, and the server's own showcase for the shared stylesheet: whatever it
-/// demonstrates here is what an author can copy. It uses only names listed in
-/// `Stylesheet.componentClasses`, and only their bare forms — the tone modifiers
-/// (`.badge.ok`, `.callout.warn`, …) are real CSS but not part of that list, so reaching
-/// for one here would fail the drift test that keeps the list honest.
-///
-/// The `\(baseURL)/pages` adjacency is asserted by a test. Do not reformat it or break the
-/// interpolation away from the path.
-func landingPage(baseURL: String) -> String {
-    """
-    <!doctype html>
-    <html lang="en"><head><meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>stele</title>
-    <link rel="stylesheet" href="\(Stylesheet.path)"></head>
-    <body>
-    <h1>stele</h1>
-    <p class="muted">Publish an HTML file, get a readable link back.</p>
-    <pre><code>stele publish index.html</code></pre>
-    <p>The <code>stele</code> CLI holds the credential so the thing running it never has to.
-    Underneath, that is a <code>POST</code> to <code>\(baseURL)/pages</code> with a bearer
-    token — reachable with curl if you already hold one.</p>
-    <p>Returns a slug like <code>quiet-cedar-otter</code>, served at
-    <code>\(baseURL)/quiet-cedar-otter</code>. Add <code>?slug=my-page</code> to choose
-    your own.</p>
-    <p>A page expires \(PageLifetime.defaultDays) days after it is published unless you say
-    otherwise. Add <code>?\(PageLifetime.queryParameter)=30</code> for a different number of
-    days, or <code>?\(PageLifetime.queryParameter)=\(PageLifetime.neverKeyword)</code> to
-    keep it for good.</p>
-    <div class="grid">
-    <div class="card"><h3><span class="badge">POST</span> /pages</h3>
-    <p>Publish a page and get a fresh slug back, or ask for one with
-    <code>?slug=</code>. Choose how long it lives with
-    <code>?\(PageLifetime.queryParameter)=</code>.</p></div>
-    <div class="card"><h3><span class="badge">PUT</span> /pages/:slug</h3>
-    <p>Replace the page already published at a slug. Never creates one.</p></div>
-    <div class="card"><h3><span class="badge">DELETE</span> /pages/:slug</h3>
-    <p>Remove the page at a slug for good. The name goes back in the pool.</p></div>
-    </div>
-    <div class="callout">
-    <p>Pages you publish can share this server's look. Link the stylesheet from your
-    <code>&lt;head&gt;</code>:
-    <code>&lt;link rel="stylesheet" href="\(Stylesheet.path)"&gt;</code> — plain HTML needs
-    no classes, and dark mode follows the reader's system setting.</p>
-    <p>Publishing from an agent? <a href="\(PublishSkill.path)"><code>\(PublishSkill.path)</code></a>
-    is a skill document that teaches the whole contract — installing the CLI, the page
-    rules and the component classes — served by this server, so it cannot drift from it.</p>
-    </div>
-    </body></html>
-    """
-}
+// The landing page moved to `LandingPage.swift` when it stopped being a string constant and
+// started reading the store.

@@ -1,3 +1,4 @@
+import Foundation
 import Hummingbird
 import HummingbirdTesting
 import Testing
@@ -155,15 +156,42 @@ struct StylesheetTests {
     /// The drift guard that matters: a class renamed in the CSS leaves the built-in pages
     /// silently unstyled — still valid HTML, still a 200, just wrong-looking, which no
     /// status assertion anywhere would catch.
+    ///
+    /// All three states of the landing page's index are rendered, not just the populated one.
+    /// They emit different markup — a table inside `.scroll`, or a `.muted` paragraph — and
+    /// the two that are hardest to reach in a browser are the two nobody would notice had gone
+    /// unstyled. The populated fixture carries a non-HTML page so the badge branch renders too.
     @Test func builtInPagesOnlyUseDefinedClasses() {
-        let used = TestFixture.classNames(in: landingPage(baseURL: TestFixture.baseURL))
-            + TestFixture.classNames(in: notFoundPage())
+        let listed = [
+            PageSummary(
+                slug: Slug(unchecked: "quiet-cedar-otter"),
+                contentType: PageContentType.default,
+                createdAt: Date(timeIntervalSince1970: 0),
+                expiresAt: nil
+            ),
+            PageSummary(
+                slug: Slug(unchecked: "amber-willow-heron"),
+                contentType: "text/css; charset=utf-8",
+                createdAt: Date(timeIntervalSince1970: 0),
+                expiresAt: Date()
+            ),
+        ]
+
+        let used = [listed, [], nil].flatMap { recent in
+            TestFixture.classNames(
+                in: landingPage(baseURL: TestFixture.baseURL, recent: recent)
+            )
+        } + TestFixture.classNames(in: notFoundPage())
 
         // Both halves of the non-vacuity check: pages that used no classes would pass the
         // loop below without exercising anything, and an empty `componentClasses` would
         // make the two parameterised tests above run zero cases.
         #expect(!used.isEmpty)
         #expect(!Stylesheet.componentClasses.isEmpty)
+        // And specifically that the index rendered, rather than the fixture quietly producing
+        // a page with no table in it.
+        #expect(used.contains("scroll"))
+        #expect(used.contains("badge"))
 
         for name in used {
             #expect(Stylesheet.componentClasses.contains(name), "\(name)")

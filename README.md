@@ -67,6 +67,31 @@ Expiry adds nothing to that risk. A page past its deadline answers with the byte
 learn that a name *used to* be a page — which would otherwise hand it the publication
 history of the namespace for free.
 
+### The landing page lists what is published
+
+`GET /` shows the twenty most recently published live pages by name, unauthenticated, to
+anybody who loads it. That is a deliberate reversal of the "willing to scan" framing above:
+the live half of the namespace is no longer merely enumerable, it is *enumerated*, and the
+cost of obtaining it drops from a scanning campaign to one request.
+
+It is worth being exact about what that does and does not give up, because the two are
+easily conflated:
+
+- It does not weaken any access control, because there was none. A page was always readable
+  by anyone holding — or guessing — its slug.
+- It does not expose expired pages. The index carries the same `expires_at > now()`
+  predicate every read does, so the publication history the uniform 404 protects is still
+  not on offer. What the index shows is exactly the set of pages that a `GET` would serve.
+- It does remove obscurity as a stopgap. "Nobody will bother scanning for it" was never a
+  security property, but it was a real amount of friction, and this deletes it. A page whose
+  *existence* is sensitive — never mind its contents — does not belong on this server, and
+  now visibly so.
+
+There is no unlisted option, and adding one would be a schema change plus a query parameter
+plus a default to argue about. If this deployment wants the index gone, the honest lever is
+to delete the call in `buildRouter`'s `GET /` handler rather than to add a flag that makes
+"is this page listed?" a thing every publisher has to think about.
+
 ## Running it locally
 
 ```sh
@@ -146,7 +171,7 @@ happens to run the app, which is rarely the machine you chose for durable storag
 
 | Route              | Auth   | Behaviour                                              |
 | ------------------ | ------ | ------------------------------------------------------ |
-| `GET /`            | none   | Usage page                                             |
+| `GET /`            | none   | Usage page, and an index of recently published pages   |
 | `GET /healthz`     | none   | `ok`                                                   |
 | `GET /:slug`       | none   | The stored page, or a 404 page if it's absent or expired |
 | `GET /assets/stele.css` | none | The shared stylesheet (see "A shared look")         |

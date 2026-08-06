@@ -144,9 +144,18 @@ against real Postgres, and it is there because the expiry predicates exist **onl
 `InMemoryPageStore.hasExpired` is independent hand-written Swift, so an inverted comparison
 in `PageStore` is invisible to every other test. Inverting `fetch`'s makes every page 404
 from the moment it is published; inverting `deleteExpired`'s makes every upload destroy
-every live page that carries a deadline. Both are silent, and the second is data loss. It
-seeds a past, a future and a NULL deadline and pins `insert`, `fetch`, `update` and
-`deleteExpired` against all three.
+every live page that carries a deadline; inverting `recent`'s turns the landing page into a
+list of exactly the pages that no longer exist. All three are silent, the second is data
+loss and the third is a disclosure. It seeds a past, a future and a NULL deadline and pins
+`insert`, `fetch`, `update`, `recent` and `deleteExpired` against all three — `recent`
+before the reclaiming delete runs, so the expired row is still physically present and the
+assertion is about the query rather than about cleanup.
+
+`InMemoryPageStore` stamps each stored page with a monotonic counter rather than one fixed
+date, because the landing page's index is an *order* and two pages seeded in one test would
+otherwise tie. `update` builds its `Page` by hand precisely so it cannot pick up a new
+stamp: `created_at` survives a replacement in the SQL, so a page that is re-uploaded must
+not jump to the top of the index. Only `seed` and `insert` go through the stamping helper.
 
 It also covers `ClientStore` against real Postgres, which is where its type claims can
 actually be checked: that `token_hash` binds as `Data` — PostgresNIO encodes a `[UInt8]`
@@ -292,6 +301,21 @@ Don't "fix" these without a reason; the README argues them out in full.
 
 - **Reads are unauthenticated.** Slugs are pretty, not secret — an 11.8M keyspace is
   scannable. Access control would need a real auth check, not a longer slug.
+- **The landing page publishes the live namespace, and that is the point of it.** `GET /`
+  lists the twenty most recently published live pages by name, unauthenticated. It reverses
+  the "guessable only to someone willing to scan" framing the slug design rests on, and the
+  README argues out what that does and does not cost. Two things must stay true. `recent`
+  carries the same `expires_at > now()` predicate every other read does — an index listing
+  expired rows would hand over the publication history that the uniform 404 exists to
+  withhold, which is the one leak this feature must not introduce. And `PageSummary` must
+  keep having nowhere to put a body: twenty rows of up to `maxPageBytes` is a megabyte-scale
+  read to render a list of links, and none of those bytes reach the page.
+- **The landing page degrades rather than 500s.** A store that cannot be read renders "the
+  index is unavailable" and keeps the rest of the document, which is publishing
+  documentation that is still true while Postgres is down. It is not swallowed — the handler
+  logs at error level, because this is the one branch where the page looks fine and the
+  server is not. "Nothing published yet" is a *different* string on purpose: an empty index
+  is a fact about the server, and a server that cannot see its own table does not have it.
 - **Every 404 on the public read surface is identical.** Malformed, reserved, absent and
   *expired* slugs return the same page so a scanner can't map the namespace faster than
   guessing — an expired page answering differently would reveal that a name used to be a
