@@ -23,7 +23,8 @@ public enum PageUpdateOutcome: Sendable, Equatable {
 /// rather than something every conformer has to pretend to implement.
 ///
 /// The seam is storage primitives only — insert-if-free, update-if-present,
-/// delete-if-live, and delete-what-has-expired — with the requested-vs-generated policy,
+/// delete-if-live, delete-what-has-expired, and list-the-live-ones — with the
+/// requested-vs-generated policy,
 /// the collision-retry loop, and the order reclamation runs in living in the extension
 /// below, shared by every conformer. That keeps the policy written (and tested) once: a
 /// conformer that only implements the primitives cannot drift from the retry semantics.
@@ -41,6 +42,28 @@ public protocol PageStoring: Sendable {
     /// of time; a conformer that returned it and left the filtering to the router would
     /// serve expired pages for as long as nobody happened to publish.
     func fetch(slug: Slug) async throws -> Page?
+
+    /// The most recently published live pages, newest first, at most `limit` of them.
+    ///
+    /// "Live" means what it means everywhere else in this protocol, and here the cost of
+    /// disagreeing is not a wrong answer but a leak: an index that listed expired rows would
+    /// hand a reader the names of pages that no longer exist, which is the publication
+    /// history the uniform 404 is written to withhold. The index and the read surface have to
+    /// name the same set of pages.
+    ///
+    /// Ordered by publication, not by last write. `created_at` survives a `PUT` — a
+    /// replacement is a new body at an old address — so re-uploading a page does not push it
+    /// back to the top of the list. That is the honest reading of "recent" for a list of
+    /// links, and it also means the order cannot be churned by whoever edits most often.
+    ///
+    /// Returns summaries rather than `Page`s because the body is the one thing a list must
+    /// not read: see `PageSummary`.
+    ///
+    /// Given no default implementation, for the reason `deleteExpired` is given none. A
+    /// default returning `[]` is a no-op that every conformer inherits in silence, and the
+    /// symptom — a landing page that renders an empty index against a table full of pages —
+    /// looks exactly like a server nobody has published to yet.
+    func recent(limit: Int) async throws -> [PageSummary]
 
     /// Stores a page if the slug is free, as one atomic step — the check and the write
     /// must not leave a window where two concurrent uploads both see the slug as free.

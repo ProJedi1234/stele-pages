@@ -30,8 +30,23 @@ actor InMemoryPageStore: PageStoring {
     /// to genuine exhaustion — this is how the 503 path is driven.
     private let failInserts: Bool
 
-    init(failInserts: Bool = false) {
+    /// When true, `recent` throws, which is the only way to reach the landing page's
+    /// degraded index — the branch where the store is unreachable and the page has to render
+    /// anyway.
+    private let failRecent: Bool
+
+    /// Hands out a distinct, increasing `created_at` to each stored page.
+    ///
+    /// A counter rather than `Date()`: two pages seeded in the same test can land in the same
+    /// millisecond, and the thing under test is an *order*. Postgres has the same hazard for
+    /// real — `now()` is transaction time — which is why `PageStore.recent` breaks ties on
+    /// slug; here the counter removes ties entirely, so a router test that asserts newest-first
+    /// is asserting the ordering and not the tie-break.
+    private var clock = 0
+
+    init(failInserts: Bool = false, failRecent: Bool = false) {
         self.failInserts = failInserts
+        self.failRecent = failRecent
     }
 
     /// Arranges a page for fetch/conflict tests, with a synthesised `createdAt`.
@@ -90,25 +105,51 @@ actor InMemoryPageStore: PageStoring {
         slug: Slug, body: String, contentType: String?, clientID: Int64?
     ) async throws -> PageUpdateOutcome {
         guard let existing = pages[slug], !hasExpired(existing) else { return .noSuchPage }
-        // No `createdAt` theater: `page` stamps every entry with the same fixed date, so
-        // "preserved" and "reset" are indistinguishable here — the real created_at
-        // guarantee lives in `PageStore`'s SQL and only a Postgres test can check it.
-        // `expiresAt` is different: it is carried across from the existing row on purpose,
-        // and a test can see the difference, because the deadline a PUT reports is part of
-        // the wire contract.
+        // `createdAt` and `expiresAt` are both carried across from the existing row, matching
+        // the store's `UPDATE`, which sets neither column. Both are observable now that the
+        // index exists: the deadline a PUT reports has always been part of the wire contract,
+        // and `created_at` decides where a replaced page sits in the landing page's list — a
+        // fake that restamped it would let a replacement jump to the top here and stay put
+        // against real Postgres.
         //
         // `clientID` goes the other way — assigned, not carried, mirroring the store's
         // `client_id = …`: the column is who last wrote the page. A fake that preserved it
         // would let `AttributionTests.updatingReattributesThePage` pass against the store and
         // fail against reality, or the reverse.
-        pages[slug] = page(
+        pages[slug] = Page(
             slug: slug,
             body: body,
             contentType: contentType ?? existing.contentType,
+            createdAt: existing.createdAt,
             expiresAt: existing.expiresAt,
             clientID: clientID
         )
         return .replaced(expiresAt: existing.expiresAt)
+    }
+
+    /// Mirrors `PageStore.recent`: live rows only, newest first, capped at `limit`, and no
+    /// body — the summary type has nowhere to put one.
+    ///
+    /// The expiry filter is the part worth writing by hand rather than reusing `fetch`: it is
+    /// the same predicate, and the reason it has to be the same one is that an index listing
+    /// expired pages would disclose the namespace's history. A fake that skipped the filter
+    /// would make the test asserting that pass against nothing.
+    func recent(limit: Int) async throws -> [PageSummary] {
+        if failRecent { throw InMemoryStoreUnavailable() }
+        return pages.values
+            .filter { !hasExpired($0) }
+            // Descending by `createdAt`, which the counter above makes a total order, so the
+            // tie-break `PageStore.recent` needs is not simulated here — see `clock`.
+            .sorted { $0.createdAt > $1.createdAt }
+            .prefix(limit)
+            .map {
+                PageSummary(
+                    slug: $0.slug,
+                    contentType: $0.contentType,
+                    createdAt: $0.createdAt,
+                    expiresAt: $0.expiresAt
+                )
+            }
     }
 
     func delete(slug: Slug) async throws -> Bool {
@@ -139,16 +180,28 @@ actor InMemoryPageStore: PageStoring {
         return expiresAt <= moment
     }
 
+    /// Builds a freshly-published page, stamping it with the next tick of `clock`.
+    ///
+    /// Only `seed` and `insert` go through here — the two ways a page comes into existence.
+    /// `update` builds its own `Page` precisely so it cannot pick up a new `createdAt`.
     private func page(
         slug: Slug, body: String, contentType: String, expiresAt: Date?, clientID: Int64?
     ) -> Page {
-        Page(
+        clock += 1
+        return Page(
             slug: slug,
             body: body,
             contentType: contentType,
-            createdAt: Date(timeIntervalSince1970: 0),
+            // Epoch-relative and one second apart: far enough in the past that every page in
+            // these tests reads as years old, which is a stable label — a stamp near `now`
+            // would render as "just now" or "1m ago" depending on how long the suite took.
+            createdAt: Date(timeIntervalSince1970: TimeInterval(clock)),
             expiresAt: expiresAt,
             clientID: clientID
         )
     }
 }
+
+/// What the fake throws when it is asked to fail — the landing page's degraded-index branch
+/// is reachable no other way.
+struct InMemoryStoreUnavailable: Error {}

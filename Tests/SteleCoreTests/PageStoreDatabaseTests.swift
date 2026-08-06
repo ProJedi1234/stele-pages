@@ -828,19 +828,21 @@ struct PageStoreDatabaseTests {
         }
     }
 
-    /// The two expiry predicates, executed as SQL — the only place they ever are.
+    /// The expiry predicates, executed as SQL — the only place they ever are.
     ///
     /// Everything else that exercises expiry runs against `InMemoryPageStore`, whose
     /// `hasExpired` is hand-written Swift sharing nothing with `PageStore`'s `WHERE` clauses,
-    /// so it cannot notice a comparison pointing the wrong way. Invert either one and the rest
-    /// of the suite still passes: `expires_at < now()` in the fetch makes every page published
-    /// under the default lifetime 404 from the instant it is created, and `expires_at > now()`
-    /// in the delete makes every upload destroy every *live* page that carries a deadline.
-    /// Neither raises an error anywhere, and the second is silent data loss.
+    /// so it cannot notice a comparison pointing the wrong way. Invert any one of them and the
+    /// rest of the suite still passes: `expires_at < now()` in the fetch makes every page
+    /// published under the default lifetime 404 from the instant it is created,
+    /// `expires_at > now()` in the delete makes every upload destroy every *live* page that
+    /// carries a deadline, and the same inversion in `recent` turns the landing page into a
+    /// list of exactly the pages that no longer exist. None of the three raises an error
+    /// anywhere; the second is silent data loss and the third is a silent disclosure.
     ///
     /// Three rows — a past deadline, a future one, and NULL — are the smallest fixture that
-    /// pins the direction of both comparisons and the NULL branch at once. This is also the
-    /// only Postgres coverage `insert`, `update` and `deleteExpired` have.
+    /// pins the direction of every comparison and the NULL branch at once. This is also the
+    /// only Postgres coverage `insert`, `update`, `recent` and `deleteExpired` have.
     @Test func expiryPredicatesHideReclaimAndSpareTheRightRows() async throws {
         try await PostgresFixture.withThrowawaySchema { database in
             let store = database.store
@@ -878,6 +880,25 @@ struct PageStoreDatabaseTests {
             let permanentPage = try await store.fetch(slug: permanent)
             #expect(permanentPage?.body == "<h1>permanent</h1>")
             #expect(permanentPage?.expiresAt == nil)
+
+            // The index carries the same predicate, and this is the assertion it exists for.
+            // Inverting it here does not produce a 404 or a 500 — it produces a landing page
+            // that lists precisely the pages no reader can fetch, which is the namespace's
+            // publication history rendered as a table. The expired row is still physically
+            // present at this point, so this is a statement about the query.
+            //
+            // Order is newest-first by `created_at`, and the three inserts above ran as three
+            // separate statements, so their transaction timestamps genuinely differ: the
+            // permanent page was inserted last and must come first.
+            let index = try await store.recent(limit: recentPageCount)
+            #expect(index.map(\.slug) == [permanent, live])
+            #expect(index.first?.expiresAt == nil)
+            #expect(Self.isNear(index.last?.expiresAt, deadline))
+            #expect(index.first?.contentType == PageContentType.default)
+            // `limit` reaches the SQL rather than being applied after the fact — a `LIMIT`
+            // bound as a parameter is the one part of that query a type mismatch could break.
+            #expect(try await store.recent(limit: 1).map(\.slug) == [permanent])
+            #expect(try await store.recent(limit: 0).isEmpty)
 
             // The same predicate on the write side, so `PUT` and `GET` agree about which
             // pages exist — and the expired row is not resurrected with a new body.

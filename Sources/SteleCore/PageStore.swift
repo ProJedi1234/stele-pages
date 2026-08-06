@@ -26,6 +26,33 @@ public struct Page: Sendable, Equatable {
     public var clientID: Int64?
 }
 
+/// One page as the index reports it: everything the landing page shows about a page, and
+/// nothing else.
+///
+/// A type of its own rather than a `Page` carrying an empty body, and the omission is the
+/// entire reason it exists. `Page` holds up to `maxPageBytes` — a megabyte by default — and
+/// the index reads twenty rows at once, so a shape that *could* hold a body is one that a
+/// later `SELECT *` would quietly fill twenty times over. There is nothing here to fill.
+///
+/// `clientID` is absent for a second reason, and it is not an oversight either: who
+/// published a page is the operator's question, answered by the admin routes, and this
+/// struct is rendered into a page anyone can load.
+public struct PageSummary: Sendable, Equatable {
+    public var slug: Slug
+    public var contentType: String
+    public var createdAt: Date
+    /// When the page stops being served, or nil if it never does — the same vocabulary
+    /// `Page.expiresAt` uses, because it is read out of the same column.
+    public var expiresAt: Date?
+
+    public init(slug: Slug, contentType: String, createdAt: Date, expiresAt: Date?) {
+        self.slug = slug
+        self.contentType = contentType
+        self.createdAt = createdAt
+        self.expiresAt = expiresAt
+    }
+}
+
 public enum PageStoreError: Error, Equatable {
     /// The caller asked for a specific slug that is already taken.
     case slugTaken(Slug)
@@ -84,6 +111,58 @@ public struct PageStore: Sendable {
             )
         }
         return nil
+    }
+
+    /// The most recently published live pages, newest first.
+    public func recent(limit: Int) async throws -> [PageSummary] {
+        // The deadline predicate is the one `fetch` carries, and this is the route where
+        // getting it wrong stops being a bug and becomes a disclosure. An index that listed
+        // expired rows would tell a reader which names *used to* be pages — the publication
+        // history of the namespace, which is the exact thing the byte-identical 404 exists to
+        // withhold. Every surface in this file agrees on which pages exist; this one has to.
+        //
+        // `body` is deliberately not selected. Twenty rows of up to `maxPageBytes` each is a
+        // megabyte-scale read to render a list of links, and none of those bytes reach the
+        // page. `PageSummary` has nowhere to put them, which is what keeps it that way.
+        //
+        // `ORDER BY created_at DESC` rides `pages_created_at_idx`, created by version 1 with
+        // exactly that ordering — so this is a limited index scan and not a sort of the whole
+        // table, and the landing page needs no migration of its own.
+        //
+        // The `slug` tie-break is not decoration. `created_at` defaults to `now()`, which in
+        // Postgres is *transaction* start time: pages inserted by one transaction share it to
+        // the microsecond, and without a second key the planner may return them in either
+        // order on successive loads. A list of links that reshuffles itself between refreshes
+        // reads as a bug in the server rather than as a tie.
+        let rows = try await client.query(
+            """
+            SELECT slug, content_type, created_at, expires_at
+            FROM pages
+            WHERE expires_at IS NULL OR expires_at > now()
+            ORDER BY created_at DESC, slug ASC
+            LIMIT \(limit)
+            """,
+            logger: logger
+        )
+
+        var summaries: [PageSummary] = []
+        for try await (slug, contentType, createdAt, expiresAt) in rows.decode(
+            (String, String, Date, Date?).self, context: .default
+        ) {
+            summaries.append(
+                PageSummary(
+                    // `Slug(unchecked:)`, which is what it is for: every one of these passed
+                    // `Slug(custom:)` on the way into the table.
+                    slug: Slug(unchecked: slug),
+                    contentType: contentType,
+                    createdAt: createdAt,
+                    // `Date?` for the same permanent reason `fetch` decodes it that way: a
+                    // page published with `?ttl=never` holds NULL here forever.
+                    expiresAt: expiresAt
+                )
+            )
+        }
+        return summaries
     }
 
     /// - Returns: true if the row was inserted, false if the slug was already taken.

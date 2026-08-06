@@ -99,4 +99,29 @@ struct UploadContentTypeTests {
             }
         }
     }
+
+    /// Every type this server accepts gets a badge in the landing page's index, except HTML,
+    /// which gets none because it is what a page is by default.
+    ///
+    /// Driven off `PageContentType.allowed` rather than a list of the types that exist today,
+    /// which is the whole reason `label(for:)` derives its answer from the subtype instead of
+    /// looking it up in a second table. A table would let a newly allowed type render a badge
+    /// with nothing in it, and nothing would fail. Adding one here fails this instead — and
+    /// passes the moment the derivation covers it.
+    @Test func everyAcceptedTypeHasABadgeExceptHTML() {
+        for stored in PageContentType.allowed.values {
+            let label = PageContentType.label(for: stored)
+            if stored == PageContentType.default {
+                #expect(label == nil, "HTML is the default and needs no badge")
+            } else {
+                #expect(label?.isEmpty == false, "no badge for \(stored)")
+                // Uppercase, so a badge cannot arrive looking like prose.
+                #expect(label == label?.uppercased())
+            }
+        }
+        // The parameter is a *stored* type, which always carries a charset. Reading the label
+        // off the full header rather than a pre-split subtype is what makes that safe.
+        #expect(PageContentType.label(for: "text/css; charset=utf-8") == "CSS")
+        #expect(PageContentType.label(for: "text/html; charset=utf-8") == nil)
+    }
 }

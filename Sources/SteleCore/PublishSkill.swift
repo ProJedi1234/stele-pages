@@ -485,7 +485,7 @@ struct PublishSkill: Sendable {
 
         | Route | Auth | Behaviour |
         | --- | --- | --- |
-        | `GET /` | none | Usage page |
+        | `GET /` | none | Usage page, and a public index of recently published pages |
         | `GET /\#(ServerRoute.healthz)` | none | `ok` |
         | `GET /:slug` | none | The stored page, or a 404 page if it is absent or expired |
         | `GET \#(Stylesheet.path)` | none | The shared stylesheet |
@@ -515,6 +515,10 @@ struct PublishSkill: Sendable {
         ## What this is not
 
         - **Reads are unauthenticated and slugs are guessable.** Nothing private goes here.
+        - **Every page you publish is listed publicly.** `GET /` shows the most recently
+          published live pages by name, so a page is discoverable the moment it exists — not
+          only by someone who already has the link. There is no unlisted option. If the user
+          would not want the page's *name* on a public index, do not publish it here.
         - **The credential is not yours and never becomes yours.** No step of this document
           ends with you holding a token, and one that seems to is a step you have
           misunderstood.
