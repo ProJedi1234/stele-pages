@@ -84,14 +84,25 @@ pins the sentence that says whose step `stele auth login` is. The skill's job is
 the credential out of the model's reach; prose that hands it back would pass every other
 test in the suite.
 
-`PATCH /pages/:slug` lands in the same trap and is resolved the same way — see
-`documentsTheAmendRoute`, which pins the route-table row, the sentence saying no `stele`
-command runs it, and the sentence attributing that to the *tool* rather than the server. Its
-negative counterpart `doesNotClaimALifetimeIsUnchangeable` is the one to keep: the document
-used to state four separate times that a lifetime could never change, and every one of those
-had to become a claim about the client ("no command you can run"). A future edit drifting
-back to the absolute would read fine, pass everything else here, and teach an agent to refuse
-something the server does.
+`PATCH /pages/:slug` was in that trap and is now out of it, which is the more instructive
+half. `documentsTheAmendRoute` used to pin the sentence saying no `stele` command ran the
+verb, plus the sentence attributing that absence to the *tool* rather than the server —
+honest wording, and both became lies the day `stele amend` shipped. It now pins the command
+and the two things an agent gets wrong by carrying over what it knows from `publish`: that
+omitting `--ttl` here leaves the deadline alone rather than applying the default, and that
+dropping `--slug` is not the escape from a `409` that it is on a publish.
+
+Its negative counterpart `doesNotClaimALifetimeIsUnchangeable` is the one to keep, and it has
+now grown twice for the same reason. The document first stated four times that a lifetime
+could never change; each of those became a claim about the client ("no command you can run"),
+which was true until it wasn't. **The client-scoped hedge is not a safer way to say it** — it
+is the same claim with a shorter shelf life, so both spellings are in the sieve. A future edit
+drifting back to either would read fine, pass everything else here, and teach an agent to
+refuse something it could do.
+
+One mechanical constraint that suite learned the hard way: the markdown is a wrapped raw
+string, so an assertion phrase that straddles a line break cannot be pinned at all. Prose
+carrying an assertion gets reflowed to keep the claim on one line — not the reverse.
 
 `documentsTheDeleteRoute` is where those two jobs pull against each other, and the shape it
 settled on is deliberate. `DELETE /pages/:slug` exists on the server, but the CLI ships no

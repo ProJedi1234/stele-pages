@@ -420,7 +420,7 @@ struct PublishSkillTests {
     /// `command not found` and no instruction covering it.
     @Test(arguments: [
         "stele auth status", "stele auth login", "stele auth logout", "stele publish",
-        "stele update", "stele skill", "stele admin clients",
+        "stele update", "stele amend", "stele skill", "stele admin clients",
     ])
     func documentsEveryCommandTheAgentNeeds(command: String) {
         #expect(skillDocument.markdown.contains(command), "\(command)")
@@ -616,18 +616,24 @@ struct PublishSkillTests {
         #expect(!markdown.contains("| `204` |"))
     }
 
-    /// `PATCH` is the delete row's problem a second time, and it is settled the same way:
-    /// the route table has to name the verb, because a verb missing from that table is one
-    /// the agent will not use, and the prose has to say in the same breath that no command
-    /// runs it. Naming it and stopping there is the failure — the only way to act on the row
-    /// would be to go find a credential.
+    /// `PATCH` was the delete row's problem — a verb the server had and the client could not
+    /// reach — right up until `stele` grew `amend`, and this test is what that arrival turned
+    /// over. The route row still has to be here, for the reason the delete row's does: a verb
+    /// missing from the table is one the agent will not use. What changed is the prose beside
+    /// it, which said in so many words that no command ran it.
     ///
-    /// Where it differs from delete is what the agent should *say*. A user asking to change a
-    /// deadline has no workaround at all: republishing over the name is a `409` and there is
-    /// no delete command to clear it first. So the section has to be honest that this is the
-    /// tool lagging the server rather than the server refusing — the distinction the `--ttl`
-    /// incident turned on, where prose describing a limitation that had stopped existing read
-    /// as policy. When `stele` grows these commands, this test is where to start.
+    /// So the assertions invert. The old ones pinned an absence — "**`stele` has no rename
+    /// command and no retime command**", and the sentence attributing that absence to the tool
+    /// rather than the server — and both are now the lie they were written to prevent. In their
+    /// place: the command itself, and the two things about it an agent gets wrong by carrying
+    /// over what it knows from `publish`.
+    ///
+    /// The first is `--ttl`'s inverted default. Omitting it on a publish takes the server's
+    /// default; omitting it here means *leave the deadline alone*, and an agent that assumed
+    /// otherwise would report a rename as having re-dated a permanent page — or, worse, avoid
+    /// renaming one for fear that it had. The second is that `--slug` has no escape hatch here:
+    /// on a publish a `409` is answered by dropping the flag and taking a generated name, and
+    /// on an amendment dropping it means asking for no rename at all.
     @Test func documentsTheAmendRoute() {
         let markdown = skillDocument.markdown
         #expect(
@@ -635,20 +641,46 @@ struct PublishSkillTests {
                 "| `PATCH /\(ServerRoute.pages)/:slug` | `\(ClientScope.publish.rawValue)` |"
             )
         )
-        #expect(markdown.contains("**`stele` has no rename command and no retime command**"))
-        // Both query parameters are named, because the row is the only place an agent
-        // learns the verb takes them — and `?ttl=` here is a different contract from
-        // `?ttl=` on POST, which is the one an agent already knows.
-        #expect(markdown.contains("`?slug=` to"))
-        #expect(markdown.contains("`?\(PageLifetime.queryParameter)=` to give it a new"))
-        // The limitation is attributed to the client, not the server. This is the sentence
-        // that keeps a future reader from "simplifying" the section into "the server cannot
-        // do that", which is the exact shape of the bug this whole arrangement exists for.
+        // The command, named as something the agent runs. `documentsEveryCommandTheAgentNeeds`
+        // proves the string is somewhere in the document; this proves the section about
+        // renaming is where it is.
+        #expect(markdown.contains("`stele amend` changes a page's name, its deadline, or both"))
+        // Both query parameters stay named in the route row, because that row is the only
+        // place an agent learns the verb takes them.
+        #expect(markdown.contains("Renames a page with `?slug=`"))
+        #expect(markdown.contains("retimes it with `?\(PageLifetime.queryParameter)=`"))
+        // The inverted default, pinned as a sentence. This is the one claim in the section
+        // whose loss would be silent: everything else here fails loudly the first time an
+        // agent tries it, and this one produces a page with a deadline nobody chose.
         #expect(
             markdown.contains(
-                "Say it as a limitation of the tool rather than of the server"
+                "Omitting `\(SteleCLI.ttlFlag)` leaves the existing deadline exactly where it is"
             )
         )
+        // And the missing escape hatch on a 409, which reads as an oversight rather than a
+        // rule unless it is said outright.
+        //
+        // Asserted as one contiguous phrase, which is a constraint on the *document*: the
+        // markdown is a wrapped raw string, so a claim that straddles a line break cannot be
+        // pinned at all. This one already failed that way once. Prose carrying an assertion
+        // has to be reflowed to keep it on a single line, not the other way round.
+        #expect(
+            markdown.contains(
+                "`\(SteleCLI.slugFlag)` is not an escape here the way it is on a publish"
+            )
+        )
+        // The whole mitigation for a client older than this command, and the reason
+        // `minimumCLIVersion` was deliberately *not* raised when `amend` shipped: the wire
+        // contract did not move, so gating every write — including the publishes that still
+        // work perfectly — would have been a disproportionate answer to a missing subcommand.
+        // What an old client gets instead is an ArgumentParser error carrying no exit code
+        // from the table below, and this sentence is the only thing that tells an agent the
+        // fix is a reinstall rather than a rewording. Delete it and the failure becomes
+        // indistinguishable from a malformed invocation.
+        #expect(
+            markdown.contains("saying it does not recognise the command, the installed")
+        )
+        #expect(markdown.contains(SteleCLI.installCommand))
     }
 
     /// The negative half of `documentsTheAmendRoute`, and the one that would rot silently.
@@ -668,6 +700,15 @@ struct PublishSkillTests {
     /// the four it was written against. A code review caught it, not the suite. The lesson is
     /// that the list is a sieve rather than a proof — when a claim about permanence changes,
     /// read the document, then add whatever wording you found here.
+    /// The list grew a second time, and the reason is worth recording because it is the same
+    /// lesson at one remove. When the server learned to retime a page, every absolute claim
+    /// here became a claim about the *client* — "no command you can run", "nothing you can
+    /// run changes it" — which was the honest wording for exactly as long as that was true.
+    /// `stele amend` shipped, and those sentences turned into the identical failure the
+    /// absolutes had been: prose confident enough to be quoted back at a user as policy,
+    /// describing a limitation that had stopped existing. The client-scoped hedge is not a
+    /// safer way to say it; it is the same claim with a shorter shelf life, so both spellings
+    /// live in the sieve now.
     @Test(arguments: [
         "cannot be changed afterwards",
         "there is no way to change it afterwards",
@@ -675,6 +716,9 @@ struct PublishSkillTests {
         "cannot be chosen later",
         "fixed at publication",
         "fixed when it is published",
+        "no command you can run",
+        "nothing you can run changes it",
+        "still chosen once, at publication",
     ])
     func doesNotClaimALifetimeIsUnchangeable(phrase: String) {
         #expect(!skillDocument.markdown.contains(phrase), "\(phrase)")
