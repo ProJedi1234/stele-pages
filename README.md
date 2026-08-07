@@ -405,11 +405,13 @@ Expiry is enforced in two places, for two different reasons:
 - **On read, for correctness.** The fetch query treats a page past its deadline as absent,
   so it stops being served at exactly the right moment regardless of cleanup — and it 404s
   with the same bytes every other miss does.
-- **On write, to reclaim.** Each successful upload first deletes expired rows, which is
-  what returns their slugs to the pool. A partial index (`WHERE expires_at IS NOT NULL`)
-  keeps that cheap, since permanent pages never enter it. There is no cron and no
-  scheduler: cleanup frequency scales with usage, and an idle server holding invisible
-  expired rows is fine, because nothing can read them anyway.
+- **On write, to reclaim.** A `POST` and a `PATCH` each delete expired rows before doing
+  anything else, which is what returns their slugs to the pool — those are the two verbs
+  that need a name freed *now*, one to claim it and one to move onto it. `PUT` and `DELETE`
+  address a name that already exists and reclaim nothing. A partial index
+  (`WHERE expires_at IS NOT NULL`) keeps that cheap, since permanent pages never enter it.
+  There is no cron and no scheduler: cleanup frequency scales with usage, and an idle
+  server holding invisible expired rows is fine, because nothing can read them anyway.
 
 A `NULL` expiry means "never expires", and that is the only thing it means: it is what
 `?ttl=never` stores, and nothing else produces one.

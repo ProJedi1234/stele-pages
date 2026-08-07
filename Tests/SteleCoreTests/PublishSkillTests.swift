@@ -662,11 +662,19 @@ struct PublishSkillTests {
     ///
     /// Phrases rather than whole sentences, because the point is the shape of the claim
     /// rather than any particular wording of it.
+    /// `fixed at publication` is the fifth phrase and the one that proves the point. It sat in
+    /// the `stele update` section through the whole change and survived every other assertion
+    /// here, because this test matches phrases and that sentence was worded differently from
+    /// the four it was written against. A code review caught it, not the suite. The lesson is
+    /// that the list is a sieve rather than a proof — when a claim about permanence changes,
+    /// read the document, then add whatever wording you found here.
     @Test(arguments: [
         "cannot be changed afterwards",
         "there is no way to change it afterwards",
         "the deadline cannot be changed",
         "cannot be chosen later",
+        "fixed at publication",
+        "fixed when it is published",
     ])
     func doesNotClaimALifetimeIsUnchangeable(phrase: String) {
         #expect(!skillDocument.markdown.contains(phrase), "\(phrase)")

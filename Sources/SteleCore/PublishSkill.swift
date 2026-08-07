@@ -356,6 +356,13 @@ struct PublishSkill: Sendable {
         lifetime nobody chose. You do not send that parameter yourself; `\#(SteleCLI.ttlFlag)`
         is how it gets there.
 
+        That table is the rule **when a page is being published**. On
+        `PATCH /\#(ServerRoute.pages)/:slug` the first row does not apply: an omitted
+        `?\#(PageLifetime.queryParameter)=` there means *leave the deadline exactly as it is*,
+        not \#(PageLifetime.defaultDays) days. The other two rows mean what they say on both
+        verbs. Read that difference carefully before reporting what a rename did to a page's
+        lifetime — on a permanent page the two readings differ by the page's whole future.
+
         The expiry belongs to the page, not to its current contents: **replacing a page does
         not extend it**, which is why `stele update` has no `\#(SteleCLI.ttlFlag)` and the
         server refuses that query parameter on a `PUT` with a `400` rather than accepting it
@@ -391,8 +398,10 @@ struct PublishSkill: Sendable {
         stele update my-page page.html
         ```
 
-        Reports the page's unchanged `expires` in the same body a publish answers with: the
-        lifetime was fixed at publication and an update does not move it.
+        Reports the page's unchanged `expires` in the same body a publish answers with: an
+        update does not move a deadline. Report the value it prints rather than the one the
+        original publish printed — those agree today, and would stop agreeing the moment
+        anything retimed the page.
 
         `stele update <slug> <file>` **never creates**: exit `7` means nothing is published
         at that name yet — or that it has expired — so `stele publish page.html --slug my-page`

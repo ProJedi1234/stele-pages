@@ -50,7 +50,8 @@ public enum PageContentType {
     }
 }
 
-/// The JSON body both write routes answer with.
+/// The JSON body every write route that returns one answers with — POST, PUT and PATCH.
+/// `DELETE` is the exception and answers `204` with nothing.
 ///
 /// The document at `GET /skill` shows a sample of this body, but the sample cannot promise
 /// a key *order*: `JSONEncoder` emits a keyed container's members in an unspecified order,
@@ -1007,13 +1008,16 @@ private func jsonResponse(
     return Response(status: status, headers: headers, body: .init(byteBuffer: body))
 }
 
-/// The `{slug, url, expires}` body both writes answer with. POST adds `Location` and a
-/// `201`; PUT returns `200` without one, since the caller already knows the address.
+/// The `{slug, url, expires}` body the three body-returning writes answer with. POST adds
+/// `Location` and a `201`; PUT and PATCH return `200` without one — PUT because the caller
+/// already knows the address, PATCH because the body's `url` is where a caller reads a moved
+/// page's new one. (DELETE answers `204` and no body at all.)
 ///
-/// `expiresAt` is undefaulted deliberately. There are exactly two call sites and they get
-/// the value from different places — POST from the lifetime it just parsed, PUT from what
-/// the store reported — so a default would let either one silently answer "permanent" for a
-/// page that is not.
+/// `expiresAt` is undefaulted deliberately, and the case for that got stronger as the call
+/// sites multiplied: all three get the value from a different place — POST from the lifetime
+/// it just parsed, PUT from what the store reported for a deadline it did not touch, PATCH
+/// from what the store reported for one it may well have — so a default would let any of them
+/// silently answer "permanent" for a page that is not.
 private func pageResponse(
     slug: Slug,
     expiresAt: Date?,

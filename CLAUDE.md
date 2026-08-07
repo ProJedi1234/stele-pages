@@ -459,7 +459,10 @@ Don't "fix" these without a reason; the README argues them out in full.
   the default does not arrive already dead and get reclaimed by the next upload. Expired
   slugs return to the pool
   with no tombstone, so a name that expired can be drawn or claimed again. Reclamation
-  happens on upload only; there is no cron, and an idle server holding invisible expired
+  happens on `POST` and on `PATCH` and nowhere else — the two verbs that need a name freed
+  in time for the request in hand, one to claim it and one to move onto it, which is why
+  both go through a `PageStoring` policy method (`create`, `amend`) rather than straight to
+  a primitive. There is no cron, and an idle server holding invisible expired
   rows is fine because nothing can read them. `PUT` refuses `?ttl=` with a `400` rather
   than ignoring it — a replacement cannot move a deadline, and answering `200` to
   `?ttl=never` would leave the caller believing it had. `PATCH` is where a deadline moves,

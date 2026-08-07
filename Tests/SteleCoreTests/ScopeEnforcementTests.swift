@@ -94,6 +94,18 @@ struct ScopeEnforcementTests {
                 #expect(String(buffer: response.body) == "<h1>hi</h1>")
             }
 
+            // A retime rather than a rename, so the page keeps the address the delete below
+            // is aimed at. The negative half of this pair already lists `PATCH`; without
+            // this line "every write route" would name a verb the accept path never tries.
+            let amended = try await Self.write(
+                client,
+                token: TestFixture.publishToken,
+                uri: "/\(ServerRoute.pages)/quiet-cedar-otter"
+                    + "?\(PageLifetime.queryParameter)=\(PageLifetime.neverKeyword)",
+                method: .patch
+            )
+            #expect(amended.status == .ok)
+
             // Last, because it takes the page away: the same credential is let through the
             // gate on the destructive verb too.
             let removed = try await Self.write(
