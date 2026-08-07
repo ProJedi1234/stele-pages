@@ -235,6 +235,69 @@ public struct PageStore: Sendable {
         return .noSuchPage
     }
 
+    /// - Returns: `.amended` with the resulting slug and deadline, `.noSuchPage` if no live
+    ///   row exists at `slug`, or `.slugTaken` if the target name is held by another row.
+    public func applyAmendment(
+        slug: Slug, newSlug: Slug?, newExpiry: PageExpiry?
+    ) async throws -> PageAmendOutcome {
+        // Two binds for one optional instruction, because the column already uses NULL to
+        // mean "permanent" and so cannot also use it to mean "unchanged". `COALESCE` handles
+        // the slug — nil there is unambiguous, since no row has a NULL name — but the expiry
+        // needs the boolean to distinguish `?ttl=never` from an absent `?ttl=`. Collapsing
+        // these into one nullable bind would make every `never` a no-op.
+        let changesExpiry = newExpiry != nil
+        let expiryValue = newExpiry?.date ?? nil
+
+        do {
+            // One UPDATE, so the existence check, the deadline predicate and the write are a
+            // single statement — the same reasoning as `update` and `delete` above. The
+            // collision check is *not* a clause here, deliberately: any `NOT EXISTS`
+            // sub-select is evaluated against the statement's snapshot, so a concurrent
+            // insert of the target name committing in between would pass the check and then
+            // violate the index anyway. The primary key is the only authority that cannot be
+            // raced, so the conflict is caught below from the error it raises rather than
+            // predicted here.
+            //
+            // Renaming a page to the name it already holds updates the row to its own value,
+            // which no unique index objects to, so the no-op case falls out rather than
+            // needing a branch.
+            let rows = try await client.query(
+                """
+                UPDATE pages
+                SET slug = COALESCE(\(newSlug?.value), slug),
+                    expires_at = CASE WHEN \(changesExpiry) THEN \(expiryValue)
+                                      ELSE expires_at END
+                WHERE slug = \(slug.value)
+                  AND (expires_at IS NULL OR expires_at > now())
+                RETURNING slug, expires_at
+                """,
+                logger: logger
+            )
+
+            // `Date?` for the same permanent reason `fetch` decodes one: a page amended to
+            // `never` — or one that was already permanent and only moved — returns NULL here,
+            // and this is the statement that produces that row.
+            for try await (resulting, expiresAt) in rows.decode(
+                (String, Date?).self, context: .default
+            ) {
+                // `unchecked:` because the value came back out of the column. Either it is
+                // the `newSlug` this call validated, or it is the row's existing name, which
+                // passed `Slug(custom:)` on its way in.
+                return .amended(slug: Slug(unchecked: resulting), expiresAt: expiresAt)
+            }
+            return .noSuchPage
+        } catch let error as PSQLError where error.serverInfo?[.sqlState] == Self.uniqueViolation {
+            // Only a slug change can collide, so a unique violation with no rename requested
+            // is some other constraint failing and must not be reported as a taken name.
+            guard let newSlug else { throw error }
+            return .slugTaken(newSlug)
+        }
+    }
+
+    /// SQLSTATE `unique_violation`. Named rather than typed at the catch site so the one
+    /// place that turns a database error into a `409` says which error it means.
+    static let uniqueViolation = "23505"
+
     /// Deletes every row whose deadline has passed, returning their slugs to the pool.
     ///
     /// - Returns: how many rows were removed.

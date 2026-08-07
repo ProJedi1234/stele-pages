@@ -63,6 +63,10 @@ func landingPage(baseURL: String, recent: [PageSummary]?, now: Date = Date()) ->
     <code>?\(PageLifetime.queryParameter)=</code>.</p></div>
     <div class="card"><h3><span class="badge">PUT</span> /pages/:slug</h3>
     <p>Replace the page already published at a slug. Never creates one.</p></div>
+    <div class="card"><h3><span class="badge">PATCH</span> /pages/:slug</h3>
+    <p>Move a page to a new name with <code>?slug=</code>, or give it a new deadline with
+    <code>?\(PageLifetime.queryParameter)=</code>. Its contents are left alone, and the old
+    name goes back in the pool.</p></div>
     <div class="card"><h3><span class="badge">DELETE</span> /pages/:slug</h3>
     <p>Remove the page at a slug for good. The name goes back in the pool.</p></div>
     </div>

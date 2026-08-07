@@ -11,8 +11,8 @@ http://localhost:8080/radiant-surf-gecko
 The `stele` CLI ([stele-cli](https://github.com/ProJedi1234/stele-cli)) holds the
 credential so that whoever runs it — usually an agent — never has to. Underneath it is an
 ordinary HTTP request, and curl still works if you are holding a token yourself — which is
-also the only way to ask for a lifetime other than the default today, since the CLI does
-not expose `?ttl=` yet:
+today the only way to reach `PATCH /pages/:slug`, since the CLI exposes `--ttl` on a publish
+but has no command that renames or retimes a page afterwards:
 
 ```
 $ curl -X POST "localhost:8080/pages?ttl=never" \
@@ -178,6 +178,7 @@ happens to run the app, which is rarely the machine you chose for durable storag
 | `GET /skill`       | none   | The publish skill, as Markdown (see "Teaching an agent to publish") |
 | `POST /pages`      | `publish` | Stores the request body, takes `?slug=` and `?ttl=`, returns `{slug, url, expires}` as `201` |
 | `PUT /pages/:slug` | `publish` | Replaces a stored page's body and content type, returns `{slug, url, expires}` as `200` |
+| `PATCH /pages/:slug` | `publish` | Renames a page with `?slug=` and retimes it with `?ttl=`, leaving its contents alone, returns `{slug, url, expires}` as `200` |
 | `DELETE /pages/:slug` | `publish` | Removes a stored page and frees the slug, returns `204` |
 | `GET /admin/whoami` | any credential | Reports the credential presented — name, scopes, expiry, last use — and never a token |
 | `POST /admin/clients` | `admin` | Mints a credential, returns `{token, client}` as `201`. The token is shown once and never again |
@@ -219,6 +220,39 @@ public `404`, because this side of the API is behind the upload token and has no
 hide from its caller. A well-formed slug with no *live* page at it is `404` — absent, or
 expired and not yet cleaned up: `PUT` never creates, so publishing a new page is always
 `POST`.
+
+`PATCH /pages/:slug` changes the two things about a page that used to be fixed at
+publication: where it lives and how long it lives. `?slug=` moves it to a new name and
+`?ttl=` gives it a new deadline; either alone, or both in one request. It reads no body and
+touches none — the page's contents, its content type, its `created_at` and its `client_id`
+all survive, and that last one is the deliberate difference from `PUT`: that column records
+who wrote the bytes currently being served, and an amendment writes no bytes.
+
+A separate verb rather than `?ttl=` on `PUT`, because the two operations are independent.
+Extending a deadline shouldn't require re-uploading a megabyte, and replacing a body
+shouldn't be an opportunity to silently move a deadline — so `PUT`'s refusal of `?ttl=`
+stays exactly as it was, and remains correct: *a replacement* still cannot retime a page.
+This is not a replacement.
+
+An amendment that amends nothing — neither parameter present — is a `400` rather than a
+`200` over an untouched page. The shape of that mistake is a misspelled parameter, and a
+success would confirm it as having worked. `?ttl=` obeys the same grammar it does on `POST`
+and is measured from *now*, so `?ttl=30` means thirty more days rather than thirty from
+publication; the one difference is that an absent `?ttl=` here means "leave it alone" rather
+than "seven days", which is the whole reason `PageExpiry` is an enum and not a `Date?`. A
+new slug is validated by `Slug(custom:)` exactly as `POST`'s is (`400` if invalid, including
+reserved names), a name held by another row is `409`, and renaming a page to the name it
+already has is a successful no-op. As with `PUT` and `DELETE`, a well-formed slug with no
+*live* page at it is `404` — so `?ttl=never` cannot resurrect an expired page, which is the
+one temptation this predicate exists to refuse.
+
+**A rename is a move, and the old name goes back into the pool** — the same bargain the
+delete strikes, argued out below. No redirect, no tombstone: the moment it commits, the old
+URL serves the ordinary 404 and the name can be claimed again or drawn by the generator.
+The alternative is a permanent table of retired names plus a lookup on every read, and a
+`301` would also leak that a name used to be a page, which is exactly what the uniform 404
+exists to prevent. A page whose link is already out in the world should be updated with
+`PUT`, not renamed.
 
 `DELETE /pages/:slug` removes the page and answers `204` with an empty body. There is no
 `{slug, url}` to return — the URL that payload would carry now leads to the 404 page, and
@@ -348,9 +382,18 @@ not find out until the link died. The upper bound exists because an unbounded da
 `Date` arithmetic waiting to overflow, and because "effectively never" should be spelled
 `never`.
 
-Both writes report the result as an `expires` field: an RFC 3339 instant in UTC, or JSON
+Every write reports the result as an `expires` field: an RFC 3339 instant in UTC, or JSON
 `null` for a page that never expires. It is always present — an absent key would read as
 "the server has no opinion", and it always has one.
+
+**A deadline is fixed for the page's body but not for the page.** `PUT` cannot move it, and
+refuses `?ttl=` with a `400` rather than accepting one and changing nothing; `PATCH` exists
+to move it, and is the only verb that does. The distinction is that a replacement is new
+contents at an old address — if editing extended the deadline, a link's lifetime would
+depend on how often somebody happened to touch it — whereas an amendment is an explicit
+request about the deadline itself. A `PATCH ?ttl=` is measured from the moment of the
+request, not from `created_at`, so it grants the full lifetime asked for rather than
+whatever remains of it.
 
 The default is the part worth arguing about, so: a page server whose links all last
 forever accumulates every draft, preview and one-off anybody ever published, and nothing
@@ -362,11 +405,13 @@ Expiry is enforced in two places, for two different reasons:
 - **On read, for correctness.** The fetch query treats a page past its deadline as absent,
   so it stops being served at exactly the right moment regardless of cleanup — and it 404s
   with the same bytes every other miss does.
-- **On write, to reclaim.** Each successful upload first deletes expired rows, which is
-  what returns their slugs to the pool. A partial index (`WHERE expires_at IS NOT NULL`)
-  keeps that cheap, since permanent pages never enter it. There is no cron and no
-  scheduler: cleanup frequency scales with usage, and an idle server holding invisible
-  expired rows is fine, because nothing can read them anyway.
+- **On write, to reclaim.** A `POST` and a `PATCH` each delete expired rows before doing
+  anything else, which is what returns their slugs to the pool — those are the two verbs
+  that need a name freed *now*, one to claim it and one to move onto it. `PUT` and `DELETE`
+  address a name that already exists and reclaim nothing. A partial index
+  (`WHERE expires_at IS NOT NULL`) keeps that cheap, since permanent pages never enter it.
+  There is no cron and no scheduler: cleanup frequency scales with usage, and an idle
+  server holding invisible expired rows is fine, because nothing can read them anyway.
 
 A `NULL` expiry means "never expires", and that is the only thing it means: it is what
 `?ttl=never` stores, and nothing else produces one.
@@ -385,7 +430,8 @@ window.
 
 Expired slugs return to the pool. Once the row is deleted the generator may draw the name
 again, or a caller may claim it with `?slug=`. There are no tombstones: a name that expired
-is a name that is free.
+is a name that is free — and the same is true of one that was deleted, or vacated by a
+`PATCH ?slug=`. Three ways to free a name, one rule about what happens next.
 
 ### A shared look
 

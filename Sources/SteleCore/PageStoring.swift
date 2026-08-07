@@ -15,6 +15,52 @@ public enum PageUpdateOutcome: Sendable, Equatable {
     case noSuchPage
 }
 
+/// A deadline a caller has asked a page to take, as opposed to one a page already holds.
+///
+/// An enum rather than the `Date?` the column stores, because an amendment needs *three*
+/// answers where the column has two: set a deadline, remove the deadline, or leave whatever
+/// is there alone. Spelling the third one as a further layer of Optional would give
+/// `Date??`, where the two nils mean opposite things and the compiler is no help telling
+/// them apart — `expiresAt: nil` reads as "no deadline" at every call site, and would
+/// silently mean "no change" at this one. `PageExpiry?` puts the distinction in the type:
+/// nil is the absence of an instruction, and `.never` is the instruction to be permanent.
+public enum PageExpiry: Sendable, Equatable {
+    case at(Date)
+    /// Permanent — SQL `NULL`, and the same thing `PageLifetime.neverKeyword` asks for.
+    case never
+
+    /// The value the column takes.
+    public var date: Date? {
+        switch self {
+        case .at(let date): date
+        case .never: nil
+        }
+    }
+
+    /// Rebuilds the instruction from a parsed lifetime, whose own nil already means
+    /// "never". The conversion lives here rather than at the router so there is one place
+    /// that decides which nil is which.
+    public init(_ lifetime: PageLifetime) {
+        self = lifetime.expiresAt.map(Self.at) ?? .never
+    }
+}
+
+/// What an amendment found at the address it was aimed at.
+///
+/// Three cases rather than `PageUpdateOutcome`'s two, because an amendment can fail in a way
+/// a replacement cannot: the address it wants may already belong to somebody else. Carrying
+/// the resulting slug rather than assuming the requested one is what lets the caller answer
+/// with the page's *current* URL without deciding for itself whether the rename took.
+public enum PageAmendOutcome: Sendable, Equatable {
+    case amended(slug: Slug, expiresAt: Date?)
+    /// No *live* row at the addressed slug — absent, or expired and not yet reclaimed, the
+    /// same conflation `PageUpdateOutcome.noSuchPage` makes and for the same reason.
+    case noSuchPage
+    /// The requested new slug is held by another row. Carries the name so the caller does
+    /// not have to remember which of the two slugs it asked about.
+    case slugTaken(Slug)
+}
+
 /// The storage operations the router depends on.
 ///
 /// Split out so `buildRouter` can be exercised against an in-memory fake without a
@@ -99,6 +145,41 @@ public protocol PageStoring: Sendable {
     func update(
         slug: Slug, body: String, contentType: String?, clientID: Int64?
     ) async throws -> PageUpdateOutcome
+
+    /// Moves a *live* page to a new slug, changes its deadline, or both, as one atomic step:
+    /// the existence check, the collision check and the write must not leave a window where a
+    /// concurrent upload claims the target name between them.
+    ///
+    /// Touches nothing else. The body, the content type, `created_at` and `client_id` all
+    /// survive — an amendment changes where a page lives and how long it lives, not what it
+    /// is. `client_id` in particular is *not* reassigned, which is the opposite of what
+    /// `update` does and follows from the same rule: that column records who wrote the bytes
+    /// currently being served, and an amendment writes no bytes.
+    ///
+    /// "Live" carries the meaning it does everywhere else — an expired-but-unreclaimed row is
+    /// `.noSuchPage`, so this verb agrees with `fetch`, `update` and `delete` about which
+    /// pages exist. The *target* name is a different question: it is taken if any row holds
+    /// it, expired or not, exactly as `insert` sees it, which is why `amend` reclaims first.
+    ///
+    /// The move is hard. The old slug is released the moment this commits, with no tombstone
+    /// and no redirect, so a link already handed out goes to the uniform 404 and the name can
+    /// be claimed — or drawn by the generator — by somebody else's page. That is the same
+    /// bargain `delete(slug:)` strikes, and it is deliberate: the alternative is a permanent
+    /// table of retired names plus a lookup on every read, to protect URLs this server
+    /// already treats as guessable rather than stable.
+    ///
+    /// - Parameters:
+    ///   - slug: the address to amend, which is where the page lives *now*.
+    ///   - newSlug: the address to move it to, or nil to leave it where it is. Renaming a
+    ///     page to the slug it already has is a no-op that succeeds, not a collision with
+    ///     itself.
+    ///   - newExpiry: the deadline to impose, or nil to leave the stored one alone. See
+    ///     `PageExpiry` for why this is not a `Date?`.
+    /// - Returns: `.amended` with the page's resulting slug and deadline, `.noSuchPage` if no
+    ///   live row exists at `slug`, or `.slugTaken` if `newSlug` is held by another row.
+    func applyAmendment(
+        slug: Slug, newSlug: Slug?, newExpiry: PageExpiry?
+    ) async throws -> PageAmendOutcome
 
     /// Removes the *live* page at `slug`, as one atomic step: the existence check and the
     /// removal must not leave a window where a concurrent write changes what the removal
@@ -205,5 +286,36 @@ extension PageStoring {
             )
         }
         throw PageStoreError.couldNotAllocateSlug(attempts: Self.maxSlugAttempts)
+    }
+
+    /// Amends a page's address, its deadline, or both, reclaiming expired rows first.
+    ///
+    /// The policy half of `applyAmendment`, and it is one line: the same reclaim-*before*-write
+    /// ordering `create` uses, for the same reason. A rename onto a name whose page died
+    /// yesterday should succeed — the row is invisible to every reader, and the only thing
+    /// still holding the name is disk nobody has got around to freeing. Without this the
+    /// caller gets a `409` naming a page they cannot fetch, look at, or delete, with no action
+    /// available that would clear it.
+    ///
+    /// It lives in the extension rather than in each conformer so the in-memory fake and the
+    /// Postgres store cannot disagree about it, which is the same reason `create`'s retry loop
+    /// is here. A failure to reclaim propagates rather than being swallowed: a database that
+    /// cannot DELETE will not UPDATE either.
+    ///
+    /// Distinct in name from the primitive on purpose. Defaulting a `logger` argument to make
+    /// the two overloads share one name would leave `amend(slug:newSlug:newExpiry:)` resolving
+    /// to the *primitive* — silently skipping reclamation at whichever call site forgot the
+    /// argument, which is precisely the bug this arrangement exists to make unwritable.
+    public func amend(
+        slug: Slug,
+        newSlug: Slug?,
+        newExpiry: PageExpiry?,
+        logger: Logger? = nil
+    ) async throws -> PageAmendOutcome {
+        let reclaimed = try await deleteExpired()
+        if reclaimed > 0 {
+            logger?.info("reclaimed expired pages", metadata: ["count": "\(reclaimed)"])
+        }
+        return try await applyAmendment(slug: slug, newSlug: newSlug, newExpiry: newExpiry)
     }
 }

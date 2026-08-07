@@ -50,7 +50,8 @@ public enum PageContentType {
     }
 }
 
-/// The JSON body both write routes answer with.
+/// The JSON body every write route that returns one answers with — POST, PUT and PATCH.
+/// `DELETE` is the exception and answers `204` with nothing.
 ///
 /// The document at `GET /skill` shows a sample of this body, but the sample cannot promise
 /// a key *order*: `JSONEncoder` emits a keyed container's members in an unspecified order,
@@ -324,8 +325,10 @@ public func buildRouter(
                 throw HTTPError(
                     .badRequest,
                     message: """
-                        PUT does not take ?\(PageLifetime.queryParameter)=. A page's lifetime \
-                        is fixed when it is published; publish again with POST to change it.
+                        PUT does not take ?\(PageLifetime.queryParameter)=. A replacement \
+                        cannot move a deadline; use PATCH \
+                        /\(ServerRoute.pages)/:slug?\(PageLifetime.queryParameter)= to \
+                        change it.
                         """
                 )
             }
@@ -370,6 +373,88 @@ public func buildRouter(
                 status: .ok,
                 includeLocation: false
             )
+        }
+        // Everything about a page except its contents: where it lives and how long it lives.
+        // A separate verb rather than query parameters bolted onto PUT, because the two
+        // operations are independent — extending a deadline should not require re-uploading a
+        // megabyte, and replacing a body should not be a chance to silently move a deadline.
+        // That is also why PUT's refusal of `?ttl=` stays exactly as it was: it is still true
+        // that *a replacement* cannot retime a page, and this verb is not a replacement.
+        //
+        // Reads no body, like DELETE and for the same reason: there is nothing here to store,
+        // so the content-type allowlist has nothing to apply to and `handleHTTP` drains
+        // whatever a caller sends anyway.
+        .patch(":slug") { request, context -> Response in
+            let slug = try validatedSlug(context.parameters.require("slug"))
+
+            let requestedSlug = request.uri.queryParameters["slug"]
+            let requestedTTL = request.uri.queryParameters[Substring(PageLifetime.queryParameter)]
+
+            // An amendment that amends nothing is a `400`, not a `200` over an untouched
+            // page. The caller reached for this verb because they wanted something changed,
+            // and the shape of that mistake is a forgotten or misspelled parameter — which a
+            // success would confirm as having worked.
+            guard requestedSlug != nil || requestedTTL != nil else {
+                throw HTTPError(
+                    .badRequest,
+                    message: """
+                        Nothing to amend. Pass ?slug= to rename the page, \
+                        ?\(PageLifetime.queryParameter)= to change how long it lives, or both.
+                        """
+                )
+            }
+
+            // Validated with `Slug(custom:)` exactly as POST's `?slug=` is, so a rename
+            // cannot put a name into the table that a fresh publish would have refused —
+            // including a reserved one, which would otherwise be shadowed by its own route.
+            let newSlug = try requestedSlug.map { try validatedSlug(String($0)) }
+
+            // The one place in the server where an absent `?ttl=` must *not* mean the
+            // default. `PageLifetime(raw: nil)` resolves to `defaultDays`, which is the right
+            // answer for a page being published and precisely the wrong one here: a caller
+            // renaming a permanent page would have it silently given a week to live. So the
+            // parser is only reached when the parameter is actually present, and its absence
+            // becomes a nil instruction rather than a parsed value.
+            let newExpiry: PageExpiry?
+            if let requestedTTL {
+                newExpiry = PageExpiry(try validatedLifetime(requestedTTL))
+            } else {
+                newExpiry = nil
+            }
+
+            switch try await store.amend(
+                slug: slug,
+                newSlug: newSlug,
+                newExpiry: newExpiry,
+                logger: context.logger
+            ) {
+            case .amended(let resulting, let expiresAt):
+                // The resulting slug, never the requested one: only the store knows whether
+                // a rename was asked for, and answering with `newSlug ?? slug` here would be
+                // a second place deciding that.
+                //
+                // No Location header even when the page moved. PUT sets none because the
+                // caller already knows the address; here they do not, but the body's `url`
+                // is where every client already reads it from, and a `Location` on a `200`
+                // means something looser than "it is over there" — the one client that
+                // followed it and the one that read `url` would disagree about nothing,
+                // which is not worth two ways to learn one fact.
+                return try pageResponse(
+                    slug: resulting,
+                    expiresAt: expiresAt,
+                    configuration: configuration,
+                    status: .ok,
+                    includeLocation: false
+                )
+            case .noSuchPage:
+                // Expired-but-unreclaimed arrives here too, so this verb agrees with GET,
+                // PUT and DELETE about which pages exist.
+                throw HTTPError(.notFound, message: "No page exists at \(slug.value).")
+            case .slugTaken(let taken):
+                // The same message POST answers a claimed `?slug=` with, because it is the
+                // same fact and the same remedy: pick another name.
+                throw HTTPError(.conflict, message: "The slug '\(taken)' is already taken.")
+            }
         }
         // The one write that never reads a body. DELETE carries no payload, so
         // `readValidatedPage` is deliberately not called and the content-type allowlist has
@@ -923,13 +1008,16 @@ private func jsonResponse(
     return Response(status: status, headers: headers, body: .init(byteBuffer: body))
 }
 
-/// The `{slug, url, expires}` body both writes answer with. POST adds `Location` and a
-/// `201`; PUT returns `200` without one, since the caller already knows the address.
+/// The `{slug, url, expires}` body the three body-returning writes answer with. POST adds
+/// `Location` and a `201`; PUT and PATCH return `200` without one — PUT because the caller
+/// already knows the address, PATCH because the body's `url` is where a caller reads a moved
+/// page's new one. (DELETE answers `204` and no body at all.)
 ///
-/// `expiresAt` is undefaulted deliberately. There are exactly two call sites and they get
-/// the value from different places — POST from the lifetime it just parsed, PUT from what
-/// the store reported — so a default would let either one silently answer "permanent" for a
-/// page that is not.
+/// `expiresAt` is undefaulted deliberately, and the case for that got stronger as the call
+/// sites multiplied: all three get the value from a different place — POST from the lifetime
+/// it just parsed, PUT from what the store reported for a deadline it did not touch, PATCH
+/// from what the store reported for one it may well have — so a default would let any of them
+/// silently answer "permanent" for a page that is not.
 private func pageResponse(
     slug: Slug,
     expiresAt: Date?,

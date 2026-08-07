@@ -197,6 +197,13 @@ struct PageExpiryTests {
     ///
     /// `30` is in the arguments precisely because it is *valid*: a handler that only rejected
     /// unparseable lifetimes would still swallow the ones a caller actually means.
+    ///
+    /// The message has to name `PATCH`, and that half is newer than the refusal. This error
+    /// used to end "publish again with POST to change it", which was true when a deadline was
+    /// fixed at publication and became false the moment `PATCH` shipped — a refusal that
+    /// sends a caller to the wrong verb is worse than one that just says no, because they
+    /// will follow it. It is the same drift the `--ttl` incident was, in the one place a
+    /// caller reads at the terminal.
     @Test(arguments: [PageLifetime.neverKeyword, "30", "banana", ""])
     func ttlOnUpdateIs400(raw: String) async throws {
         let store = InMemoryPageStore()
@@ -213,6 +220,8 @@ struct PageExpiryTests {
                 #expect(response.status == .badRequest, "\(raw)")
                 let message = try TestFixture.errorMessage(response.body)
                 #expect(message.contains(PageLifetime.queryParameter), "\(raw)")
+                #expect(message.contains("PATCH /\(ServerRoute.pages)/:slug"), "\(raw)")
+                #expect(!message.contains("POST"), "\(raw)")
             }
 
             // And it wrote nothing on the way to saying so.

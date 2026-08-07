@@ -41,6 +41,7 @@ struct ScopeEnforcementTests {
         ("/\(ServerRoute.pages)", HTTPRequest.Method.post),
         ("/\(ServerRoute.pages)/quiet-cedar-otter", HTTPRequest.Method.put),
         ("/\(ServerRoute.pages)/quiet-cedar-otter", HTTPRequest.Method.delete),
+        ("/\(ServerRoute.pages)/quiet-cedar-otter?slug=renamed", HTTPRequest.Method.patch),
     ])
     func sharedTokenIsForbiddenOnWrites(uri: String, method: HTTPRequest.Method) async throws {
         let store = InMemoryPageStore()
@@ -92,6 +93,18 @@ struct ScopeEnforcementTests {
             try await client.execute(uri: "/quiet-cedar-otter", method: .get) { response in
                 #expect(String(buffer: response.body) == "<h1>hi</h1>")
             }
+
+            // A retime rather than a rename, so the page keeps the address the delete below
+            // is aimed at. The negative half of this pair already lists `PATCH`; without
+            // this line "every write route" would name a verb the accept path never tries.
+            let amended = try await Self.write(
+                client,
+                token: TestFixture.publishToken,
+                uri: "/\(ServerRoute.pages)/quiet-cedar-otter"
+                    + "?\(PageLifetime.queryParameter)=\(PageLifetime.neverKeyword)",
+                method: .patch
+            )
+            #expect(amended.status == .ok)
 
             // Last, because it takes the page away: the same credential is let through the
             // gate on the destructive verb too.

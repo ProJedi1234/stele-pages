@@ -1223,4 +1223,175 @@ struct PageStoreDatabaseTests {
             #expect(republished?.body == "<h1>second tenant</h1>")
         }
     }
+
+    /// `applyAmendment` against the real schema, which is the only place three of its claims
+    /// can be checked at all.
+    ///
+    /// **The conflict branch is the reason this test exists.** It is the one outcome in the
+    /// whole store that is produced by an *error* rather than by a row count: the statement
+    /// carries no `NOT EXISTS` guard, deliberately — any such sub-select reads the
+    /// statement's snapshot and could be overtaken by a concurrent insert committing before
+    /// the index is touched — so a taken name arrives as SQLSTATE `23505` off the primary
+    /// key, and `.slugTaken` is that error caught and translated. `InMemoryPageStore` reaches
+    /// the same verdict by looking in a dictionary, so it agrees with this by construction
+    /// and proves nothing about it. If the catch clause stops matching — a PostgresNIO error
+    /// shape that changes, a `serverInfo` that arrives empty — every rename onto a taken name
+    /// becomes a `500`, and this suite is the only thing that would notice.
+    ///
+    /// **The expiry binds are the second.** The column already spends NULL on "permanent", so
+    /// the statement needs a separate boolean to say "leave it alone", and both directions
+    /// have to survive a real round trip: a bind that clears a deadline but cannot set one
+    /// would pass every test that only ever amends toward `never`. The two are asserted in
+    /// sequence on one row, then a rename with *no* expiry instruction is asserted to leave
+    /// the result standing — which is the `CASE … ELSE expires_at` arm, and the one that a
+    /// single nullable bind would silently turn into "make it permanent".
+    ///
+    /// **And `created_at` and `client_id` are the third.** The in-memory fake stamps a fixed
+    /// `createdAt` on every row, so "preserved" and "reset" are indistinguishable there;
+    /// `client_id` is a foreign key, so a statement that reassigned it — or nulled it — is
+    /// checked by the database and by nothing else.
+    @Test func amendmentsMoveAndRetimeAPageWithoutDisturbingIt() async throws {
+        try await PostgresFixture.withThrowawaySchema { database in
+            let store = database.store
+            try await store.migrate()
+
+            let (owner, _) = try await database.clientStore.create(
+                name: "owner", scopes: [.publish], expiresAt: nil
+            )
+
+            let original = try Slug(custom: "quiet-cedar-otter")
+            let renamed = try Slug(custom: "amber-willow-heron")
+            let occupied = try Slug(custom: "brisk-maple-compass")
+
+            #expect(
+                try await store.insert(
+                    slug: original, body: "<h1>here</h1>",
+                    contentType: "text/css; charset=utf-8",
+                    expiresAt: nil, clientID: owner.id
+                )
+            )
+            #expect(
+                try await store.insert(
+                    slug: occupied, body: "<h1>theirs</h1>",
+                    contentType: PageContentType.default, expiresAt: nil, clientID: nil
+                )
+            )
+            let published = try #require(try await store.fetch(slug: original))
+
+            // A permanent page given a deadline: the `CASE … THEN` arm carrying a real
+            // timestamptz, which is the direction a clear-only bind would drop.
+            let deadline = Date().addingTimeInterval(3 * PageLifetime.secondsPerDay)
+            guard case .amended(let stillThere, let dated) = try await store.applyAmendment(
+                slug: original, newSlug: nil, newExpiry: .at(deadline)
+            ) else {
+                Issue.record("retiming a live page must succeed")
+                return
+            }
+            #expect(stillThere == original)
+            #expect(abs(try #require(dated).timeIntervalSince(deadline)) < 1)
+
+            // And back to permanent: the same arm carrying NULL. Distinguishable from the
+            // "leave it alone" case only because the row currently holds a date.
+            guard case .amended(_, let cleared) = try await store.applyAmendment(
+                slug: original, newSlug: nil, newExpiry: .never
+            ) else {
+                Issue.record("clearing a deadline must succeed")
+                return
+            }
+            #expect(cleared == nil)
+
+            // A taken name, caught from the primary key's own complaint.
+            #expect(
+                try await store.applyAmendment(
+                    slug: original, newSlug: occupied, newExpiry: nil
+                ) == .slugTaken(occupied)
+            )
+            // The collision left both pages exactly as they were — the failure mode worth
+            // ruling out is a half-applied move that destroys the page it landed on.
+            #expect(try await store.fetch(slug: original)?.body == "<h1>here</h1>")
+            #expect(try await store.fetch(slug: occupied)?.body == "<h1>theirs</h1>")
+
+            // The move itself, with no expiry instruction: the `ELSE expires_at` arm has to
+            // leave the NULL alone rather than treating an absent instruction as a deadline.
+            guard case .amended(let moved, let untouched) = try await store.applyAmendment(
+                slug: original, newSlug: renamed, newExpiry: nil
+            ) else {
+                Issue.record("renaming a live page must succeed")
+                return
+            }
+            #expect(moved == renamed)
+            #expect(untouched == nil)
+
+            let atNewName = try #require(try await store.fetch(slug: renamed))
+            #expect(atNewName.body == "<h1>here</h1>")
+            #expect(atNewName.contentType == "text/css; charset=utf-8")
+            // Still the same page, first published at the same instant, by the same
+            // credential. `client_id` is *not* reassigned here — that is the difference
+            // between this verb and `update`, and the foreign key means only Postgres can
+            // confirm the value written is a real one.
+            #expect(atNewName.createdAt == published.createdAt)
+            #expect(atNewName.clientID == owner.id)
+
+            // Hard move: the old name is not merely hidden, it is gone and claimable.
+            #expect(try await store.fetch(slug: original) == nil)
+            #expect(
+                try await store.insert(
+                    slug: original, body: "<h1>second tenant</h1>",
+                    contentType: PageContentType.default, expiresAt: nil, clientID: nil
+                )
+            )
+
+            // Renaming a page to the name it already holds updates a row to its own key,
+            // which no unique index objects to. Asserted here rather than only against the
+            // fake because "the index tolerates this" is a claim about Postgres.
+            #expect(
+                try await store.applyAmendment(
+                    slug: renamed, newSlug: renamed, newExpiry: nil
+                ) == .amended(slug: renamed, expiresAt: nil)
+            )
+        }
+    }
+
+    /// The deadline predicate on the amendment, which is the same `expires_at > now()` every
+    /// other single-slug statement carries and is here for the same reason: this verb has to
+    /// agree with `fetch`, `update` and `delete` about which pages exist.
+    ///
+    /// Split from the test above because the interesting half is what *doesn't* happen. An
+    /// expired row must be refused rather than amended, and — like `delete` — refused rather
+    /// than swept up, which is provable only by watching `deleteExpired` still find it
+    /// afterwards. `?ttl=never` against a dead page is the specific temptation: an
+    /// amendment that ignored the predicate would resurrect a page every reader already 404s,
+    /// silently and permanently.
+    @Test func amendmentsRefuseAnExpiredPageRatherThanRevivingIt() async throws {
+        try await PostgresFixture.withThrowawaySchema { database in
+            let store = database.store
+            try await store.migrate()
+
+            let dead = try Slug(custom: "quiet-cedar-otter")
+            let target = try Slug(custom: "amber-willow-heron")
+            #expect(
+                try await store.insert(
+                    slug: dead, body: "<h1>expired</h1>",
+                    contentType: PageContentType.default,
+                    expiresAt: Date().addingTimeInterval(-60), clientID: nil
+                )
+            )
+
+            #expect(
+                try await store.applyAmendment(
+                    slug: dead, newSlug: nil, newExpiry: .never
+                ) == .noSuchPage
+            )
+            #expect(
+                try await store.applyAmendment(
+                    slug: dead, newSlug: target, newExpiry: nil
+                ) == .noSuchPage
+            )
+
+            // Refused, not swept: the row is still there for reclamation to find, and the
+            // rename did not quietly happen anyway.
+            #expect(try await store.fetch(slug: target) == nil)
+            #expect(try await store.deleteExpired() == 1)
+        }
+    }
 }
