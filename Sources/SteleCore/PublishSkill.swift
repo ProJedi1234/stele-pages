@@ -46,7 +46,8 @@
 /// `.documentsEveryCommandTheAgentNeeds`, `.documentsEveryFlagTheAgentCanUse`,
 /// `.theExitTableMatchesTheClientsExitCodes`, `.documentsTheDefaultLifetime`,
 /// `.documentsTheLifetimeGrammar`, `.theBadRequestRowNamesTheLifetime`,
-/// `.documentsTheAmendRoute` and `.doesNotClaimALifetimeIsUnchangeable`. Those tests can
+/// `.documentsTheAmendRoute`, `.documentsTheDeleteRoute` and
+/// `.doesNotClaimALifetimeIsUnchangeable`. Those tests can
 /// only pin what has a constant behind it; the rest of the prose is a human responsibility,
 /// and changing the publish contract means changing this document in the same commit.
 struct PublishSkill: Sendable {
@@ -457,25 +458,41 @@ struct PublishSkill: Sendable {
 
         ### Deleting a page
 
-        **`stele` has no delete command**, so nothing you can run takes a page down. The
-        server does have a `DELETE /\#(ServerRoute.pages)/:slug` and the route table below
-        lists it, but reaching it means holding a credential — the one thing this
-        arrangement exists to spare you. A user who wants a page gone early is asking for a
-        newer `stele`; say so, and do not work around it.
+        ```sh
+        stele delete my-page
+        ```
 
-        Two facts make that an answer rather than an apology.
+        `stele delete` takes a page down immediately and prints nothing on stdout — every
+        other command prints a URL because there is a page to point at, and here there is
+        not. The confirmation goes to stderr, and `\#(SteleCLI.jsonFlag)` prints the slug you
+        asked about rather than a location. Do not report a link afterwards; there isn't one.
+
+        **The name goes back into the pool.** Deletion is permanent — there is no undo. The
+        row is removed outright rather than tombstoned, so the slug is claimable again the
+        moment the delete commits, by anybody's next page or by this server's own generator.
+        A URL you already handed out may later resolve to a different page.
+        Republishing the same file afterwards is a new page rather than the old one back.
+
+        Two things are worth putting to the user before you run it, because neither is
+        recoverable afterwards.
 
         **You never have to delete a page to make it expire.** A page with a deadline retires
-        itself, and every page you publish has one — so "take it down" usually needs nothing
-        from anybody beyond waiting for the date you already reported.
+        itself on the date you already reported, and every page has one unless somebody asked
+        for `\#(SteleCLI.ttlFlag) \#(PageLifetime.neverKeyword)` — so "take it down
+        eventually" needs nothing from anybody.
 
-        And replacing is what the request usually means anyway. `stele update` rewrites a
-        page without ever releasing its name, so a link already in someone's hands keeps
-        pointing at something the user chose. Deleting is the harsher tool even where it is
-        available. Deletion is permanent — there is no undo. The row is removed outright
-        rather than tombstoned, so the name goes straight back into the pool the moment the
-        delete commits, and the server's own generator can draw it again.
-        A URL you already handed out may later resolve to a different page.
+        **And replacing is usually what the request means.** `stele update` rewrites a page
+        without ever releasing its name, so a link already in someone's hands keeps pointing
+        at something the user chose. Deleting is the harsher tool; it is for when the *name*
+        is the thing being given up.
+
+        Exit `7` means there was no live page at that name — nothing was ever published there,
+        or it has already expired, which counts as none. Nothing was removed and nothing needs
+        to be. It is an error rather than a `0` on purpose, so a typo'd slug is something you
+        can notice instead of a success you report.
+
+        As with `stele amend`, a client that answers that it does not recognise the command is
+        an install predating it: run `\#(SteleCLI.installCommand)` and try once more.
 
         ### The commands, in full
 
@@ -487,6 +504,7 @@ struct PublishSkill: Sendable {
         | `stele publish <file> [\#(SteleCLI.slugFlag) <name>] [\#(SteleCLI.ttlFlag) <days>] [\#(SteleCLI.contentTypeFlag) <type>]` | you | Publishes a page, prints its URL. |
         | `stele update <slug> <file> [\#(SteleCLI.contentTypeFlag) <type>]` | you | Replaces a page already published at that name. |
         | `stele amend <slug> [\#(SteleCLI.slugFlag) <name>] [\#(SteleCLI.ttlFlag) <days>]` | you | Renames a page, moves its deadline, or both. Sends no file and changes no contents. |
+        | `stele delete <slug>` | you | Takes the page down and frees its name. Prints no URL, because there is no page left. |
         | `stele skill` | you | Prints this document, fetched live from the server. |
         | `stele admin clients` (`create`, `list`, `revoke`) | **an operator** | Mints, lists and revokes credentials. Needs the `\#(ClientScope.admin.rawValue)` scope, which yours does not have. |
 
@@ -533,11 +551,12 @@ struct PublishSkill: Sendable {
         | Code | Means | Do |
         | --- | --- | --- |
         | `201` | Published. | Report the URL it printed, with its `expires`. |
-        | `200` | Replaced by `stele update`. | Same URL as before. |
+        | `200` | Replaced by `stele update`, or amended by `stele amend`. | Report the URL the command printed. |
+        | `204` | Deleted by `stele delete`. | The page and its name are both gone. Report that, not a URL. |
         | `400` | Bad slug, bad `\#(PageLifetime.queryParameter)`, empty file, non-UTF-8, or a NUL byte. | Fix the input; the message says which. |
         | `401` | The stored credential was rejected — expired, revoked, or never valid. | Do not retry. Ask the user to run `stele auth login`. |
         | `403` | The credential is valid but not allowed to publish. | Do not retry. Ask the user for one with the `\#(ClientScope.publish.rawValue)` scope. |
-        | `404` | `stele update` against a name with no page at it, or an expired one. | Publish it instead, with `--slug`. |
+        | `404` | `stele update`, `stele amend` or `stele delete` against a name with no live page at it — including an expired one. | Publish it instead, with `--slug`. Nothing to do if you were deleting it. |
         | `409` | That slug is taken. | Choose another name. |
         | `413` | Page is over \#(maxPageBytes) bytes. | Drop inline images; link them instead. |
         | `415` | Content type not on the allowlist. | Publish one of the accepted types. |
@@ -558,7 +577,7 @@ struct PublishSkill: Sendable {
         | `POST /\#(ServerRoute.pages)` | `\#(ClientScope.publish.rawValue)` | Stores the body, takes `?slug=` and `?\#(PageLifetime.queryParameter)=`, returns `{slug, url, expires}` as `201` |
         | `PUT /\#(ServerRoute.pages)/:slug` | `\#(ClientScope.publish.rawValue)` | Replaces a stored page, returns `{slug, url, expires}` as `200` |
         | `PATCH /\#(ServerRoute.pages)/:slug` | `\#(ClientScope.publish.rawValue)` | Renames a page with `?slug=` and retimes it with `?\#(PageLifetime.queryParameter)=`, leaving its contents alone; returns `{slug, url, expires}` as `200`. This is what `stele amend` runs — see "Renaming a page, and changing its deadline". |
-        | `DELETE /\#(ServerRoute.pages)/:slug` | `\#(ClientScope.publish.rawValue)` | Removes a stored page and frees the slug, returns `204`. No command reaches it — see "Deleting a page". |
+        | `DELETE /\#(ServerRoute.pages)/:slug` | `\#(ClientScope.publish.rawValue)` | Removes a stored page and frees the slug, returns `204` with no body. This is what `stele delete` runs — see "Deleting a page". |
         | `GET /\#(ServerRoute.admin)/\#(ServerRoute.adminWhoami)` | any credential | Reports the credential you hold — name, scopes, expiry. This is what `stele auth status` asks. |
         | `POST /\#(ServerRoute.admin)/\#(ServerRoute.adminClients)` | `\#(ClientScope.admin.rawValue)` | Mints a credential. The operator's route, not yours. |
         | `GET /\#(ServerRoute.admin)/\#(ServerRoute.adminClients)` | `\#(ClientScope.admin.rawValue)` | Lists credentials. The operator's route, not yours. |
@@ -598,9 +617,10 @@ struct PublishSkill: Sendable {
           give it back to you.
         - **A URL is not a permanent address.** Deleting and renaming both retire the page
           rather than the name, so a link you published can be occupied by somebody else's
-          page afterwards. Renaming is the half you can cause yourself, with
-          `stele amend \#(SteleCLI.slugFlag)`. If a link has already gone where you cannot
-          reach it, `stele update` replaces the page without moving it.
+          page afterwards. Both are yours to cause — `stele delete` and
+          `stele amend \#(SteleCLI.slugFlag)` — so neither is a thing to do to a link that has
+          already left your hands. When one has, `stele update` replaces the page without
+          moving it.
         """#
     }
 }

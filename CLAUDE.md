@@ -105,14 +105,20 @@ string, so an assertion phrase that straddles a line break cannot be pinned at a
 carrying an assertion gets reflowed to keep the claim on one line — not the reverse.
 
 `documentsTheDeleteRoute` is where those two jobs pull against each other, and the shape it
-settled on is deliberate. `DELETE /pages/:slug` exists on the server, but the CLI ships no
-delete command — so the route table has to name the verb (a verb missing from that table is
-one the agent will not use, because the document tells it not to invent sub-paths) while the
-prose has to say in the same breath that nothing runs it. Naming it and stopping there is
-the failure mode: the only way to act on that row is to go find a credential, which is the
-one thing the rewrite exists to prevent. Hence the third negative assertion — `204` must
-*not* appear as a status-table row, because that table is what a command tells you and no
-command can earn one. When `stele` grows a delete command, that test is the place to start.
+settled on is deliberate, and it is now the third of these tests to be turned over by the
+client catching up. `DELETE /pages/:slug` used to be a verb the route table had to name (a
+verb missing from that table is one the agent will not use, because the document tells it not
+to invent sub-paths) while the prose said in the same breath that nothing ran it — because
+the only way to act on that row was to go find a credential, which is the one thing the
+rewrite exists to prevent. `stele delete` shipped, so both halves of that sentence are false
+and the assertions invert: the phrase **"no delete command"**, in the absolute and in the
+client-scoped spelling both, joins the sieve for the reason
+`doesNotClaimALifetimeIsUnchangeable` gives. `204` inverts with it — it was asserted *absent*
+because that table is what a command tells you and none could earn one, and it is now
+required, because an agent told a delete succeeds but not what success looks like goes
+hunting for a URL that was never printed. That last part is the third assertion: `stele
+delete` writes nothing to stdout, deliberately, and the document teaches
+`url=$(stele publish page.html)` a few sections earlier.
 
 The slug-retry policy, the requested-slug policy and the reclaim-before-insert ordering
 are shared code in `PageStoring`'s extension, so the router tests exercise the real thing

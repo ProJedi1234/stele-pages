@@ -420,7 +420,7 @@ struct PublishSkillTests {
     /// `command not found` and no instruction covering it.
     @Test(arguments: [
         "stele auth status", "stele auth login", "stele auth logout", "stele publish",
-        "stele update", "stele amend", "stele skill", "stele admin clients",
+        "stele update", "stele amend", "stele delete", "stele skill", "stele admin clients",
     ])
     func documentsEveryCommandTheAgentNeeds(command: String) {
         #expect(skillDocument.markdown.contains(command), "\(command)")
@@ -544,11 +544,15 @@ struct PublishSkillTests {
     /// would run it through. A skill that teaches an example the server rejects is worse than
     /// no skill: the agent's first act on the first try is a `400`.
     @Test func exampleSlugsAreValid() throws {
-        // The three places a name can follow: the flag that requests one, the update
-        // command's first argument, and the route table's path. `?slug=` is gone with the
-        // curl it belonged to — the flag replaced it.
+        // The four places a name can follow: the flag that requests one, the two commands
+        // that take a slug as their first argument, and the route table's path. `?slug=` is
+        // gone with the curl it belonged to — the flag replaced it.
+        //
+        // `stele amend ` is deliberately *not* a marker, though it takes a slug there too:
+        // the prose also writes `stele amend --ttl` as a noun for the retiming verb, and this
+        // scan would read `--ttl` as an example slug and reject a document that is correct.
         var examples: [String] = []
-        for marker in ["--slug ", "stele update ", "/\(ServerRoute.pages)/"] {
+        for marker in ["--slug ", "stele update ", "stele delete ", "/\(ServerRoute.pages)/"] {
             var remainder = Substring(skillDocument.markdown)
             while let found = remainder.range(of: marker) {
                 let tail = remainder[found.upperBound...]
@@ -588,23 +592,31 @@ struct PublishSkillTests {
         #expect(skillDocument.markdown.contains(code), "\(code)")
     }
 
-    /// The delete verb has to appear in the route table and must not appear as something to
-    /// run, and those two halves are one fact rather than two.
+    /// `stele delete` shipped, and this test is what that arrival turned over — the same way
+    /// `documentsTheAmendRoute` was turned over by `stele amend`, and for the same reason.
     ///
-    /// The route table is where an agent looks to decide whether a verb exists at all; the
-    /// document tells it not to invent sub-paths, so a verb missing from that table is a
-    /// capability it will not use. But `stele` ships no delete command, so the only way to
-    /// act on that row is to reach past the tool for a credential — which is precisely what
-    /// `neverPutsTheCredentialInTheAgentsHands` exists to forbid. A row that named the verb
-    /// and stopped there would be an invitation to go find a way, so the document says the
-    /// gap out loud in the same breath, exactly as it does for `?ttl=`. When the CLI grows a
-    /// delete command, this test is the one to come back to.
+    /// What it used to hold together was a tension: the route table is where an agent looks
+    /// to decide whether a verb exists at all, and the document tells it not to invent
+    /// sub-paths, so a verb missing from that table is a capability it will not use — but
+    /// the only way to act on the row was to go find a credential, which is the one thing
+    /// `neverPutsTheCredentialInTheAgentsHands` exists to forbid. The document resolved that
+    /// by naming the verb and saying in the same breath that nothing ran it. Both halves of
+    /// that sentence are now false, so the negative assertion is inverted: **"no delete
+    /// command"** in any spelling is the claim to catch, on the same reasoning as
+    /// `doesNotClaimALifetimeIsUnchangeable` — it would read fine, pass everything else here,
+    /// and teach an agent to refuse a request it can satisfy.
     ///
-    /// `204` is asserted *absent* for the same reason, and it is why the status is missing
-    /// from `documentsEveryFailureStatus`' arguments too — that table is what a command
-    /// tells you, and no command can earn a `204` today. The assertion is anchored on the
-    /// row shape rather than the bare digits, which would collide with any byte limit that
-    /// happened to contain them.
+    /// `204` flips with it. It was asserted *absent* because that table is what a command
+    /// tells you and no command could earn one; `stele delete` earns exactly that, and a
+    /// success table with no row for the only command that answers `204` is a gap in the one
+    /// direction an agent cannot recover from — it would look for a URL that was never
+    /// printed. Still anchored on the row shape rather than the bare digits, which would
+    /// collide with any byte limit containing them.
+    ///
+    /// The empty stdout is the third assertion and the one with no status behind it. Every
+    /// other page command prints a URL, and `url=$(stele publish page.html)` is an idiom the
+    /// document teaches — an agent carrying that over reports whatever it captured, which
+    /// here is nothing at all.
     @Test func documentsTheDeleteRoute() {
         let markdown = skillDocument.markdown
         #expect(
@@ -612,8 +624,22 @@ struct PublishSkillTests {
                 "| `DELETE /\(ServerRoute.pages)/:slug` | `\(ClientScope.publish.rawValue)` |"
             )
         )
-        #expect(markdown.contains("**`stele` has no delete command**"))
-        #expect(!markdown.contains("| `204` |"))
+        // The command, named in the section about deleting rather than only in the command
+        // table — `documentsEveryCommandTheAgentNeeds` proves the string is somewhere in the
+        // document, this proves it is where an agent looking to delete something will read it.
+        #expect(markdown.contains("`stele delete` takes a page down immediately"))
+        #expect(markdown.contains("This is what `stele delete` runs"))
+        // The status a delete actually earns, which nothing else in the suite would notice
+        // the absence of.
+        #expect(markdown.contains("| `204` |"))
+        // And what the command does *not* print. Asserted as one contiguous phrase for the
+        // reason `documentsTheAmendRoute` records: the markdown is a wrapped raw string, so a
+        // claim straddling a line break cannot be pinned at all.
+        #expect(markdown.contains("prints nothing on stdout"))
+        // The inverted negative. Both the absolute and the client-scoped spelling, because
+        // the second is the one a well-meaning edit reaches for.
+        #expect(!markdown.contains("no delete command"))
+        #expect(!markdown.contains("nothing you can run takes a page down"))
     }
 
     /// `PATCH` was the delete row's problem — a verb the server had and the client could not
@@ -739,10 +765,10 @@ struct PublishSkillTests {
     /// The consequence no status code can carry, pinned as exact sentences the way
     /// `documentsThePutDifference` is. A delete here frees the name rather than retiring it,
     /// so a page taken down is a URL that may one day serve a stranger's page — and it is
-    /// the *agent*, not the server, that has to decide the user meant that. That the CLI
-    /// cannot delete today makes this more worth keeping, not less: it is the argument the
-    /// agent relays to a user asking for the capability, and the argument it will need at
-    /// hand on the day a `stele delete` arrives. An edit that compressed this section into
+    /// the *agent*, not the server, that has to decide the user meant that. It was worth
+    /// keeping while `stele` could not delete at all, as the argument to relay to a user
+    /// asking for the capability; now that `stele delete` exists it is the argument that has
+    /// to be made *before* the command runs. An edit that compressed this section into
     /// "removes the page" would still pass every other assertion in this suite while
     /// dropping the only part that changes what a caller does.
     @Test func documentsThatDeletionIsPermanent() {
