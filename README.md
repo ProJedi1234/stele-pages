@@ -9,10 +9,11 @@ http://localhost:8080/radiant-surf-gecko
 ```
 
 The `stele` CLI ([stele-cli](https://github.com/ProJedi1234/stele-cli)) holds the
-credential so that whoever runs it — usually an agent — never has to. Underneath it is an
-ordinary HTTP request, and curl still works if you are holding a token yourself — which is
-today the only way to reach `PATCH /pages/:slug`, since the CLI exposes `--ttl` on a publish
-but has no command that renames or retimes a page afterwards:
+credential so that whoever runs it — usually an agent — never has to. `POST`, `PUT` and
+`PATCH` each have a command in front of them — `stele publish`, `stele update` and
+`stele amend` — which leaves `DELETE /pages/:slug` as the one write with no command that
+reaches it. Underneath it is an ordinary HTTP request, and curl still works if you are holding
+a token yourself, which is what taking a page down early still takes:
 
 ```
 $ curl -X POST "localhost:8080/pages?ttl=never" \

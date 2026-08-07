@@ -102,7 +102,11 @@ public enum SteleCLI {
         CLIExit(
             5,
             "That slug is taken.",
-            "Choose another `\(slugFlag)`, or omit it and take a generated one."
+            """
+            Choose another `\(slugFlag)`. On `stele publish` you can instead omit it and take \
+            a generated name; on `stele amend` omitting it asks for no rename at all, so there \
+            it is the only way out.
+            """
         ),
         CLIExit(
             6,
