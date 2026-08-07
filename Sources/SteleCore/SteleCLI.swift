@@ -78,7 +78,14 @@ public enum SteleCLI {
     /// package can offer. `Exit` in the client is the authority — this is a transcription of
     /// it, and the two are checked against each other by a human reading both.
     public static let exits: [CLIExit] = [
-        CLIExit(0, "It worked.", "Report the URL it printed, with the page's deadline."),
+        CLIExit(
+            0,
+            "It worked.",
+            """
+            Report the URL it printed, with the page's deadline. `stele delete` prints \
+            neither — there is no page left to point at.
+            """
+        ),
         CLIExit(
             1,
             "The input was wrong, or the server refused it for a reason with no better answer.",
@@ -116,7 +123,10 @@ public enum SteleCLI {
         CLIExit(
             7,
             "Nothing is published at that slug — or it has expired.",
-            "Publish it instead: `stele publish <file> \(slugFlag) <name>`."
+            """
+            Publish it instead: `stele publish <file> \(slugFlag) <name>`. On a delete there \
+            is nothing left to remove, so this is the outcome you wanted.
+            """
         ),
         CLIExit(
             8,
