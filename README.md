@@ -181,6 +181,7 @@ happens to run the app, which is rarely the machine you chose for durable storag
 | `PUT /pages/:slug` | `publish` | Replaces a stored page's body and content type, returns `{slug, url, expires}` as `200` |
 | `PATCH /pages/:slug` | `publish` | Renames a page with `?slug=` and retimes it with `?ttl=`, leaving its contents alone, returns `{slug, url, expires}` as `200` |
 | `DELETE /pages/:slug` | `publish` | Removes a stored page and frees the slug, returns `204` |
+| `POST /auth/github/exchange` | none — it *is* the authentication | Trades a GitHub access token for a stele credential, returns `{token, client}` as `201`. The token is shown once |
 | `GET /admin/whoami` | any credential | Reports the credential presented — name, scopes, expiry, last use — and never a token |
 | `POST /admin/clients` | `admin` | Mints a credential, returns `{token, client}` as `201`. The token is shown once and never again |
 | `GET /admin/clients` | `admin` | Lists credentials — names, scopes, last use, revocation — and never a token |
@@ -188,7 +189,13 @@ happens to run the app, which is rarely the machine you chose for durable storag
 
 The auth column names the *scope* a bearer token has to carry; see "Credentials" below.
 `GET /admin` itself answers the same uniform 404 as any other miss, so nothing on the
-public read surface advertises that the credential routes are there.
+public read surface advertises that the credential routes are there, and `GET /auth` does
+the same.
+
+`POST /auth/github/exchange` is the one route with no credential in front of it that is not
+a public read. It is where a credential comes *from*, so requiring one would be circular —
+what it verifies instead is a GitHub identity, against the operator's allowlist. It is
+argued out under "Credentials" below.
 
 `GET /admin/whoami` is the one route under `/admin` that requires no scope, only a valid
 credential. It is what `stele auth status` asks and what `stele auth login` checks before
@@ -312,9 +319,11 @@ token, and this one is not. A missing `Authorization` header keeps its own messa
 a caller who presented nothing has learned nothing.
 
 **`STELE_UPLOAD_TOKEN` is now the admin credential, and it can no longer publish.** It
-resolves to a synthesised client carrying `admin` alone, which is the bootstrap: minting
-the first per-client credential otherwise needs a credential you cannot yet have. It stays
-required and defaultless, and it moves out of every agent's environment into one
+resolves to a synthesised client carrying `admin` alone, which is the bootstrap: minting the
+first `admin`-scoped credential otherwise needs a credential you cannot yet have. A
+`publish` one has a second way in — signing in with GitHub, below — but that route mints
+`publish` and only `publish`, so the shared token is still the only door into the rest. It
+stays required and defaultless, and it moves out of every agent's environment into one
 operator's:
 
 ```sh
@@ -337,6 +346,72 @@ reserving it, so `claude-code` stays `claude-code` across a rotation instead of 
 `claude-code-2`. Uniqueness still holds where it matters — there is at most one live
 credential per name, which is what keeps `DELETE /admin/clients/:name` unambiguous, and it
 always takes the live one.
+
+**Signing in with GitHub mints a credential without an operator in the loop.** An owner
+gets their own publishing credential without holding `STELE_UPLOAD_TOKEN` at all, and
+without anybody having to hand them one over a channel that keeps it. The client runs
+GitHub's device authorization grant
+([RFC 8628](https://datatracker.ietf.org/doc/html/rfc8628)) itself — asks GitHub for a code,
+the person types it into a browser, the client polls until GitHub hands over an access
+token — and then POSTs that token once to `POST /auth/github/exchange` and discards it. The
+server asks GitHub who the token belongs to, checks the login against `STELE_GITHUB_OWNERS`,
+and answers with a `publish`-scoped credential named after the login: the same
+`{token, client}` body `POST /admin/clients` returns, and the same token shown once and
+never again. The device flow and the command that drives it belong to
+[stele-cli](https://github.com/ProJedi1234/stele-cli) and land there with
+`stele auth login`; what this repository holds today is the exchange, so until that command
+ships the GitHub token has to be obtained by hand.
+
+**The server checks *who* a token identifies, not *which app issued it*.** The exchange
+presents whatever access token it is handed to GitHub's `GET /user` and reads the login off
+the answer, so a classic PAT, a fine-grained PAT and a token minted by some entirely
+different OAuth app all mint a credential provided they identify an owner. The practical
+consequence is worth being plain about: any leaked GitHub credential belonging to a listed
+owner is also a stele publishing credential until that owner revokes it at GitHub. The half
+of that which is easy to miss is that it cuts the other way too — because a sign-in retires
+the live credential holding that login's name, whoever holds the leaked GitHub token can
+sign in repeatedly and kick the owner's own agent off each time. It is a remote stop button
+as much as it is a spare key. Closing
+that gap means asking GitHub whether a token was issued to *this* app
+(`POST /applications/{client_id}/token`), which needs the OAuth app's client secret — this
+deployment has nowhere to hold one, so the check is deliberately not built, and
+`STELE_GITHUB_CLIENT_ID` records the trusted app without yet enforcing it.
+
+**GitHub is in the login path and out of the publish path.** Everything after a sign-in is
+an ordinary stele bearer token, so a GitHub outage cannot stop anybody publishing. It also
+must not be able to *refuse* anybody: an outage is a `500` on the exchange and never a
+`401`. A `401` there would read as "my account is no longer allowed", and the honest
+response to that is to re-authenticate — in a loop, against the one endpoint that cannot
+answer.
+
+**Every refusal is one byte-identical `401`.** A token GitHub rejected, a real GitHub
+account that is not an owner here, and a deployment with no allowlist configured are three
+facts the caller learns none of. The middle one is why: an endpoint that distinguished it
+would be a directory of who owns this deployment, walkable by anyone holding a GitHub token
+of their own — and the README's licence to return distinguishing errors applies to callers
+already behind a credential, which on this route is nobody by construction. A malformed body
+is still its own `400` naming the shape expected, on the same reasoning that keeps a missing
+`Authorization` header distinguishable: a caller who presented nothing has learned nothing.
+
+**Signing in again rotates.** The live credential under that login's name is revoked and a
+fresh one minted under the same name, which is the only recovery there can be for a lost
+token — the plaintext exists nowhere, so there is nothing to look up. The retired row keeps
+its `revoked_at` as the record of when it stopped being trusted, and this is exactly the
+revoke-then-mint path the live-only name index exists for. A login that has never signed in
+before finds no name to retire and simply mints.
+
+The revoke resolves by name and by nothing else, so `POST /admin/clients` and the exchange
+share one namespace. A credential you hand-minted as `projedi1234` is named after somebody's
+GitHub login, and that person's next sign-in will retire it and replace it with a
+`publish`-scoped one — including if it was your own `admin` credential. Naming a credential
+after a login is how the exchange makes rotation work; name your hand-minted ones after the
+agent that holds them, not after a person.
+
+The allowlist gates *minting* and nothing else: taking a login out of `STELE_GITHUB_OWNERS`
+does not disturb a credential that login already holds, because the list is consulted at the
+moment one is issued and never again. Cutting a credential off is `DELETE
+/admin/clients/:name`. Both `STELE_GITHUB_OWNERS` and `STELE_GITHUB_CLIENT_ID` — including
+why the OAuth app's callback URL is never used — are in "Configuration".
 
 Every write records the credential that made it in `pages.client_id`, on `POST` and on
 `PUT` alike — the column says who wrote the bytes currently being served, so replacing a
@@ -599,10 +674,11 @@ it are worth knowing before reading any further into it: the sign-in is a device
 which has no redirect in it, so **the callback URL GitHub's registration form insists on is
 never used** and there is no handler behind it to go looking for; and the client runs that
 flow itself with its own compiled-in copy of the ID, so setting this variable does not hand
-the client anything. It records on the server side which app is trusted, beside the
-allowlist of the people that app may identify. There is deliberately no endpoint that
-serves it — one more unauthenticated route, to spare the client a constant it already has,
-is a bad trade.
+the client anything. What it records is which app the deployment *intends* to trust — a
+note, not yet a boundary: nothing in the exchange reads it, and until the provenance check
+described under "Credentials" exists, a token from any app identifying an allowlisted owner
+mints a credential. There is deliberately no endpoint that serves the value — one more
+unauthenticated route, to spare the client a constant it already has, is a bad trade.
 
 ## Deploying
 

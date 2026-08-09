@@ -30,10 +30,11 @@ struct NotFoundTests {
         )
 
         // Malformed (too short), well-formed but never published, published but past its
-        // deadline, and three bare segments whose real endpoints are elsewhere: `/pages`
-        // (its responders are POST and the `:slug` child), `/assets` (the stylesheet) and
-        // `/admin` (the client routes). Each of those three needs its own GET responder,
-        // because the trie matches the literal node and does not backtrack to `/:slug`.
+        // deadline, and four bare segments whose real endpoints are elsewhere: `/pages`
+        // (its responders are POST and the `:slug` child), `/assets` (the stylesheet),
+        // `/admin` (the client routes) and `/auth` (the GitHub exchange, two segments
+        // further down). Each of those four needs its own GET responder, because the trie
+        // matches the literal node and does not backtrack to `/:slug`.
         //
         // `/skill` is deliberately absent, even though this list otherwise mirrors
         // `ServerRoute.names`: it answers with the publish document, not a 404, so it has
@@ -41,7 +42,7 @@ struct NotFoundTests {
         // is wrong — `PublishSkillTests.servesTheSkill` is what covers that path.
         let paths = [
             "/x", "/quiet-cedar-otter", "/brisk-maple-compass", "/\(ServerRoute.pages)",
-            "/\(ServerRoute.assets)", "/\(ServerRoute.admin)",
+            "/\(ServerRoute.assets)", "/\(ServerRoute.admin)", "/\(ServerRoute.auth)",
         ]
         // Collected inside the test closure and returned out of it: the closure is
         // `@Sendable`, so it cannot mutate a captured local.
@@ -91,13 +92,15 @@ struct NotFoundTests {
         }
     }
 
-    /// The GET responders on `/pages` and `/admin` exist only to keep 404s uniform — they
-    /// must not sit behind their group's bearer-token middleware, or an unauthenticated
+    /// The GET responders on `/pages`, `/admin` and `/auth` exist only to keep 404s uniform
+    /// — they must not sit behind a group's bearer-token middleware, or an unauthenticated
     /// probe would get a 401 there and a 404 everywhere else, which is the same leak with a
     /// different status code. `/admin` is the one where it would matter most: a 401 on the
-    /// bare segment advertises where the credential-minting routes live.
+    /// bare segment advertises where the credential-minting routes live. `/auth` is in no
+    /// group at all — the route beneath it is the authentication — so its stub is the case
+    /// where the mistake would be *adding* a guard rather than inheriting one.
     @Test("a bare routed segment answers 404 without asking for a credential", arguments: [
-        ServerRoute.pages, ServerRoute.admin,
+        ServerRoute.pages, ServerRoute.admin, ServerRoute.auth,
     ])
     func bareSegmentsNeedNoAuth(segment: String) async throws {
         try await TestFixture.makeApp().test(.router) { client in

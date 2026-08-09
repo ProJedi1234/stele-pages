@@ -18,6 +18,11 @@ let package = Package(
         // Only for SHA-256 over client tokens. Plain hashing, not a password KDF — see
         // `ClientCredential`.
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
+        // The one outbound HTTP call this server makes: asking GitHub who an access token
+        // belongs to, during sign-in. Declared explicitly rather than leaned on
+        // transitively — Hummingbird already pulls it in, and depending on that would make
+        // this server's one network dependency an accident of somebody else's manifest.
+        .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.36.0"),
     ],
     targets: [
         .executableTarget(
@@ -33,6 +38,7 @@ let package = Package(
                 .product(name: "NIOSSL", package: "swift-nio-ssl"),
                 .product(name: "HTTPTypes", package: "swift-http-types"),
                 .product(name: "Crypto", package: "swift-crypto"),
+                .product(name: "AsyncHTTPClient", package: "async-http-client"),
             ]
         ),
         .testTarget(
