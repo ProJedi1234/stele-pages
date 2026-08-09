@@ -600,7 +600,8 @@ struct PageStoreDatabaseTests {
                     name: "claude-code",
                     tokenHash: ClientCredential.hash(ClientCredential.generate()),
                     scopes: [ClientScope.publish.rawValue],
-                    expiresAt: nil
+                    expiresAt: nil,
+                    githubLogin: nil
                 ) == nil
             )
 
@@ -615,6 +616,88 @@ struct PageStoreDatabaseTests {
             let retry = try #require(try await store.revoke(name: "claude-code"))
             #expect(retry.id == reissued.id)
             #expect(retry.revokedAt == revoked.revokedAt)
+        }
+    }
+
+    /// What version 5 adds, and — the half that matters more — what it leaves alone.
+    ///
+    /// Driven with a five-version prefix rather than `migrate()`, like every other
+    /// version-shape test here. It is the whole list today, which is exactly when the
+    /// distinction is invisible and exactly when it has to be made: the day version 6 lands,
+    /// `migrate()` would quietly change what this test is asserting about, while a prefix
+    /// still means version 5.
+    ///
+    /// The credential minted *before* the migration is the reason this is a Postgres test and
+    /// not a `MigrationListTests` one. `String?` decoded from a genuine NULL is the same
+    /// mistake `Date?` is — it compiles, it passes against the in-memory fake, and it fails
+    /// at runtime on the first row that has one — and every credential in every existing
+    /// deployment is such a row. It goes in through raw SQL rather than through `create`
+    /// because at that point the column does not exist yet, which is also precisely the state
+    /// a real upgrade finds.
+    ///
+    /// All four of `ClientStore`'s projections are read afterwards, because the column list
+    /// is retyped in each of them: the `RETURNING` of an insert, the lookup by digest, the
+    /// listing, and the `RETURNING` of a revoke. A projection left at seven columns fails the
+    /// decode outright, so what this is really pinning is that none of the four was missed.
+    @Test func migrationFiveRecordsTheGitHubLoginAndLeavesOlderCredentialsNull() async throws {
+        try await PostgresFixture.withThrowawaySchema { database in
+            try await database.store.migrate(Array(PageStore.migrations.prefix(4)))
+            let inheritedToken = ClientCredential.generate()
+            try await database.client.query(
+                """
+                INSERT INTO clients (name, token_hash)
+                VALUES ('minted-by-hand', \(Data(ClientCredential.hash(inheritedToken))))
+                """,
+                logger: PostgresFixture.logger
+            )
+
+            try await database.store.migrate(Array(PageStore.migrations.prefix(5)))
+            #expect(
+                try await PostgresFixture.appliedVersions(on: database.client) == [1, 2, 3, 4, 5]
+            )
+
+            // `text`, nullable, no default — the three properties the migration's comment
+            // argues for, and the two of them (`YES`, no default) that a later "tidy-up"
+            // would take away together.
+            let column = try await PostgresFixture.scalar(
+                """
+                SELECT data_type || ' ' || is_nullable
+                    || ' ' || coalesce(column_default, 'no default')
+                FROM information_schema.columns
+                WHERE table_schema = \(database.schema) AND table_name = 'clients'
+                  AND column_name = 'github_login'
+                """,
+                as: String.self, on: database.client
+            )
+            #expect(column == "text YES no default")
+
+            let store = database.clientStore
+            // The credential that predates the column still authenticates, and reports
+            // exactly nothing about GitHub. This is the NULL decode.
+            let inherited = try #require(try await store.authenticate(token: inheritedToken))
+            #expect(inherited.name == "minted-by-hand")
+            #expect(inherited.githubLogin == nil)
+
+            // And the round trip, in GitHub's canonical casing rather than the folded name —
+            // a store that lowercased on the way in or out would pass every assertion that
+            // only asked whether *something* was recorded.
+            let (signedIn, signedInToken) = try await store.create(
+                name: "projedi1234",
+                scopes: [.publish],
+                expiresAt: nil,
+                githubLogin: "ProJedi1234"
+            )
+            #expect(signedIn.githubLogin == "ProJedi1234")
+            #expect(try await store.authenticate(token: signedInToken) == signedIn)
+
+            let listed = try await store.allClients()
+            #expect(listed.first { $0.name == "projedi1234" }?.githubLogin == "ProJedi1234")
+            #expect(listed.first { $0.name == "minted-by-hand" }?.githubLogin == nil)
+
+            // Revocation is when an operator most wants to know whose credential this was,
+            // so the fourth projection carries it too.
+            let revoked = try #require(try await store.revoke(name: "projedi1234"))
+            #expect(revoked.githubLogin == "ProJedi1234")
         }
     }
 
@@ -694,7 +777,8 @@ struct PageStoreDatabaseTests {
                     name: "claude-code",
                     tokenHash: ClientCredential.hash(ClientCredential.generate()),
                     scopes: [ClientScope.publish.rawValue],
-                    expiresAt: nil
+                    expiresAt: nil,
+                    githubLogin: nil
                 ) == nil
             )
             #expect(
@@ -702,7 +786,8 @@ struct PageStoreDatabaseTests {
                     name: "a-different-name",
                     tokenHash: ClientCredential.hash(agentToken),
                     scopes: [ClientScope.publish.rawValue],
-                    expiresAt: nil
+                    expiresAt: nil,
+                    githubLogin: nil
                 ) == nil
             )
             #expect(try await store.allClients().map(\.name) == ["claude-code", "operator"])

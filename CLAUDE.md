@@ -124,12 +124,16 @@ The slug-retry policy, the requested-slug policy and the reclaim-before-insert o
 are shared code in `PageStoring`'s extension, so the router tests exercise the real thing
 (the 503 test runs the retry loop to genuine exhaustion, and the reclamation test proves a
 just-expired slug is claimable by the very upload that freed it).
-`ClientStoring` is the same arrangement for credentials: the primitives are
-lookup-by-hash, record-a-use, insert-if-free, list and revoke, while the two pieces of
-policy live in the extension — `authenticate(token:at:)`, which collapses the hash, the
-revocation check and the expiry check into one nil, and `create(name:scopes:expiresAt:)`,
-which generates a token and stores only its digest. `InMemoryClientStore` therefore cannot
-disagree with `ClientStore` about what "valid" means, or about what gets hashed.
+`ClientStoring` is the same arrangement for credentials: the primitives are lookup-by-hash,
+record-a-use, insert-if-free, list and revoke, while the two pieces of policy live in the
+extension — `authenticate(token:at:)`, which collapses the hash, the revocation check and the
+expiry check into one nil, and `create(name:scopes:expiresAt:githubLogin:)`, which generates
+a token, stores only its digest, and records the GitHub login when a sign-in is what minted
+the credential. That last parameter is defaulted on the policy method and required on the
+`insert` primitive, which is the asymmetry that stops a conformer dropping the column in
+silence — a protocol requirement cannot carry a default, so no store can forget it and still
+compile. `InMemoryClientStore` therefore cannot disagree with `ClientStore` about what
+"valid" means, or about what gets hashed.
 
 `AdminClientsTests` covers the three credential routes, and most of what it asserts is
 negative: that the plaintext token appears in the `201` body and in no other response, on
@@ -188,10 +192,10 @@ It creates and drops a throwaway schema per test, and is `.serialized` because P
 advisory locks are scoped to the database, which per-test schemas do not divide. It
 covers the migration runner: the schema version 1 produces, what version 2 adds (the
 nullable `expires_at` and its *partial* index — assert the `indexdef`, not just the index
-name, or a full index passes), what version 3 adds, what version 4 replaces, the upgrade
-path from a database created by the pre-migration bootstrap, skipping, ordering,
-exactly-once backfills, rollback of a failed migration, and the advisory lock. Tests that
-pin one version's shape drive `migrate(_:)` with a prefix of the list rather than
+name, or a full index passes), what version 3 adds, what version 4 replaces, what version 5
+adds, the upgrade path from a database created by the pre-migration bootstrap, skipping,
+ordering, exactly-once backfills, rollback of a failed migration, and the advisory lock.
+Tests that pin one version's shape drive `migrate(_:)` with a prefix of the list rather than
 `migrate()`, so they keep meaning what they say as versions are appended — version 3's test
 in particular, since version 4 deliberately drops the `name` constraint it asserts. The ones
 that are about the *runner* rather than a version compare against
@@ -233,6 +237,11 @@ as a `char[]`, not as `bytea` — and that `scopes` binds and decodes as `text[]
 directions. The write half is there too: that an untargeted `ON CONFLICT DO NOTHING`
 catches the `name` *and* `token_hash` constraints rather than throwing on one, and that
 `COALESCE(revoked_at, now())` really does leave a second revoke's timestamp alone.
+`migrationFiveRecordsTheGitHubLoginAndLeavesOlderCredentialsNull` is where the column list
+itself is checked: `ClientStore` retypes it in four statements — the two `RETURNING`s, the
+lookup by digest and the listing — so that test reads a credential back through all four,
+and it is also where `String?` from a genuine NULL is decoded, which is the `Date?` mistake
+in another type and true of every credential minted before version 5.
 `PageStore`'s own `insert` / `fetch` / `update` are covered too, which they had to be once
 writes started recording `pages.client_id`: that column is a foreign key, so the value the
 write path chooses is checked by the database and by nothing else — the in-memory fake
@@ -500,12 +509,13 @@ Don't "fix" these without a reason; the README argues them out in full.
 - **A repeat GitHub sign-in revokes and re-mints under the same name.** It is not a `409`
   and not a no-op: the live credential holding the login's name is revoked, then a fresh one
   minted under it, which is the only recovery available for a lost token because the
-  plaintext exists nowhere. It composes `revoke(name:)` and `create(name:scopes:expiresAt:)`
-  and adds no `ClientStoring` primitive — insert-if-free already refuses a live duplicate
-  atomically and `revoke` already resolves several-rows-one-name, so the only thing between
-  them is ordering, and ordering that means "what a login is" is route policy with one
-  caller. It rides migration 4's live-only name index, which is what makes revoke-then-mint
-  legal at all. `GitHubExchangeTests.aRepeatLoginDisturbsNoOtherCredentialAndNoEarlierRetirement`
+  plaintext exists nowhere. It composes `revoke(name:)` and
+  `create(name:scopes:expiresAt:githubLogin:)` and adds no `ClientStoring` primitive —
+  insert-if-free already refuses a live duplicate atomically and `revoke` already resolves
+  several-rows-one-name, so the only thing between them is ordering, and ordering that means
+  "what a login is" is route policy with one caller. It rides migration 4's live-only name
+  index, which is what makes revoke-then-mint legal at all.
+  `GitHubExchangeTests.aRepeatLoginDisturbsNoOtherCredentialAndNoEarlierRetirement`
   pins the half that a looser `revoke` would get away with.
   **The consequence to keep straight is that `revoke(name:)` resolves by name and by nothing
   else**, so the exchange and `POST /admin/clients` mint into one namespace: a hand-minted

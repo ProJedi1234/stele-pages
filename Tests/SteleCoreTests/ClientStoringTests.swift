@@ -148,6 +148,38 @@ struct ClientStoringTests {
         #expect(try await store.authenticate(token: token, at: now.addingTimeInterval(61)) == nil)
     }
 
+    /// The field travels with the credential rather than with the request that minted it: it
+    /// is written once by `create` and read back by every route that reports a credential at
+    /// all. Both origins are exercised in one test, because "carries the login" only means
+    /// something alongside "and the hand-minted one does not" — a store that recorded a
+    /// constant would satisfy either half alone.
+    ///
+    /// It survives revocation deliberately. A revoked row is what an incident is
+    /// reconstructed from, and "whose credential was that?" is the question being asked at
+    /// exactly that moment.
+    @Test func aMintedCredentialCarriesTheGitHubLoginThatMintedIt() async throws {
+        let store = InMemoryClientStore()
+
+        let (signedIn, signedInToken) = try await store.create(
+            name: "projedi1234", scopes: [.publish], expiresAt: nil, githubLogin: "ProJedi1234"
+        )
+        #expect(signedIn.githubLogin == "ProJedi1234")
+        let resolved = try await store.authenticate(token: signedInToken, at: now)
+        #expect(resolved?.githubLogin == "ProJedi1234")
+
+        // The default is the admin route's answer, and it is an absence rather than a blank.
+        let (handMinted, handMintedToken) = try await store.create(
+            name: "claude-code", scopes: [.publish], expiresAt: nil
+        )
+        #expect(handMinted.githubLogin == nil)
+        #expect(try await store.authenticate(token: handMintedToken, at: now)?.githubLogin == nil)
+
+        #expect(try await store.revoke(name: "projedi1234")?.githubLogin == "ProJedi1234")
+        let listed = try await store.allClients()
+        #expect(listed.first { $0.name == "projedi1234" }?.githubLogin == "ProJedi1234")
+        #expect(listed.first { $0.name == "claude-code" }?.githubLogin == nil)
+    }
+
     // MARK: - Listing and revoking
 
     /// Revoked credentials stay in the listing. "Which credentials did I revoke, and when?"

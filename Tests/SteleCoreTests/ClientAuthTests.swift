@@ -205,7 +205,8 @@ private struct UnwritableClientStore: ClientStoring {
     /// up for reads and rejecting writes. Nothing in this suite reaches the admin routes,
     /// so a store that could mint here would only be pretending.
     func insert(
-        name: String, tokenHash: [UInt8], scopes: [String], expiresAt: Date?
+        name: String, tokenHash: [UInt8], scopes: [String], expiresAt: Date?,
+        githubLogin: String?
     ) async throws -> Client? {
         throw WriteRefused()
     }
