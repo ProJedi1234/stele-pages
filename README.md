@@ -574,6 +574,36 @@ variable, rather than surfacing later as a connection error.
 Postgres works, exactly as it does with psql), and only `verify-ca` / `verify-full`
 check the chain and hostname. Switching databases is a one-line change.
 
+Two variables configure signing in with GitHub, and neither of them is a secret — that is
+the point of it. `STELE_GITHUB_OWNERS` is the comma-separated list of GitHub logins allowed
+to mint a publishing credential by signing in. Matching is case-insensitive, because
+GitHub's own is, and an operator who typed the casing GitHub displays did not mean to lock
+out the same account spelled any other way.
+
+**The allowlist fails closed.** Absent, empty, whitespace, or nothing but commas all mean
+the same thing: nobody may mint. This is the reasoning that keeps `STELE_UPLOAD_TOKEN`
+defaultless, applied to a list instead of a token — a list whose absence meant "anyone"
+would leave minting open on every deployment that had simply not got round to setting it,
+and open with nothing to notice. Failing closed turns that same oversight into a refused
+sign-in, which somebody sees. The variable is optional at boot even so: a deployment that
+has not adopted GitHub sign-in should not fail to start over a feature it does not use, so
+it is the sign-in that refuses, not the process.
+
+The list gates *minting* and nothing else. Taking a login out of it does not disturb a
+credential that login already holds — credentials are cut off by revoking them, `DELETE
+/admin/clients/:name`, and the allowlist is consulted only at the moment one is issued.
+
+`STELE_GITHUB_CLIENT_ID` records which GitHub OAuth app the deployment trusts (GitHub →
+Settings → Developer settings → OAuth Apps). It is not a secret either. Two things about
+it are worth knowing before reading any further into it: the sign-in is a device flow,
+which has no redirect in it, so **the callback URL GitHub's registration form insists on is
+never used** and there is no handler behind it to go looking for; and the client runs that
+flow itself with its own compiled-in copy of the ID, so setting this variable does not hand
+the client anything. It records on the server side which app is trusted, beside the
+allowlist of the people that app may identify. There is deliberately no endpoint that
+serves it — one more unauthenticated route, to spare the client a constant it already has,
+is a bad trade.
+
 ## Deploying
 
 Create the role and database on your Postgres host first:
@@ -596,7 +626,12 @@ docker compose -f docker-compose.deploy.yml up -d --build
 ```
 
 All three of those variables are required and the stack refuses to start without them,
-rather than defaulting to something that would quietly be wrong.
+rather than defaulting to something that would quietly be wrong. The two GitHub sign-in
+variables above belong in that same file and are optional — left out, the stack starts
+normally with an allowlist that permits nobody. Both compose stacks name them explicitly,
+which is what makes setting them work: Compose interpolates `.env` into the compose file
+rather than handing it to the container, so a variable the compose file does not name never
+reaches the process however plainly it is set.
 
 Nothing else changes — any unapplied migrations run on boot, exactly as they do locally.
 An existing deployment needs no dump and restore: version 1 describes the schema it

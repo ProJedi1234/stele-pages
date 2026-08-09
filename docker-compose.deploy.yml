@@ -27,6 +27,14 @@ services:
       # postgres://stele:PASSWORD@DB_HOST:5432/stele
       DATABASE_URL: "${DATABASE_URL:?not set — point this at your Postgres host, see README}"
       STELE_UPLOAD_TOKEN: "${STELE_UPLOAD_TOKEN:?not set — generate one with openssl rand -hex 32}"
+      # Named here because Compose forwards only what this block names: it reads .env to
+      # interpolate `${...}`, not to pass anything through, so a variable an operator sets
+      # there and this file omits is dropped with nothing to see. Deliberately `:-` and not
+      # `:?` like the ones above — a deployment that has not adopted GitHub sign-in must
+      # still boot. Unset arrives as the empty string, which Configuration reads as unset:
+      # an allowlist that permits nobody, so it is the sign-in that refuses, not the process.
+      STELE_GITHUB_OWNERS: ${STELE_GITHUB_OWNERS:-}
+      STELE_GITHUB_CLIENT_ID: ${STELE_GITHUB_CLIENT_ID:-}
       # The origin this is reached on. Only affects the URL echoed back by POST /pages.
       STELE_BASE_URL: "${STELE_BASE_URL:?not set — for example https://stele.example.com}"
       STELE_SLUG_WORDS: ${STELE_SLUG_WORDS:-3}

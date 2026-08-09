@@ -16,6 +16,85 @@ public enum ConfigurationError: Error, CustomStringConvertible {
     }
 }
 
+/// The GitHub logins permitted to mint a publishing credential by signing in with GitHub.
+///
+/// Configuration rather than a secret — the list can be read by anyone who can read the
+/// deployment's environment and nothing is lost, which is the whole point of replacing a
+/// shared bootstrap token with an identity check. What it must never be is *permissive by
+/// omission*. An absent list read as "allow anyone" would leave the minting endpoint open
+/// on every deployment that had not got round to setting it, and open silently, which is
+/// the failure `STELE_UPLOAD_TOKEN`'s missing default exists to prevent. So the empty
+/// allowlist permits nobody, and that rule lives in `permits(_:)` rather than in a `guard`
+/// each caller is trusted to remember: a caller that asks this type whether a login may
+/// mint gets the fail-closed behaviour whether or not it knew to ask for it.
+public struct GitHubOwnerAllowlist: Sendable, Equatable {
+    /// Folded at parse. `permits(_:)` folds its argument with the same function, so both
+    /// sides of every comparison are in the same shape by construction.
+    private let logins: Set<String>
+
+    /// Splits on commas and folds each entry, dropping the ones that are empty once
+    /// trimmed — so `nil`, `""`, `"   "`, `","` and `" , "` all arrive at the allowlist
+    /// that permits nobody, by five routes and with no crash on any of them.
+    ///
+    /// Entries are not otherwise validated, deliberately. A typo'd login is a login that
+    /// will never match, which shows up as one refused sign-in the operator can read;
+    /// throwing a `ConfigurationError` instead would take the whole server down over one
+    /// bad name in a list whose other names were fine.
+    init(parsing raw: String?) {
+        self.logins = Set(
+            (raw ?? "")
+                .split(separator: ",")
+                .map { Self.fold(String($0)) }
+                .filter { !$0.isEmpty }
+        )
+    }
+
+    /// True when no login is permitted, which is where an unset `STELE_GITHUB_OWNERS`
+    /// leaves the server — and a legitimate state to boot in. The endpoint fails closed;
+    /// the process does not fail at all.
+    ///
+    /// This is a fact about the server's *configuration* rather than about any request, and
+    /// it must never be read on a request path. A refusal that branched on it —
+    /// "GitHub sign-in is not configured here" where every other refused sign-in gets one
+    /// identical answer — would tell an unauthenticated caller whether this deployment has
+    /// adopted GitHub sign-in, which is precisely the distinction `permits(_:)` exists to
+    /// collapse. A caller deciding whether someone may mint asks `permits(_:)`, which
+    /// already refuses everything here.
+    public var isEmpty: Bool { logins.isEmpty }
+
+    /// Whether this login may mint a credential. Case-insensitive, and false for every
+    /// login when the allowlist is empty — the fail-closed rule, stated once, here.
+    public func permits(_ login: String) -> Bool {
+        logins.contains(Self.fold(login))
+    }
+
+    /// The single definition of "the same login", applied to both sides of every
+    /// comparison.
+    ///
+    /// GitHub logins are ASCII letters, digits and hyphens and GitHub compares them
+    /// case-insensitively, so folding is a lowercase. It is `lowercased()`, the
+    /// locale-independent one, and must stay that: `lowercased(with:)` under a Turkish
+    /// locale maps `I` to a dotless `ı` and would quietly stop matching an ordinary login
+    /// on a server whose locale nobody thought about.
+    ///
+    /// Folding at parse *and* again at comparison sounds like two places that could
+    /// disagree. It is one function called twice, which is the only arrangement where
+    /// changing the rule reaches both sides of the comparison at once.
+    ///
+    /// The trimming set includes newlines deliberately, and narrowing it back to
+    /// `.whitespaces` would be a real bug: that set is spaces and tabs, so a value reaching
+    /// the server from anything file-shaped — a CRLF `.env`, a YAML block scalar, a secrets
+    /// tool that appends a line ending — keeps the ending on its *last* entry and leaves
+    /// exactly that one login unmatchable. The earlier entries go on working, the allowlist
+    /// still reports itself configured, and the sign-in it refuses is deliberately silent
+    /// about why, so a half-working list is the least diagnosable outcome available here.
+    /// Widening the set costs nothing in the other direction: no GitHub login contains
+    /// whitespace of any kind, so nothing that should be refused becomes permitted.
+    private static func fold(_ login: String) -> String {
+        login.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+}
+
 /// Everything the server reads from the environment, resolved once at startup.
 ///
 /// Nothing here is read again later, so a running server can't half-apply a config
@@ -38,6 +117,48 @@ public struct Configuration: Sendable {
     public var database: PostgresClient.Configuration
     /// Kept for logging, since `PostgresClient.Configuration` doesn't expose these back.
     public var databaseDescription: String
+
+    /// Who may mint a publishing credential by signing in with GitHub.
+    ///
+    /// Optional at boot, which is the one place this parts company with
+    /// `STELE_UPLOAD_TOKEN`: requiring it would fail the next boot of every deployment
+    /// that has not adopted GitHub sign-in, over a value they have no use for. It is the
+    /// *endpoint* that fails closed here, not the process — an unset variable is an
+    /// allowlist that permits nobody, so a server with no `STELE_GITHUB_OWNERS` mints
+    /// nothing through GitHub until an operator says who may.
+    public var githubOwners: GitHubOwnerAllowlist
+
+    /// The client ID of the GitHub OAuth app this deployment trusts, or nil when none is
+    /// registered.
+    ///
+    /// Registration lives at GitHub → Settings → Developer settings → OAuth Apps
+    /// (`https://github.com/settings/developers`). Which app, under which account, and
+    /// whether it has a client secret are facts about one host: they belong in the
+    /// gitignored `docs/homelab.local.md`, and this repository stays free of them.
+    ///
+    /// **The callback URL GitHub's registration form insists on is never used.** Sign-in
+    /// is RFC 8628's device authorization grant, which has no redirect in it at all — the
+    /// client polls GitHub directly and this server never sees a browser come back from
+    /// one. A reader who goes looking for the handler behind that URL will not find one,
+    /// and should not write one to "finish" it.
+    ///
+    /// Read from the environment rather than compiled in as a constant, so a deployment
+    /// can point at its own app without a rebuild. The honest consequence: the client runs
+    /// the device flow itself and carries its own copy of the ID inside its binary, so
+    /// setting this variable does not hand the client anything. What it does is record, on
+    /// the server side, which app this deployment trusts — beside the allowlist of the
+    /// people that app is allowed to identify. Serving the value from an endpoint so the
+    /// client could discover it was considered and rejected: another unauthenticated route
+    /// to keep honest, to spare the client a constant it already has.
+    ///
+    /// Nothing on the server reads it yet. Its consumer is the token-provenance check
+    /// (`POST /applications/{client_id}/token`, which asks GitHub whether an access token
+    /// was issued to *this* app rather than to some other one), and that call needs the
+    /// app's client secret — which this server has no variable to hold and no code path to
+    /// spend, so the check is deliberately not built rather than half-built. Whether the
+    /// registered app happens to have a secret is a fact about one host and stays with the
+    /// others, in `docs/homelab.local.md`.
+    public var githubClientID: String?
 
     /// - Parameter environment: injectable so tests don't have to mutate the process
     ///   environment, which is global and not safe to change concurrently.
@@ -104,6 +225,13 @@ public struct Configuration: Sendable {
         } else {
             self.slugWords = 3
         }
+
+        // Neither of these is required and neither is a secret. The allowlist's absence is
+        // not permissive: parsing nil yields the allowlist that permits nobody, so the
+        // refusal is carried by the value itself rather than by a check somewhere
+        // downstream that a future call site could be written without.
+        self.githubOwners = GitHubOwnerAllowlist(parsing: value("STELE_GITHUB_OWNERS"))
+        self.githubClientID = value("STELE_GITHUB_CLIENT_ID")
 
         guard let databaseURL = value("DATABASE_URL") else {
             throw ConfigurationError.missing(

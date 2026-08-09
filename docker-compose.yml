@@ -49,6 +49,12 @@ services:
       # Read from .env, which Compose loads automatically. Fails loudly rather than
       # starting an unauthenticated upload endpoint.
       STELE_UPLOAD_TOKEN: "${STELE_UPLOAD_TOKEN:?not set — copy .env.example to .env, then generate one with openssl rand -hex 32}"
+      # Also read from .env, and named here for the same reason everything else is: Compose
+      # interpolates that file into this one, it does not hand it to the container. Optional
+      # — empty is the allowlist that permits nobody, which is the right posture for a
+      # deployment that has not adopted GitHub sign-in. See docker-compose.deploy.yml.
+      STELE_GITHUB_OWNERS: ${STELE_GITHUB_OWNERS:-}
+      STELE_GITHUB_CLIENT_ID: ${STELE_GITHUB_CLIENT_ID:-}
       STELE_BASE_URL: ${STELE_BASE_URL:-http://localhost:8080}
       STELE_SLUG_WORDS: ${STELE_SLUG_WORDS:-3}
       STELE_MAX_PAGE_BYTES: ${STELE_MAX_PAGE_BYTES:-1048576}

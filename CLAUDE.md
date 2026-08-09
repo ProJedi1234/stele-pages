@@ -406,6 +406,16 @@ Don't "fix" these without a reason; the README argues them out in full.
   `id` 0, no row in `clients`. That is the bootstrap: minting the first per-client
   credential needs a credential you cannot otherwise have yet. Its `id` is never a
   foreign key; a page it publishes has no owner to record.
+- **`STELE_GITHUB_OWNERS` fails closed and is still optional at boot; those are not in
+  tension.** The empty allowlist permits nobody, and that rule lives inside
+  `GitHubOwnerAllowlist.permits(_:)` rather than in a `guard` each call site is trusted to
+  remember — the bare-`Set<String>` version of this holds until somebody adds the second
+  call site, and its failure is a silently open minting endpoint on every deployment that
+  had not got round to setting the variable. What it is *not* is required the way the
+  bullet above is: demanding it would fail the next boot of every deployment that has not
+  adopted GitHub sign-in, over a feature they do not use. It is the sign-in that refuses,
+  not the process, and the asymmetry with `STELE_UPLOAD_TOKEN` is the point of it rather
+  than an oversight in it.
 - **Every rejected credential gets one byte-identical 401.** Unknown, revoked, expired and
   a mistyped shared token are four facts the caller learns none of.
   `ClientStoring.authenticate` collapses the first three to nil before the middleware sees
