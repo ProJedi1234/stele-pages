@@ -57,6 +57,27 @@ public struct Client: Sendable, Equatable {
     public var expiresAt: Date?
     public var revokedAt: Date?
 
+    /// The GitHub login that signed in to mint this credential, or nil when no GitHub
+    /// account did.
+    ///
+    /// Kept in GitHub's canonical casing rather than the folded spelling the credential is
+    /// *named* after. The matching already happened, case-insensitively, at exchange time;
+    /// what is worth keeping afterwards is the casing the owner would recognise on their own
+    /// profile. The name is the handle a URL path segment addresses, and this is the identity
+    /// that bought it — two different jobs, which is why they are two fields and not one.
+    ///
+    /// Nil is not a gap waiting to be filled. A credential minted through
+    /// `POST /admin/clients` has no GitHub identity at all, and so does every row that
+    /// predates the column; NOT NULL would have forced an invented login onto all of them.
+    ///
+    /// It records who minted, and is **not** an authorization input. Nothing reads it to
+    /// decide anything, deliberately: the allowlist is consulted once, at the moment a
+    /// credential is issued, and cutting one off afterwards is `DELETE /admin/clients/:name`.
+    /// A later check that re-derived permission from this field would turn an audit record
+    /// into a second, stale copy of `STELE_GITHUB_OWNERS` — one that no longer matches the
+    /// configuration and that nothing updates.
+    public var githubLogin: String?
+
     public init(
         id: Int64,
         name: String,
@@ -64,7 +85,8 @@ public struct Client: Sendable, Equatable {
         createdAt: Date,
         lastUsedAt: Date? = nil,
         expiresAt: Date? = nil,
-        revokedAt: Date? = nil
+        revokedAt: Date? = nil,
+        githubLogin: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -73,6 +95,7 @@ public struct Client: Sendable, Equatable {
         self.lastUsedAt = lastUsedAt
         self.expiresAt = expiresAt
         self.revokedAt = revokedAt
+        self.githubLogin = githubLogin
     }
 
     /// Whether this credential carries `scope`.
@@ -150,7 +173,8 @@ public struct ClientStore: Sendable {
         // conformance.
         let rows = try await postgres.query(
             """
-            SELECT id, name, scopes, created_at, last_used_at, expires_at, revoked_at
+            SELECT id, name, scopes, created_at, last_used_at, expires_at, revoked_at,
+                   github_login
             FROM clients WHERE token_hash = \(Data(hash))
             """,
             logger: logger
@@ -175,16 +199,20 @@ public struct ClientStore: Sendable {
     ///
     /// - Returns: the stored row, or nil if the name was taken.
     public func insert(
-        name: String, tokenHash: [UInt8], scopes: [String], expiresAt: Date?
+        name: String, tokenHash: [UInt8], scopes: [String], expiresAt: Date?,
+        githubLogin: String?
     ) async throws -> Client? {
         // `Data(tokenHash)` for the same reason the lookup uses it: PostgresNIO binds a
         // bare `[UInt8]` as a `char[]`, which would not match a `bytea` column.
+        // `githubLogin` needs none of that ceremony — it is a `text` column and `String?`
+        // is exactly what PostgresNIO binds to one, nil included.
         let rows = try await postgres.query(
             """
-            INSERT INTO clients (name, token_hash, scopes, expires_at)
-            VALUES (\(name), \(Data(tokenHash)), \(scopes), \(expiresAt))
+            INSERT INTO clients (name, token_hash, scopes, expires_at, github_login)
+            VALUES (\(name), \(Data(tokenHash)), \(scopes), \(expiresAt), \(githubLogin))
             ON CONFLICT DO NOTHING
-            RETURNING id, name, scopes, created_at, last_used_at, expires_at, revoked_at
+            RETURNING id, name, scopes, created_at, last_used_at, expires_at, revoked_at,
+                      github_login
             """,
             logger: logger
         )
@@ -196,7 +224,8 @@ public struct ClientStore: Sendable {
     public func allClients() async throws -> [Client] {
         let rows = try await postgres.query(
             """
-            SELECT id, name, scopes, created_at, last_used_at, expires_at, revoked_at
+            SELECT id, name, scopes, created_at, last_used_at, expires_at, revoked_at,
+                   github_login
             FROM clients ORDER BY created_at, id
             """,
             logger: logger
@@ -231,14 +260,15 @@ public struct ClientStore: Sendable {
                 ORDER BY revoked_at DESC NULLS FIRST, id DESC
                 LIMIT 1
             )
-            RETURNING id, name, scopes, created_at, last_used_at, expires_at, revoked_at
+            RETURNING id, name, scopes, created_at, last_used_at, expires_at, revoked_at,
+                      github_login
             """,
             logger: logger
         )
         return try await Self.decode(rows).first
     }
 
-    /// The one place the seven-column projection above is turned back into `Client`s.
+    /// The one place the eight-column projection above is turned back into `Client`s.
     ///
     /// Shared rather than repeated per query because the *column list* cannot be: these are
     /// `PostgresQuery` literals, and a `\(Self.columns)` would become a bind parameter
@@ -247,9 +277,10 @@ public struct ClientStore: Sendable {
     /// not a cost worth paying on top.
     private static func decode(_ rows: PostgresRowSequence) async throws -> [Client] {
         var clients: [Client] = []
-        for try await (id, name, scopes, createdAt, lastUsedAt, expiresAt, revokedAt)
+        for try await (id, name, scopes, createdAt, lastUsedAt, expiresAt, revokedAt, githubLogin)
             in rows.decode(
-                (Int64, String, [String], Date, Date?, Date?, Date?).self, context: .default
+                (Int64, String, [String], Date, Date?, Date?, Date?, String?).self,
+                context: .default
             )
         {
             clients.append(
@@ -260,7 +291,8 @@ public struct ClientStore: Sendable {
                     createdAt: createdAt,
                     lastUsedAt: lastUsedAt,
                     expiresAt: expiresAt,
-                    revokedAt: revokedAt
+                    revokedAt: revokedAt,
+                    githubLogin: githubLogin
                 )
             )
         }

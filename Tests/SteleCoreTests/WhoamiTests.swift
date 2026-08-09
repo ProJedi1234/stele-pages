@@ -100,6 +100,38 @@ struct WhoamiTests {
         }
     }
 
+    /// "Which account is this credential attached to?" is a question the holder asks about
+    /// their own credential, so `stele auth status` can answer it without an operator: a
+    /// machine holding a token nobody remembers signing in for is the case this reports on.
+    ///
+    /// Both origins in one test, because the absence is the load-bearing half. A credential
+    /// minted through `POST /admin/clients` has no GitHub identity, and a route that invented
+    /// one — an empty string, the credential's own name — would be reporting a sign-in that
+    /// never happened. Absent-or-null, because a nil `Optional` is omitted by `JSONEncoder`
+    /// and that is this response's vocabulary for every field that has not happened.
+    @Test func theAnswerReportsTheGitHubLoginThatMintedTheCredential() async throws {
+        let clients = InMemoryClientStore()
+        await clients.seed(
+            token: TestFixture.publishToken, name: "projedi1234", githubLogin: "ProJedi1234"
+        )
+        await clients.seed(token: "stele_pat_hand-minted", name: "claude-code")
+
+        try await TestFixture.makeApp(clients: clients).test(.router) { client in
+            let signedIn = try await Self.whoami(client, token: TestFixture.publishToken)
+            #expect(signedIn.status == .ok)
+            // Canonical casing, not the folded name the credential is addressed by.
+            #expect(signedIn.json["githubLogin"] as? String == "ProJedi1234")
+            #expect(signedIn.json["name"] as? String == "projedi1234")
+
+            let handMinted = try await Self.whoami(client, token: "stele_pat_hand-minted")
+            #expect(handMinted.status == .ok)
+            #expect(
+                handMinted.json["githubLogin"] == nil
+                    || handMinted.json["githubLogin"] is NSNull
+            )
+        }
+    }
+
     /// The shared token authenticates like anything else and is reported as what it is — the
     /// synthesised `admin` credential — rather than special-cased into an error. It is the
     /// operator's own token, and "which credential is this shell holding?" is a question they

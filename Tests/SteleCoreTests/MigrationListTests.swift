@@ -94,6 +94,28 @@ struct MigrationListTests {
         #expect(index.contains("WHERE revoked_at IS NULL"))
     }
 
+    /// Version 5's one statement, and the two words it must not contain. Nullable is the design
+    /// rather than an oversight: a `NOT NULL` here would fail the migration outright on any
+    /// database that already holds credentials, and a `NOT NULL DEFAULT ''` — the shape
+    /// someone reaches for next — would succeed and quietly assert that every credential ever
+    /// minted was signed in for by an account with no name.
+    ///
+    /// A bare `DEFAULT` is refused on its own too, and for the same reason rather than a
+    /// performance one: Postgres 11 and later keep a constant default in the catalog and
+    /// rewrite no rows for it, so one would cost nothing in time and everything in honesty.
+    /// Every credential minted afterwards would carry a login no account ever chose, and the
+    /// column's NULL would stop meaning "nobody signed in for this" the moment it did.
+    @Test func versionFiveAddsANullableGitHubLogin() throws {
+        let sql = try #require(PageStore.migrations.first { $0.version == 5 }).statements
+            .map(\.sql)
+        let alter = try #require(
+            sql.first { $0.contains("ALTER TABLE clients ADD COLUMN github_login") }
+        )
+        #expect(alter.contains("github_login text"))
+        #expect(!alter.contains("NOT NULL"))
+        #expect(!alter.contains("DEFAULT"))
+    }
+
     /// Two properties of the statement text, both of which fail confusingly at runtime.
     /// A `\(…)` in a `PostgresQuery` literal becomes a bind parameter rather than SQL
     /// text, and DDL cannot take binds; and PostgresNIO's extended query protocol refuses
