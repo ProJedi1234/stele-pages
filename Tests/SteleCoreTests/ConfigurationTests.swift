@@ -22,6 +22,10 @@ struct ConfigurationTests {
         #expect(configuration.slugWords == 3)
         #expect(configuration.maxPageBytes == 1024 * 1024)
         #expect(configuration.baseURL == "http://127.0.0.1:8080")
+        // GitHub sign-in is unconfigured until an operator configures it, and
+        // unconfigured means nobody may mint — see `GitHubConfigurationTests`.
+        #expect(configuration.githubOwners.isEmpty)
+        #expect(configuration.githubClientID == nil)
     }
 
     @Test func requiresAnUploadToken() {
@@ -74,6 +78,111 @@ struct ConfigurationTests {
             environment: Self.environment(["STELE_BASE_URL": "https://xyz.domain/"])
         )
         #expect(configuration.baseURL == "https://xyz.domain")
+    }
+}
+
+@Suite("GitHub sign-in configuration")
+struct GitHubConfigurationTests {
+    /// Every case goes through `Configuration(environment:)` rather than reaching for the
+    /// parser directly, because the environment is how this value actually arrives: the
+    /// trimming and blank-is-unset handling in `value(_:)` sit between the operator's
+    /// `STELE_GITHUB_OWNERS=` and the allowlist, and they are part of what is being pinned.
+    static func allowlist(_ raw: String?) throws -> GitHubOwnerAllowlist {
+        var environment = ConfigurationTests.environment()
+        environment["STELE_GITHUB_OWNERS"] = raw
+        return try Configuration(environment: environment).githubOwners
+    }
+
+    @Test func parsesACommaSeparatedAllowlist() throws {
+        let owners = try Self.allowlist(" ProJedi1234 , other-user ,,")
+        #expect(!owners.isEmpty)
+        #expect(owners.permits("ProJedi1234"))
+        #expect(owners.permits("other-user"))
+        #expect(!owners.permits("someone-else"))
+        // The empty entries between those commas are dropped rather than stored, so a
+        // caller presenting an empty login cannot match one of them.
+        #expect(!owners.permits(""))
+        // An entry is a whole login, not a pattern. A stranger being refused does not pin
+        // that on its own: both of these are registerable GitHub accounts, and a rewrite to
+        // prefix or substring matching — the shape somebody reaches for when adding
+        // organisation-wide or wildcard entries — would leave the line above passing while
+        // handing a publishing credential to an account nobody listed.
+        #expect(!owners.permits("proj"))
+        #expect(!owners.permits("projedi12345"))
+    }
+
+    /// A value that arrived from anything file-shaped — a CRLF `.env`, a YAML block scalar,
+    /// a secrets tool that appends a line ending — carries that ending on its last entry,
+    /// and `value(_:)`'s own trim does not take it off. Left there it would strand exactly
+    /// one login in an otherwise working list, which is the misconfiguration nothing
+    /// downstream can report: the list is non-empty, so it looks configured, and the
+    /// sign-in it refuses is deliberately silent about why.
+    @Test func lineEndingsInTheListDoNotStrandTheLastLogin() throws {
+        let unixEnding = try Self.allowlist("alice,projedi1234\n")
+        #expect(unixEnding.permits("projedi1234"))
+
+        let windowsEnding = try Self.allowlist("alice,projedi1234\r\n")
+        #expect(windowsEnding.permits("projedi1234"))
+
+        let acrossLines = try Self.allowlist("alice,\nprojedi1234\n")
+        #expect(acrossLines.permits("alice"))
+        #expect(acrossLines.permits("projedi1234"))
+    }
+
+    /// The fail-closed guarantee, asserted as the guarantee rather than as the parse.
+    /// `isEmpty` is the mechanism; what it is *for* is that a deployment which has not
+    /// configured GitHub sign-in has no login at all — not the operator's own, not any
+    /// spelling of it, not an empty one — that can be traded for a credential. Anything
+    /// that gates minting on `permits(_:)` therefore refuses everything here without
+    /// having to know that it should.
+    @Test func withNoOwnersConfiguredNoLoginCanMintACredential() throws {
+        let owners = try Self.allowlist(nil)
+        #expect(owners.isEmpty)
+        for login in ["projedi1234", "ProJedi1234", "octocat", "admin", "root", ""] {
+            #expect(!owners.permits(login), "an unconfigured allowlist admitted \(login)")
+        }
+    }
+
+    /// Blank and separator-only spellings reach the allowlist by different routes — `"   "`
+    /// is mapped to nil by `value(_:)` before it gets there, while `","` is a perfectly
+    /// good non-blank string that arrives intact — and both have to land in the same place:
+    /// no login permitted, and no crash on the way.
+    @Test(
+        "a blank or separator-only owner list still mints nothing",
+        arguments: ["", "   ", ",", " , ", ",,,"]
+    )
+    func aBlankOwnerListStillMintsNothing(_ raw: String) throws {
+        let owners = try Self.allowlist(raw)
+        #expect(owners.isEmpty)
+        #expect(!owners.permits("projedi1234"))
+        #expect(!owners.permits("ProJedi1234"))
+    }
+
+    /// GitHub logins are case-insensitive, so an operator who typed the casing GitHub
+    /// shows must not have locked out the same account spelled any other way. Both
+    /// directions are here because the fold is on both sides of the comparison: it must
+    /// not matter which side carries GitHub's canonical casing.
+    @Test func ownerMatchingIsCaseInsensitive() throws {
+        let configuredInMixedCase = try Self.allowlist("ProJedi1234")
+        #expect(configuredInMixedCase.permits("ProJedi1234"))
+        #expect(configuredInMixedCase.permits("projedi1234"))
+        #expect(configuredInMixedCase.permits("PROJEDI1234"))
+
+        let configuredInLowercase = try Self.allowlist("projedi1234")
+        #expect(configuredInLowercase.permits("ProJedi1234"))
+    }
+
+    @Test func readsTheGitHubClientID() throws {
+        var environment = ConfigurationTests.environment([
+            "STELE_GITHUB_CLIENT_ID": "  Ov23liEXAMPLE0000  "
+        ])
+        #expect(try Configuration(environment: environment).githubClientID == "Ov23liEXAMPLE0000")
+
+        // Blank means unset here as it does everywhere else, so an operator who left the
+        // line in `.env` with nothing after the `=` has no app configured rather than one
+        // whose ID is a space.
+        environment["STELE_GITHUB_CLIENT_ID"] = "   "
+        #expect(try Configuration(environment: environment).githubClientID == nil)
     }
 }
 
