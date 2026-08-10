@@ -100,6 +100,22 @@ struct CreateClientRequest: Decodable {
     let expiresIn: Int?
 }
 
+/// The `POST /auth/github/exchange` request body: a GitHub access token, and nothing else.
+///
+/// Nothing else, deliberately. The name of the credential to mint comes from the login
+/// GitHub reports rather than from the caller, so an owner cannot sign in as a name of their
+/// choosing and quietly take over a hand-minted credential; the scopes are fixed at
+/// `publish`; and the expiry is fixed at none. Every field this body might plausibly have
+/// grown is a field an unauthenticated caller would get to influence.
+///
+/// `accessToken` in camelCase, matching `CreateClientRequest` rather than GitHub's
+/// snake_case `access_token`. This body is stele's contract with its own client — the GitHub
+/// token happens to be its payload, and borrowing GitHub's spelling for it would be the
+/// beginning of a wire format that looks like a proxy for theirs.
+struct GitHubExchangeRequest: Decodable {
+    let accessToken: String
+}
+
 /// One credential as the admin API reports it.
 ///
 /// There is no `token` field and no `tokenHash` field, and neither is an omission this type
@@ -166,8 +182,22 @@ public enum ServerRoute {
     /// `Slug.reserved` long before this route existed, which is exactly what that
     /// forward-looking list is for.
     public static let admin = "admin"
+    /// Signing in. Like `assets` and `admin`, only the first segment: the exchange endpoint
+    /// sits two levels beneath it and `auth` itself answers the uniform 404. It is the one
+    /// first segment whose children are reached by callers holding no stele credential at
+    /// all — which is what the routes under it are for.
+    ///
+    /// Unlike `admin` and `skill`, this name had no head start: it was absent from
+    /// `Slug.reserved` until the route landed, so `POST /pages?slug=auth` was a legal
+    /// publish on any server running an earlier build. One such page is now shadowed by the
+    /// stub below *and* unaddressable — `PUT`, `PATCH` and `DELETE` all pass through
+    /// `validatedSlug`, which answers `400` for a reserved name — so it sits there until it
+    /// expires, or forever if it was published `ttl=never`. The window to clear it is before
+    /// this build is deployed, which is the whole reason `Slug.reserved` is a
+    /// forward-looking list and not a description of the routes that exist.
+    public static let auth = "auth"
 
-    public static let names: Set<String> = [healthz, pages, assets, skill, admin]
+    public static let names: Set<String> = [healthz, pages, assets, skill, admin, auth]
 
     /// The one collection under `/admin`, as its *second* segment. Kept out of `names` for
     /// the same reason `stele.css` is: that set is exactly what `Slug.reserved` has to
@@ -182,6 +212,16 @@ public enum ServerRoute {
     /// everything about credentials — but it is emphatically **not** an `admin`-scoped
     /// route. See the route's own registration in `buildRouter`.
     public static let adminWhoami = "whoami"
+
+    /// The identity provider, as the *second* segment under `/auth`, and out of `names` for
+    /// the same reason `adminClients` is. Named rather than folded into a single
+    /// `"github/exchange"` constant because it is the extension point: a second provider is
+    /// a sibling here, and a single string would hide that the path has a shape.
+    public static let authGitHub = "github"
+
+    /// The token exchange itself, the third segment: hand over a GitHub access token,
+    /// receive a stele credential.
+    public static let authExchange = "exchange"
 }
 
 /// Wires up the router. Split out from `buildApplication` so tests can exercise routes
@@ -189,11 +229,19 @@ public enum ServerRoute {
 ///
 /// Both stores arrive as existentials-by-generics (`some …Storing`) rather than as the
 /// concrete Postgres types, which is what lets the HTTP suite run the real routing, auth
-/// and status codes against in-memory fakes with no database anywhere.
+/// and status codes against in-memory fakes with no database anywhere. `github` is the same
+/// arrangement for the one dependency that is neither ours nor a database: the sign-in route
+/// has to be exercisable — refusals included, especially the refusals — without a socket to
+/// `api.github.com`.
+///
+/// None of the three is defaulted. A default here would be a production dependency chosen by
+/// omission at whichever call site forgot to pass one, and there are only two call sites —
+/// `buildApplication` and the test fixture — each with an opinion worth stating out loud.
 public func buildRouter(
     configuration: Configuration,
     store: some PageStoring,
-    clients: some ClientStoring
+    clients: some ClientStoring,
+    github: some GitHubIdentifying
 ) -> Router<SteleRequestContext> {
     let generator = SlugGenerator(wordCount: configuration.slugWords)
     // Explicit context type: the routes carry the authenticated `Client` on it, and the
@@ -634,6 +682,117 @@ public func buildRouter(
         htmlResponse(status: .notFound, html: notFoundPage())
     }
 
+    // Signing in with GitHub, and the first route in this server that is neither a public
+    // read nor behind a credential. It **is** the authentication, which is why it sits in no
+    // group at all: the caller is here precisely because they hold no stele token yet, and
+    // what they present instead is a GitHub access token they obtained from GitHub directly.
+    // A `BearerTokenMiddleware` in front of this would demand the thing it exists to issue.
+    //
+    // No `RequireScopeMiddleware` either, and not as an oversight: a scope is a fact about a
+    // stele credential, and there is none on this request to have facts about. The credential
+    // this route *hands out* carries `publish` and only `publish` — a sign-in produces an
+    // agent's credential, never an operator's, so what an owner walks away with can neither
+    // mint nor revoke.
+    //
+    // What this route does about a login that has signed in before is the open question issue
+    // #27 names, and it is answered in its own commit rather than here. Until then the mint
+    // below refuses a name a live credential already holds, which is what insert-if-free does
+    // on its own.
+    //
+    // Worth knowing before that answer arrives: `POST /admin/clients` and this route mint into
+    // one namespace. The name comes from the login, so an operator who hand-mints
+    // `projedi1234` has named a credential after somebody's GitHub login, and whatever the
+    // repeat-sign-in rule turns out to be will apply to it.
+    //
+    // And no `MinimumCLIVersionMiddleware`, which is the one omission that looks like a
+    // mistake. The gate is deliberately registered *after* authentication everywhere else so
+    // it never answers an unauthenticated prober; here there is no authentication for it to
+    // sit after. It would also be gating the bootstrap on the thing being bootstrapped — a
+    // user whose CLI is too old would be told to upgrade by the one route that could have
+    // given them the credential everything else needs.
+    router.post(RouterPath(
+        "/\(ServerRoute.auth)/\(ServerRoute.authGitHub)/\(ServerRoute.authExchange)"
+    )) { request, context -> Response in
+        let payload = try await readGitHubExchangeRequest(request: request)
+
+        // One `guard`, one `throw`, and every refusal reaches it. Five different facts —
+        // GitHub rejected the token, the login is not an owner, this deployment has no
+        // owners, the token was empty, the token held bytes no `Authorization` header can
+        // carry — collapsed to one nil inside `owner(presenting:allowedBy:)` before they got
+        // here, so there is no shape in this handler that could accidentally be branched on.
+        // Every one of them belongs on that side of the seam rather than in a guard here: a
+        // second `throw` site is a second thing to keep byte-identical with the first, and
+        // the whole property being defended is that a caller cannot tell these apart.
+        guard let login = try await github.owner(
+            presenting: payload.accessToken,
+            allowedBy: configuration.githubOwners,
+            logger: context.logger
+        )
+        else { throw githubExchangeRejected }
+
+        // Past the allowlist, so this caller is an owner and a distinguishing error is
+        // licensed by exactly the rule the admin routes run on — there is nothing left to
+        // leak to them. In practice the `400` is unreachable: GitHub logins are ASCII
+        // letters, digits and hyphens and at most 39 characters, which is a subset of what
+        // `Client.validated(name:)` accepts once lowercased. It goes through the chokepoint
+        // anyway, because "GitHub could never send that" is an assumption about somebody
+        // else's system and the cost of checking is one function call.
+        let name = try validatedClientName(login.lowercased())
+
+        let created: (client: Client, token: String)
+        do {
+            created = try await clients.create(name: name, scopes: [.publish], expiresAt: nil)
+        } catch ClientStoreError.nameTaken {
+            // A live credential already holds this login's name — most often because this
+            // owner has signed in before. What *should* happen then is the open question
+            // issue #27 names and deliberately leaves to its own commit; until that lands,
+            // insert-if-free refuses and the honest answer is to say so.
+            //
+            // It may say so: the caller has proved they hold a GitHub account this
+            // deployment lists, so they are behind the authentication and the README's
+            // licence to return distinguishing errors reaches them. Nothing here is
+            // learnable by the unauthenticated prober every other branch of this handler is
+            // written for.
+            throw HTTPError(
+                .conflict,
+                message: """
+                    A credential named '\(name)' already exists. Revoke it with \
+                    DELETE /admin/clients/\(name) before signing in again.
+                    """
+            )
+        }
+
+        // The token is in scope on the line above and is named here rather than quoted. The
+        // login is not a secret; the credential it just bought is.
+        context.logger.info(
+            "minted a client credential via github",
+            metadata: ["client": "\(created.client.name)", "login": "\(login)"]
+        )
+
+        return try jsonResponse(
+            status: .created,
+            payload: CreatedClientResponse(
+                token: created.token,
+                client: ClientResponse(created.client)
+            )
+        )
+    }
+
+    // The same trie trap as `/pages`, `/assets` and `/admin`: registering the exchange above
+    // creates the literal `auth` node, so `GET /auth` matches it, finds no value, and does
+    // **not** backtrack to `/:slug`. Without this it would answer the framework's own
+    // plain-text 404 — the one distinguishable response on the public read surface. Outside
+    // every group, like the others, and here that is not merely convention: a 401 on this
+    // segment would advertise that signing in is a thing this deployment does.
+    //
+    // `GET /auth/github` needs no stub of its own and deliberately does not get one. A
+    // two-segment path can never be a slug, so the framework's envelope there tells a
+    // scanner nothing the uniform page would not — the same reasoning `/pages/foo` already
+    // runs on.
+    router.get(RouterPath("/\(ServerRoute.auth)")) { _, _ -> Response in
+        htmlResponse(status: .notFound, html: notFoundPage())
+    }
+
     // The stylesheet ships with the binary, so it is served from a constant rather than
     // the store: it is code, and it changes by deploy, not by upload. Unauthenticated like
     // every other read — it is linked as a subresource by every published page.
@@ -899,6 +1058,62 @@ private func readCreateClientRequest(request: Request) async throws -> CreateCli
     }
 }
 
+/// Reads and decodes the `POST /auth/github/exchange` body.
+///
+/// A sibling of `readCreateClientRequest` and hand-decoded for the same reason: the failure
+/// is one message naming the shape expected, rather than `DecodingError`'s text, which is
+/// written for a programmer holding the type.
+///
+/// This 400 is the one thing on this route that is *not* the uniform 401, and that is the
+/// same distinction `BearerTokenMiddleware` draws between a missing `Authorization` header
+/// and a rejected one: a caller who sent no credential at all has learned nothing about
+/// which credentials exist. What they get told is what the body should look like, which is
+/// public API, and being told it is what turns a mistyped field name into a fixable mistake
+/// instead of an indistinguishable refusal.
+private func readGitHubExchangeRequest(request: Request) async throws -> GitHubExchangeRequest {
+    let buffer: ByteBuffer
+    do {
+        // The same 16 KiB cap the admin body uses. A GitHub token is a few dozen bytes and
+        // this object holds one field; the limit is about what an unauthenticated route is
+        // willing to buffer, and this is the most unauthenticated route there is.
+        buffer = try await request.body.collect(upTo: maxAdminRequestBytes)
+    } catch is NIOTooManyBytesError {
+        throw HTTPError(
+            .contentTooLarge,
+            message: "Request body exceeds the \(maxAdminRequestBytes) byte limit."
+        )
+    }
+    do {
+        return try JSONDecoder().decode(
+            GitHubExchangeRequest.self, from: Data(buffer.readableBytesView)
+        )
+    } catch {
+        throw HTTPError(
+            .badRequest,
+            message: #"Expected a JSON object: {"accessToken": "…"}."#
+        )
+    }
+}
+
+/// The one answer every refused sign-in gets, defined once for the same reason
+/// `BearerTokenMiddleware.rejected` is.
+///
+/// "GitHub rejected that token", "that is a real GitHub account and not an owner of this
+/// deployment" and "this deployment has no owners configured" are three facts, and a caller
+/// learns none of them. The second is the dangerous one: an endpoint that distinguished it
+/// would be an oracle for who owns the deployment — anyone holding a GitHub token of their
+/// own could walk it and read the allowlist off the status codes, and the allowlist is a
+/// list of people whose accounts are worth attacking.
+///
+/// A computed property with one call site is not ceremony here. The property being defended
+/// is that every refusal is byte-identical *including its headers*, which survives exactly
+/// as long as there is one place that constructs it; the version of this route with a
+/// `throw HTTPError(.unauthorized, …)` at each refusing branch passes every test the day it
+/// is written and drifts the first time somebody improves one message.
+private var githubExchangeRejected: HTTPError {
+    HTTPError(.unauthorized, message: "GitHub sign-in was refused.")
+}
+
 /// Resolves the `?ttl=` query parameter into an expiry, reporting a rejection the way every
 /// other write-side validation failure is reported.
 ///
@@ -1055,7 +1270,15 @@ public func buildApplication(
     // separate seams — `PageStore` is still the only file that touches the `pages` table —
     // and one migration list, owned by `PageStore`, creates the schema for both.
     let clients = ClientStore(client: postgresClient, logger: logger)
-    let router = buildRouter(configuration: configuration, store: store, clients: clients)
+    // The only place a real `GitHubAPI` is constructed. It holds nothing — no connection
+    // pool, no lifetime — because it makes its requests through `HTTPClient.shared`, so
+    // unlike `postgresClient` there is no service to register and nothing to shut down.
+    let router = buildRouter(
+        configuration: configuration,
+        store: store,
+        clients: clients,
+        github: GitHubAPI()
+    )
 
     var app = Application(
         router: router,
@@ -1081,6 +1304,16 @@ public func buildApplication(
                 "slug_words": "\(configuration.slugWords)",
                 "keyspace": "\(SlugGenerator(wordCount: configuration.slugWords).keyspace)",
             ]
+        )
+        // The one place an operator is told whether sign-in works, and it has to be here
+        // because every other channel is closed by design: an unconfigured allowlist
+        // refuses with the same bytes as a rejected token, deliberately, so a deployment
+        // that forgot `STELE_GITHUB_OWNERS` would otherwise present as one where nobody
+        // has tried to sign in yet. Whether, and not who: this line goes wherever the logs
+        // go, and the allowlist is the set of people who may publish here.
+        logger.info(
+            "github sign-in",
+            metadata: ["configured": "\(!configuration.githubOwners.isEmpty)"]
         )
     }
     return app

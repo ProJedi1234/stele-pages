@@ -138,24 +138,43 @@ adds by accident is caught. `ScopeEnforcementTests` covers the other half — wh
 credentials are refused, and with which status code.
 
 `GitHubIdentifyingTests` covers the seam's shared policy — `owner(presenting:allowedBy:)` —
-directly rather than through a route, and it is not made redundant by the HTTP tests that
-will assert the same collapse from outside. What a caller observes is one `401`, so a test at
-that level can only prove four paths *look* alike; here each path is named and pinned to nil
-individually, so an edit that reintroduces a distinction fails with a message saying which
-one came back. `aTokenThatCouldNotBePresentedIsRefusedWithoutAskingGitHub` is the one to read
-twice: it asserts nil against a conformer that *throws*, which is the only way to state "the
-primitive was never called" — and the throw it is avoiding would surface as the `500` reserved
-for a GitHub outage, manufactured on demand by anyone sending one newline.
+directly rather than through a route, and the route tests below do not make it redundant.
+What a caller observes is one `401`, so a test at that level can only prove four paths *look*
+alike; there each path is named and pinned to nil individually, so an edit that reintroduces a
+distinction fails with a message saying which one came back.
+`aTokenThatCouldNotBePresentedIsRefusedWithoutAskingGitHub` is the one to read twice: it
+asserts nil against a conformer that *throws*, which is the only way to say "the primitive was
+never called".
 
-`GitHubAPITests` covers the one decision inside `GitHubAPI`: `verdict(forStatus:)`, which says
-which of GitHub's answers is a verdict on the presented token and which is GitHub declining to
-answer. That mapping is the load-bearing half of the seam's nil-versus-throw contract and
-`InMemoryGitHub` is a dictionary standing beside it rather than a check on it — the same
-relationship `InMemoryPageStore.hasExpired` has with `PageStore`'s SQL. Widening `rejected`
-past `401` is the silent edit it exists to catch: it would turn every GitHub 5xx, and every
-`403` GitHub answers a rate-limited source address with, into "your sign-in was refused".
-Taking the status *code* rather than an `HTTPResponseStatus` is what keeps the function
-assertable without a socket or an undeclared `NIOHTTP1` import.
+`GitHubExchangeTests` covers the sign-in route, and its centre of gravity is the refusals
+rather than the mint. `everyRefusalIsOneByteIdentical401` compares whole `Rejection`s across
+five shapes — a token GitHub does not know, a real account that is not an owner, a token
+that could not be presented to GitHub at all, an empty token, and a valid owner against a
+deployment with no allowlist — and the last is the fail-closed acceptance seen from outside. `Rejection` itself moved out of `ClientAuthTests`
+into `TestFixture` for that test: two surfaces now defend byte-identity, and two copies of a
+drift detector is its own drift — the copy that quietly stops comparing headers is the one
+nobody notices. `gitHubBeingUnreachableIsA500NotA401` is the counterweight and asserts the
+inequality explicitly, because "it is a 401" is what a well-meaning simplification of the
+seam's nil-versus-throw contract would produce. `InMemoryGitHub` implements the seam's one
+primitive and nothing else, so what these exercise is the shared policy rather than a
+reimplementation of it, and a second file-private conformer that throws stands in for the
+outage. That throwing conformer does double duty in
+`aTokenThatCouldNotBePresentedIsRefusedWithoutAskingGitHub`, where a `401` for a token
+carrying a newline proves the seam was never asked — the guard that produces it is the
+reason such a token is not a `500`, and a `500` there would be an unauthenticated caller
+manufacturing the one signal that means GitHub is down. Nothing here reaches the network,
+which is the property that makes the suite worth having at all.
+
+`GitHubAPITests` is the exception to that arrangement and covers the one decision inside
+`GitHubAPI`: `verdict(forStatus:)`, which says which of GitHub's answers is a verdict on the
+presented token and which is GitHub declining to answer. That mapping is the load-bearing
+half of the seam's nil-versus-throw contract and `InMemoryGitHub` is a dictionary standing
+beside it rather than a check on it — the same relationship `InMemoryPageStore.hasExpired`
+has with `PageStore`'s SQL. Widening `rejected` past `401` is the silent edit it exists to
+catch: it would turn every GitHub 5xx, and every `403` GitHub answers a rate-limited source
+address with, into "your sign-in was refused". Taking the status *code* rather than an
+`HTTPResponseStatus` is what keeps the function assertable without a socket or an
+undeclared `NIOHTTP1` import.
 
 `PageStoreDatabaseTests` is the one suite that needs Postgres, gated on
 `STELE_TEST_DATABASE_URL` so a plain `swift test` stays hermetic:
@@ -272,7 +291,26 @@ gap, asserted today only against the in-memory fake.
   a real endpoint, not whether it has children. `/admin` is the second instance of the stub
   case, and the one where getting it wrong costs most: registered *inside* the
   authenticated group it would answer `401`, which advertises exactly where the
-  credential-minting routes live. Register the stub outside the group.
+  credential-minting routes live. Register the stub outside the group. `/auth` is the third
+  instance, and the only one whose stub is outside a group because there is no group.
+- **`POST /auth/github/exchange` is the one write that belongs in no group at all, because
+  it *is* the authentication.** The caller is there precisely because they hold no stele
+  credential, so a `BearerTokenMiddleware` in front of it would demand the thing it issues,
+  and `RequireScopeMiddleware` would ask about scopes on a request with no credential to
+  have them. What it hands out carries `publish` and only `publish`, so an owner walks away
+  with a credential that can neither mint nor revoke. What the route does about a login that
+  has signed in before is the open question issue #27 names, answered in its own commit; until
+  then insert-if-free refuses the name and the caller gets a `409`.
+  `MinimumCLIVersionMiddleware` is off it too, and that is the omission
+  most likely to be "fixed": the gate is registered *after* authentication everywhere else
+  so it never answers an unauthenticated prober, and here it would also gate the bootstrap
+  on the thing being bootstrapped —
+  `GitHubExchangeTests.theExchangeIsNotVersionGated` is what notices it coming back. GitHub
+  goes behind `GitHubIdentifying` on the `PageStoring`/`ClientStoring` pattern: the primitive
+  (`login(forAccessToken:)`) is per-conformer, the policy (`owner(presenting:allowedBy:)`) is
+  in the extension, and `InMemoryGitHub` is what keeps `swift test` off the network. The bare
+  `/auth` segment gets the uniform-404 stub; `/auth/github` deliberately gets none, because a
+  two-segment path can never be a slug — the `noAuthLeaksUnderPages` reasoning.
 - **A write route belongs in a group whose middleware carries the scope it needs.**
   `RequireScopeMiddleware(.publish)` gates `/pages`; `RequireScopeMiddleware(.admin)` gates
   `/admin`. Both sit *after* `BearerTokenMiddleware` in the group and read the `Client` it
@@ -423,8 +461,10 @@ Don't "fix" these without a reason; the README argues them out in full.
 - **`STELE_UPLOAD_TOKEN` has no default.** A default would be a published credential; an
   absent one would silently open the upload endpoint. It still authenticates alongside
   per-client tokens, resolving to the synthesised `Client.sharedToken` — `admin`-scoped,
-  `id` 0, no row in `clients`. That is the bootstrap: minting the first per-client
-  credential needs a credential you cannot otherwise have yet. Its `id` is never a
+  `id` 0, no row in `clients`. That is the bootstrap: minting the first `admin`-scoped
+  credential needs a credential you cannot otherwise have yet. A `publish` one has a second
+  way in since the GitHub exchange landed — which mints `publish` and only `publish`, so the
+  shared token is still the only door into the rest. Its `id` is never a
   foreign key; a page it publishes has no owner to record.
 - **`STELE_GITHUB_OWNERS` fails closed and is still optional at boot; those are not in
   tension.** The empty allowlist permits nobody, and that rule lives inside
@@ -443,6 +483,21 @@ Don't "fix" these without a reason; the README argues them out in full.
   distinguishing errors applies to callers *behind* the token; someone probing for a valid
   one is not behind it. A *missing* `Authorization` header keeps its own message — a caller
   who presented nothing has learned nothing.
+- **Every refused GitHub sign-in gets one byte-identical 401; a GitHub outage gets a 500.**
+  "GitHub rejected that token", "that is a real account and not an owner here" and "no
+  allowlist is configured" collapse to one nil inside
+  `GitHubIdentifying.owner(presenting:allowedBy:)` — the same move
+  `ClientStoring.authenticate` makes — so the handler never holds a shape to branch on and
+  there is exactly one `throw` site. Distinguishing the middle case would make the route an
+  oracle for who owns the deployment, walkable by anyone with a GitHub token of their own,
+  and the caller is unauthenticated by construction so the licence to return distinguishing
+  errors does not reach here. The outage half is the one that looks wrong and is not: a
+  thrown error propagates to a `500` rather than being folded into the refusal, because a
+  `401` during a GitHub outage tells a legitimate owner their login was refused and sends
+  them round a re-authentication loop. A malformed body keeps its own `400` on the
+  missing-`Authorization`-header rule. `GitHubExchangeTests.everyRefusalIsOneByteIdentical401`
+  compares whole responses — headers included, since a `content-length` two bytes apart is
+  the same leak.
 - **`STELE_UPLOAD_TOKEN` can no longer publish.** It resolves to `Client.sharedToken`,
   which carries `admin` and nothing else, so `POST /pages` and `PUT /pages/:slug` answer it
   with a `403`. That is the demotion, not a bug: it became the credential that *mints*
@@ -474,8 +529,8 @@ Don't "fix" these without a reason; the README argues them out in full.
   `DELETE` that moved it would erase the only record of when trust ended. The row itself is
   never deleted, and revoked credentials stay in `GET /admin/clients` — "which did I revoke,
   and when?" is the question that list exists to answer.
-- **A credential name is unique among *live* rows, not across the table.** Migration 3
-  replaced version 2's `name UNIQUE` with `clients_live_name_idx`, a partial index over
+- **A credential name is unique among *live* rows, not across the table.** Migration 4
+  replaced version 3's `name UNIQUE` with `clients_live_name_idx`, a partial index over
   `WHERE revoked_at IS NULL`. Rows are never deleted, so table-wide uniqueness meant
   revoking `claude-code` retired the name permanently and rotation — revoke, then mint the
   replacement — answered `409` forever, with `claude-code-2` as the only way out. Two
