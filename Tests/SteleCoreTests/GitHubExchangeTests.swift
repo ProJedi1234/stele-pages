@@ -171,30 +171,6 @@ struct GitHubExchangeTests {
         }
     }
 
-    // MARK: - Signing in again
-
-    /// What a second sign-in does today, which is refuse — and this test is expected to be
-    /// rewritten by the commit that answers issue #27's open question, not deleted.
-    ///
-    /// It is pinned rather than left unasserted because "the route happens to 500" and "the
-    /// route deliberately conflicts" are indistinguishable without it, and the difference
-    /// matters to the person who signs in twice before the answer lands. The `409` is
-    /// distinguishable on purpose: the caller has proved they hold a listed GitHub account, so
-    /// they are behind the authentication and may be told what went wrong.
-    @Test func aSecondSignInForOneLoginConflictsUntilRotationLands() async throws {
-        try await Self.makeApp().test(.router) { client in
-            #expect(try await Self.exchange(client, token: Self.ownerToken).status == .created)
-
-            let again = try await Self.exchange(client, token: Self.ownerToken)
-            #expect(again.status == .conflict)
-
-            // And the refusal is not the uniform one: this caller is authenticated, so the
-            // message names the credential in the way. A `401` here would send an owner off
-            // to re-authenticate against a route that already knows exactly who they are.
-            #expect(again.raw.contains(Self.ownerName))
-        }
-    }
-
     // MARK: - Refusing
 
     /// The property the whole route rests on: five different reasons to refuse produce one
@@ -347,6 +323,130 @@ struct GitHubExchangeTests {
             let refused = try await Self.exchange(client, token: "gho_junk", headers: ancient)
             #expect(refused.status == .unauthorized)
             #expect(refused.status != .upgradeRequired)
+        }
+    }
+
+    // MARK: - Signing in again
+
+    /// Repeat sign-in is a rotation, not a conflict: the live credential under the login's
+    /// name is revoked and a fresh one minted under the same name. That is the only recovery
+    /// there can be for a lost token — the plaintext exists nowhere — and it rides the
+    /// live-only name index that makes revoke-then-mint legal.
+    @Test func aRepeatLoginRotatesTheCredentialUnderItsName() async throws {
+        try await Self.makeApp().test(.router) { client in
+            let first = try await Self.exchange(client, token: Self.ownerToken)
+            #expect(first.status == .created)
+            let firstToken = try #require(first.json["token"] as? String)
+
+            let second = try await Self.exchange(client, token: Self.ownerToken)
+            #expect(second.status == .created)
+            let secondToken = try #require(second.json["token"] as? String)
+            #expect(secondToken != firstToken)
+
+            // The new one works and the old one is dead — not merely superseded in a
+            // listing, but refused at the door.
+            #expect(try await Self.publish(client, with: secondToken) == .created)
+            #expect(try await Self.publish(client, with: firstToken) == .unauthorized)
+
+            // Both rows survive under one name, the retired one carrying the `revoked_at`
+            // that is the audit trail for the rotation.
+            let listed = try await Self.listClients(client)
+            #expect(listed.compactMap { $0["name"] as? String } == [Self.ownerName, Self.ownerName])
+            #expect(listed.first?["revokedAt"] is String)
+            #expect(listed.last?["revokedAt"] == nil || listed.last?["revokedAt"] is NSNull)
+        }
+    }
+
+    /// What a rotation must *not* touch, which is the half a wrong `revoke` would get away
+    /// with. A sign-in retires the live credential holding *that login's* name and nothing
+    /// else: another owner's credential keeps publishing, an operator's hand-minted
+    /// credential under a different name is untouched, and an earlier retirement keeps the
+    /// timestamp it already had — that instant is the boundary an incident is reconstructed
+    /// from, and a third sign-in that moved the first one would erase it.
+    @Test func aRepeatLoginDisturbsNoOtherCredentialAndNoEarlierRetirement() async throws {
+        let clients = InMemoryClientStore()
+        let bystander = "stele_pat_operator-minted"
+        await clients.seed(token: bystander, name: "claude-code", scopes: [.publish])
+
+        let app = try Self.makeApp(
+            clients: clients,
+            github: InMemoryGitHub([
+                Self.ownerToken: Self.ownerLogin, Self.strangerToken: Self.strangerLogin,
+            ]),
+            // Both logins are owners here, so the stranger's token is a *second* owner
+            // rather than a refusal.
+            owners: "\(Self.ownerName), \(Self.strangerLogin)"
+        )
+
+        try await app.test(.router) { client in
+            _ = try await Self.exchange(client, token: Self.ownerToken)
+            let otherOwner = try await Self.exchange(client, token: Self.strangerToken)
+            let otherOwnerToken = try #require(otherOwner.json["token"] as? String)
+
+            let secondSignIn = try await Self.exchange(client, token: Self.ownerToken)
+            #expect(secondSignIn.status == .created)
+            let retirement = try #require(
+                try await Self.listClients(client)
+                    .first { $0["name"] as? String == Self.ownerName }?["revokedAt"] as? String
+            )
+
+            let thirdSignIn = try await Self.exchange(client, token: Self.ownerToken)
+            #expect(thirdSignIn.status == .created)
+
+            // The other owner's credential and the hand-minted one both still publish: a
+            // `revoke` that resolved by anything looser than the name would have taken one
+            // of them, and the failure would look like an unrelated agent losing access.
+            #expect(try await Self.publish(client, with: otherOwnerToken) == .created)
+            #expect(try await Self.publish(client, with: bystander) == .created)
+
+            let listed = try await Self.listClients(client)
+            #expect(listed.filter { $0["name"] as? String == Self.strangerLogin }.count == 1)
+            #expect(listed.filter { $0["name"] as? String == "claude-code" }.count == 1)
+            // Three rows for the owner, two retired; the first retirement's timestamp has
+            // not moved under the second.
+            let owned = listed.filter { $0["name"] as? String == Self.ownerName }
+            #expect(owned.count == 3)
+            #expect(owned.first?["revokedAt"] as? String == retirement)
+            #expect(owned.last?["revokedAt"] == nil || owned.last?["revokedAt"] is NSNull)
+        }
+    }
+
+    /// The sharp edge of naming a credential after a login: `POST /admin/clients` and this
+    /// route mint into one namespace, and `revoke(name:)` resolves by name and by nothing
+    /// else. So an operator who hand-mints `projedi1234` — the obvious name for their own
+    /// credential, and exactly the name a sign-in derives — loses it to that person's next
+    /// sign-in, whatever scopes it carried.
+    ///
+    /// Pinned rather than merely true, because it is inherited behaviour that reads as an
+    /// accident: an `admin` credential silently downgraded to `publish` and revoked, with the
+    /// route that would report it now out of the operator's reach. The alternative was a
+    /// `github-` prefix carving the namespaces apart, which was weighed and refused — the
+    /// name is the handle `stele auth status` shows — so this test is where the decision
+    /// lives. If it starts failing, the question is which of the two behaviours was meant.
+    ///
+    /// `aRepeatLoginDisturbsNoOtherCredentialAndNoEarlierRetirement` is the other half and
+    /// deliberately seeds its bystander under a *different* name: together they say the
+    /// revoke reaches exactly the rows sharing the login's name and no others.
+    @Test func aSignInRetiresAHandMintedCredentialUnderTheLoginsName() async throws {
+        let clients = InMemoryClientStore()
+        let operatorToken = "stele_pat_operators-own"
+        await clients.seed(token: operatorToken, name: Self.ownerName, scopes: [.admin])
+
+        try await Self.makeApp(clients: clients).test(.router) { client in
+            // Live and `admin`-scoped before the sign-in: it can read the listing.
+            #expect(try await Self.listingStatus(client, with: operatorToken) == .ok)
+
+            let created = try await Self.exchange(client, token: Self.ownerToken)
+            #expect(created.status == .created)
+
+            // Revoked by the sign-in — refused at the door, not merely superseded.
+            #expect(try await Self.listingStatus(client, with: operatorToken) == .unauthorized)
+
+            // And what replaced it is an agent's credential: the `admin` scope does not
+            // survive the rotation, so the sign-in is a demotion as well as a revocation.
+            let replacement = try #require(created.json["token"] as? String)
+            #expect(try await Self.listingStatus(client, with: replacement) == .forbidden)
+            #expect(try await Self.publish(client, with: replacement) == .created)
         }
     }
 
