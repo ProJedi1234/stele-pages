@@ -55,7 +55,8 @@ actor InMemoryClientStore: ClientStoring {
         name: String = "test-client",
         scopes: [ClientScope] = [.publish],
         expiresAt: Date? = nil,
-        revokedAt: Date? = nil
+        revokedAt: Date? = nil,
+        githubLogin: String? = nil
     ) -> Client {
         let client = Client(
             id: nextID,
@@ -64,7 +65,8 @@ actor InMemoryClientStore: ClientStoring {
             createdAt: Date(timeIntervalSince1970: 0),
             lastUsedAt: nil,
             expiresAt: expiresAt,
-            revokedAt: revokedAt
+            revokedAt: revokedAt,
+            githubLogin: githubLogin
         )
         nextID += 1
         clientsByTokenHash[ClientCredential.hash(token)] = client
@@ -85,8 +87,14 @@ actor InMemoryClientStore: ClientStoring {
     /// what the dictionary is keyed by) and then the name — but the name only among *live*
     /// rows, which is the fake's copy of `clients_live_name_idx`'s `WHERE revoked_at IS
     /// NULL`. A revoked credential keeps its name in the listing without reserving it.
+    ///
+    /// `githubLogin` is stored rather than dropped, which sounds like a formality and is
+    /// not: a fake that took the argument and threw it away would make every HTTP assertion
+    /// about reporting a login pass while proving nothing, and the disagreement with
+    /// `ClientStore` would surface only in the Postgres suite.
     func insert(
-        name: String, tokenHash: [UInt8], scopes: [String], expiresAt: Date?
+        name: String, tokenHash: [UInt8], scopes: [String], expiresAt: Date?,
+        githubLogin: String?
     ) async throws -> Client? {
         guard clientsByTokenHash[tokenHash] == nil,
               !clientsByTokenHash.values.contains(where: {
@@ -102,7 +110,8 @@ actor InMemoryClientStore: ClientStoring {
             name: name,
             scopes: scopes,
             createdAt: Date(),
-            expiresAt: expiresAt
+            expiresAt: expiresAt,
+            githubLogin: githubLogin
         )
         nextID += 1
         clientsByTokenHash[tokenHash] = client

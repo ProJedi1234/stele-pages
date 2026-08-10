@@ -354,6 +354,14 @@ struct GitHubExchangeTests {
             #expect(listed.compactMap { $0["name"] as? String } == [Self.ownerName, Self.ownerName])
             #expect(listed.first?["revokedAt"] is String)
             #expect(listed.last?["revokedAt"] == nil || listed.last?["revokedAt"] is NSNull)
+
+            // Both rows are attributed, which is what makes the listing readable as a
+            // history rather than as two credentials that happen to share a name. The
+            // retired row keeping its login is the half a `revoke` that rewrote more than
+            // `revoked_at` would quietly lose, and it is the row an operator reads when
+            // asking who was signed in at the time of something.
+            #expect(listed.first?["githubLogin"] as? String == Self.ownerLogin)
+            #expect(listed.last?["githubLogin"] as? String == Self.ownerLogin)
         }
     }
 
@@ -447,6 +455,87 @@ struct GitHubExchangeTests {
             let replacement = try #require(created.json["token"] as? String)
             #expect(try await Self.listingStatus(client, with: replacement) == .forbidden)
             #expect(try await Self.publish(client, with: replacement) == .created)
+        }
+    }
+
+    // MARK: - Provenance
+
+    /// A credential minted by a sign-in records the account that signed in, and one minted by
+    /// the operator records nothing — asserted in the same listing, because the whole value of
+    /// the field is telling those two apart. A column that were always populated, or always
+    /// null, would satisfy either assertion on its own.
+    ///
+    /// The casing is the second claim. What is stored is the login GitHub reports, not the
+    /// folded spelling the credential is addressed by, so the two are visibly different values
+    /// in the same object: an implementation that recorded `name` a second time under another
+    /// key would pass a test written with an all-lowercase login and prove nothing.
+    ///
+    /// Reported in three places and checked in all three — the `201` the signer-in reads, the
+    /// listing the operator reads, and the `whoami` the credential itself reads — because they
+    /// are three separate outputs of one `ClientResponse` and a fourth could stop being one.
+    ///
+    /// The hand-minted leg *asks* for a login and is refused one, which is the negative half
+    /// of the same property. `CreateClientRequest` has no such field and `JSONDecoder` drops
+    /// the key, so today this passes by the shape of the request type alone; asserting it
+    /// here is what turns that into a refusal, and a later "let the operator label who this
+    /// credential is for" edit has to argue with a failing test rather than land quietly.
+    /// The exchange is the only thing permitted to write this column, and that is the whole
+    /// reason NULL means "nobody signed in for this" rather than "nobody filled it in".
+    @Test func anExchangeMintedCredentialCarriesItsLoginEverywhereItIsReported() async throws {
+        try await Self.makeApp().test(.router) { client in
+            // Minted through the *admin* route, so both origins exist in one store and the
+            // listing below is a genuine comparison rather than two runs of one shape. The
+            // body asks for the very login the exchange writes a few lines down, so what is
+            // pinned is the route ignoring it rather than the store failing to match.
+            let handMinted = try await client.execute(
+                uri: "/\(ServerRoute.admin)/\(ServerRoute.adminClients)",
+                method: .post,
+                headers: [
+                    .authorization: "Bearer \(TestFixture.token)",
+                    .contentType: "application/json",
+                ],
+                body: ByteBuffer(
+                    string: #"{"name":"claude-code","githubLogin":"\#(Self.ownerLogin)"}"#
+                )
+            ) { response -> [String: Any] in
+                #expect(response.status == .created)
+                return (try? JSONSerialization.jsonObject(with: Data(buffer: response.body)))
+                    as? [String: Any] ?? [:]
+            }
+            let handMintedCredential = try #require(handMinted["client"] as? [String: Any])
+            #expect(
+                handMintedCredential["githubLogin"] == nil
+                    || handMintedCredential["githubLogin"] is NSNull
+            )
+
+            let created = try await Self.exchange(client, token: Self.ownerToken)
+            #expect(created.status == .created)
+            let credential = try #require(created.json["client"] as? [String: Any])
+            #expect(credential["githubLogin"] as? String == Self.ownerLogin)
+            // The name is the fold and the login is not, in one object.
+            #expect(credential["name"] as? String == Self.ownerName)
+
+            let listed = try await Self.listClients(client)
+            let signedInRow = try #require(listed.first { $0["name"] as? String == Self.ownerName })
+            #expect(signedInRow["githubLogin"] as? String == Self.ownerLogin)
+            let handMintedRow = try #require(listed.first { $0["name"] as? String == "claude-code" })
+            #expect(
+                handMintedRow["githubLogin"] == nil || handMintedRow["githubLogin"] is NSNull
+            )
+
+            // And the credential can read its own provenance, which is what `stele auth
+            // status` shows the machine holding it.
+            let token = try #require(created.json["token"] as? String)
+            try await client.execute(
+                uri: "/\(ServerRoute.admin)/\(ServerRoute.adminWhoami)",
+                method: .get,
+                headers: [.authorization: "Bearer \(token)"]
+            ) { response in
+                #expect(response.status == .ok)
+                let json = (try? JSONSerialization.jsonObject(with: Data(buffer: response.body)))
+                    as? [String: Any] ?? [:]
+                #expect(json["githubLogin"] as? String == Self.ownerLogin)
+            }
         }
     }
 

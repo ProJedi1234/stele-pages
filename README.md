@@ -182,9 +182,9 @@ happens to run the app, which is rarely the machine you chose for durable storag
 | `PATCH /pages/:slug` | `publish` | Renames a page with `?slug=` and retimes it with `?ttl=`, leaving its contents alone, returns `{slug, url, expires}` as `200` |
 | `DELETE /pages/:slug` | `publish` | Removes a stored page and frees the slug, returns `204` |
 | `POST /auth/github/exchange` | none — it *is* the authentication | Trades a GitHub access token for a stele credential, returns `{token, client}` as `201`. The token is shown once |
-| `GET /admin/whoami` | any credential | Reports the credential presented — name, scopes, expiry, last use — and never a token |
+| `GET /admin/whoami` | any credential | Reports the credential presented — name, scopes, expiry, last use, the GitHub login that minted it — and never a token |
 | `POST /admin/clients` | `admin` | Mints a credential, returns `{token, client}` as `201`. The token is shown once and never again |
-| `GET /admin/clients` | `admin` | Lists credentials — names, scopes, last use, revocation — and never a token |
+| `GET /admin/clients` | `admin` | Lists credentials — names, scopes, last use, revocation, the GitHub login that minted each — and never a token |
 | `DELETE /admin/clients/:name` | `admin` | Revokes one, returns the credential as `200`. The row stays |
 
 The auth column names the *scope* a bearer token has to carry; see "Credentials" below.
@@ -299,11 +299,11 @@ accepted-then-shadowed.
 
 ### Credentials
 
-Every writer gets its own token. A credential is a row in `clients` — a name, a SHA-256
-of the token, an array of scopes, and optional expiry and revocation timestamps — and the
-token itself exists in plaintext exactly once, in the `201` that minted it. The server
-stores only the digest and cannot produce it again, so a caller that loses it mints a
-replacement rather than looking it up.
+Every writer gets its own token. A credential is a row in `clients` — a name, a SHA-256 of
+the token, an array of scopes, optional expiry and revocation timestamps, and the GitHub
+login that minted it if one did — and the token itself exists in plaintext exactly once, in
+the `201` that minted it. The server stores only the digest and cannot produce it again, so
+a caller that loses it mints a replacement rather than looking it up.
 
 Scopes are what make revocation work. An agent's credential carries `publish` and nothing
 else, so a leaked one can deface pages — bad, bounded, recoverable from a re-publish — but
@@ -406,6 +406,16 @@ GitHub login, and that person's next sign-in will retire it and replace it with 
 `publish`-scoped one — including if it was your own `admin` credential. Naming a credential
 after a login is how the exchange makes rotation work; name your hand-minted ones after the
 agent that holds them, not after a person.
+
+A credential minted this way records the login that minted it, in the casing GitHub reports
+rather than the lowercase the credential is named after. `GET /admin/clients` and `GET
+/admin/whoami` both report it as `githubLogin`, so "who signed in for this?" is a question
+the listing answers and a machine can ask about its own token. A credential minted through
+`POST /admin/clients` has no GitHub identity and reports none — the field is absent rather
+than blank, because inventing a login for an operator's own credential would be recording a
+sign-in that never happened. It is an audit record and not an authorization input: nothing
+consults it, and removing an owner from the allowlist still does not disturb a credential
+they already hold.
 
 The allowlist gates *minting* and nothing else: taking a login out of `STELE_GITHUB_OWNERS`
 does not disturb a credential that login already holds, because the list is consulted at the

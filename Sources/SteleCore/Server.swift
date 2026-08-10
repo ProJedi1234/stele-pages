@@ -123,6 +123,12 @@ struct GitHubExchangeRequest: Decodable {
 /// here so that even a future `Client` that gained one could not reach a response body
 /// through this struct. `id` is dropped too — the name is the handle every admin route
 /// addresses, so exposing a second identifier would only invite the CLI to key on it.
+///
+/// `Encodable` is synthesized, and stays that way: `JSONEncoder` omits a nil `Optional`
+/// rather than writing a null, so absence is this type's whole vocabulary for "never
+/// happened" — never used, never expires, not revoked, not minted by a GitHub account. A
+/// hand-written `encode(to:)` emitting explicit nulls would change every one of those wire
+/// shapes at once, for the sake of one field.
 struct ClientResponse: Encodable {
     let name: String
     let scopes: [String]
@@ -130,6 +136,12 @@ struct ClientResponse: Encodable {
     let lastUsedAt: Date?
     let expiresAt: Date?
     let revokedAt: Date?
+    /// Which GitHub account minted this, for the credentials that were minted that way.
+    /// Reported rather than withheld because it is the only thing distinguishing a
+    /// credential the operator issued from one somebody signed in for, and the listing is
+    /// where that question is asked. It is not a secret: an owner's login is public on
+    /// GitHub, and this route is already behind `admin` or behind the credential itself.
+    let githubLogin: String?
 
     init(_ client: Client) {
         self.name = client.name
@@ -138,6 +150,7 @@ struct ClientResponse: Encodable {
         self.lastUsedAt = client.lastUsedAt
         self.expiresAt = client.expiresAt
         self.revokedAt = client.revokedAt
+        self.githubLogin = client.githubLogin
     }
 }
 
@@ -757,7 +770,14 @@ public func buildRouter(
 
         let created: (client: Client, token: String)
         do {
-            created = try await clients.create(name: name, scopes: [.publish], expiresAt: nil)
+            // `login`, not `name`: the credential is *addressed* by the folded spelling
+            // because a URL path segment has no uppercase in its alphabet, and it is
+            // *attributed* to the canonical one GitHub reports, because that is the spelling
+            // the owner would recognise. Recording the fold instead would throw away the only
+            // half of the identity that is not already the name.
+            created = try await clients.create(
+                name: name, scopes: [.publish], expiresAt: nil, githubLogin: login
+            )
         } catch ClientStoreError.nameTaken {
             // Two sign-ins for one login, interleaved: both revoked, one minted, and this
             // one found the name live again. Post-authentication, so it may say so, and the

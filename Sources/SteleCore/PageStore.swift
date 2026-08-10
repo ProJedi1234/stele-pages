@@ -534,6 +534,39 @@ extension PageStore {
                 """,
             ]
         ),
+        Migration(
+            version: 5,
+            statements: [
+                // Which GitHub account signed in to mint this credential. Nullable, and
+                // that is the honest shape rather than the convenient one: a credential
+                // minted through `POST /admin/clients` was nobody's GitHub identity, and a
+                // NOT NULL column would demand a value that does not exist — which in
+                // practice means an empty string or an invented login, and both are
+                // indistinguishable from a real answer once they are in the table. The
+                // column is an audit record, so a fabricated entry is worse than no entry.
+                //
+                // No backfill, and unlike version 2's there is nothing this one could
+                // honestly write. Every row that predates this column was minted through
+                // the admin route, so NULL already says the true thing about all of them.
+                // Version 2 had to backfill because its NULL became ambiguous the instant
+                // the column existed — it could mean "predates expiry" or "deliberately
+                // permanent" — and this one's does not: nothing but the GitHub exchange
+                // writes this column, so NULL means "not signed in for" rather than
+                // "unknown". A second identity provider would need its own answer here,
+                // because its credentials would arrive carrying a NULL that means something
+                // else again — which is a migration to write then, not a hedge to leave now.
+                //
+                // No default and no index. The default is left off for the reason above
+                // rather than for speed: Postgres keeps a constant default in the catalog
+                // and rewrites no rows for it, so one would cost nothing in time and would
+                // stamp a login no account ever chose onto every credential minted after
+                // it. And nothing looks a credential up by this column — a repeat sign-in
+                // resolves by *name*, the login folded into the alphabet a credential is
+                // addressed by — so this is the answer to "which account minted this?" that
+                // an operator reads out of a listing, not a key anything joins on.
+                "ALTER TABLE clients ADD COLUMN github_login text",
+            ]
+        ),
     ]
 
     /// Advisory locks are scoped to a database, so this constant only ever collides with

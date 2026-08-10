@@ -44,13 +44,20 @@ public protocol ClientStoring: Sendable {
     /// operator and their tooling already know.
     ///
     /// Takes the digest, never a token: the plaintext exists in exactly one function
-    /// (`create(name:scopes:expiresAt:)` below) and does not cross this seam, so no
-    /// conformer is ever in a position to store one by accident.
+    /// (`create(name:scopes:expiresAt:githubLogin:)` below) and does not cross this seam, so
+    /// no conformer is ever in a position to store one by accident.
+    ///
+    /// `githubLogin` is the account that signed in to mint this credential, and nil for every
+    /// credential minted any other way. It is carried on the primitive rather than defaulted
+    /// away because a protocol requirement cannot have a default: a conformer that quietly
+    /// dropped the argument would satisfy every reporting test in the suite while writing
+    /// NULL to a column the exchange had a real answer for.
     ///
     /// - Returns: the stored row, or nil if the name — or, impossibly, the digest — was
     ///   already taken.
     func insert(
-        name: String, tokenHash: [UInt8], scopes: [String], expiresAt: Date?
+        name: String, tokenHash: [UInt8], scopes: [String], expiresAt: Date?,
+        githubLogin: String?
     ) async throws -> Client?
 
     /// Every credential, oldest first, revoked and expired ones included.
@@ -101,18 +108,27 @@ extension ClientStoring {
     /// out. The caller's only job is to put `token` in the response and then forget it —
     /// nothing in this process or the database can produce it again.
     ///
+    /// `githubLogin` is defaulted here and not on the primitive, which is the difference
+    /// between an extension method and a protocol requirement: only one of the two minting
+    /// routes has a GitHub identity to record, so the admin handler says nothing and means
+    /// nothing by it, while the exchange passes the login GitHub reported. Every conformer
+    /// still has to carry the parameter, so the default cannot become a place a store
+    /// forgets the column.
+    ///
     /// - Throws: `ClientStoreError.nameTaken` when the name is already in use.
     public func create(
         name: String,
         scopes: [ClientScope],
-        expiresAt: Date?
+        expiresAt: Date?,
+        githubLogin: String? = nil
     ) async throws -> (client: Client, token: String) {
         let token = ClientCredential.generate()
         guard let client = try await insert(
             name: name,
             tokenHash: ClientCredential.hash(token),
             scopes: scopes.map(\.rawValue),
-            expiresAt: expiresAt
+            expiresAt: expiresAt,
+            githubLogin: githubLogin
         ) else {
             throw ClientStoreError.nameTaken(name)
         }
