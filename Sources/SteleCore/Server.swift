@@ -694,15 +694,13 @@ public func buildRouter(
     // agent's credential, never an operator's, so what an owner walks away with can neither
     // mint nor revoke.
     //
-    // What this route does about a login that has signed in before is the open question issue
-    // #27 names, and it is answered in its own commit rather than here. Until then the mint
-    // below refuses a name a live credential already holds, which is what insert-if-free does
-    // on its own.
-    //
-    // Worth knowing before that answer arrives: `POST /admin/clients` and this route mint into
-    // one namespace. The name comes from the login, so an operator who hand-mints
-    // `projedi1234` has named a credential after somebody's GitHub login, and whatever the
-    // repeat-sign-in rule turns out to be will apply to it.
+    // The route itself is a different question, and the honest answer is that it revokes:
+    // whatever live credential holds the login's name, whoever minted it and whatever scopes
+    // it carries. That is the rotation below, and its sharp edge is that `POST
+    // /admin/clients` and this route share one namespace — an operator who hand-mints
+    // `projedi1234` has named it after somebody's GitHub login, and that person's next
+    // sign-in retires it. See the README, and
+    // `GitHubExchangeTests.aSignInRetiresAHandMintedCredentialUnderTheLoginsName`.
     //
     // And no `MinimumCLIVersionMiddleware`, which is the one omission that looks like a
     // mistake. The gate is deliberately registered *after* authentication everywhere else so
@@ -739,25 +737,37 @@ public func buildRouter(
         // else's system and the cost of checking is one function call.
         let name = try validatedClientName(login.lowercased())
 
+        // Signing in twice is a rotation, not a conflict. The live credential under this
+        // name is revoked and a fresh one minted under the same name, so the answer to "I
+        // lost my token" or "I am on a new machine" is to sign in again — which is the only
+        // recovery there can be, since the old plaintext exists nowhere.
+        //
+        // `revoke(name:)` resolves by name and by nothing else, so this retires an
+        // `admin`-scoped credential an operator happened to name after this login just as
+        // readily as the one the last sign-in left. That is the namespace the two minting
+        // routes share, argued out at the registration above.
+        //
+        // The nil this discards is the first-ever sign-in (no such name), and its
+        // already-revoked answer is `COALESCE` keeping the original timestamp; neither is a
+        // fact the caller needs, because the call means "make this name free", not "tell me
+        // what was there". The retired row stays in `clients` with its `revoked_at` set,
+        // which is the audit trail — and this rides the live-only name index that migration
+        // 4 added for precisely this rotation path.
+        _ = try await clients.revoke(name: name)
+
         let created: (client: Client, token: String)
         do {
             created = try await clients.create(name: name, scopes: [.publish], expiresAt: nil)
         } catch ClientStoreError.nameTaken {
-            // A live credential already holds this login's name — most often because this
-            // owner has signed in before. What *should* happen then is the open question
-            // issue #27 names and deliberately leaves to its own commit; until that lands,
-            // insert-if-free refuses and the honest answer is to say so.
-            //
-            // It may say so: the caller has proved they hold a GitHub account this
-            // deployment lists, so they are behind the authentication and the README's
-            // licence to return distinguishing errors reaches them. Nothing here is
-            // learnable by the unauthenticated prober every other branch of this handler is
-            // written for.
+            // Two sign-ins for one login, interleaved: both revoked, one minted, and this
+            // one found the name live again. Post-authentication, so it may say so, and the
+            // remedy is genuinely "try that again" — a second attempt now finds the name
+            // held by a live row it will revoke itself.
             throw HTTPError(
                 .conflict,
                 message: """
-                    A credential named '\(name)' already exists. Revoke it with \
-                    DELETE /admin/clients/\(name) before signing in again.
+                    Another sign-in for '\(name)' is in flight. Retry: the credential this \
+                    one would have replaced now exists.
                     """
             )
         }

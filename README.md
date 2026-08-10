@@ -367,7 +367,11 @@ presents whatever access token it is handed to GitHub's `GET /user` and reads th
 the answer, so a classic PAT, a fine-grained PAT and a token minted by some entirely
 different OAuth app all mint a credential provided they identify an owner. The practical
 consequence is worth being plain about: any leaked GitHub credential belonging to a listed
-owner is also a stele publishing credential until that owner revokes it at GitHub. Closing
+owner is also a stele publishing credential until that owner revokes it at GitHub. The half
+of that which is easy to miss is that it cuts the other way too — because a sign-in retires
+the live credential holding that login's name, whoever holds the leaked GitHub token can
+sign in repeatedly and kick the owner's own agent off each time. It is a remote stop button
+as much as it is a spare key. Closing
 that gap means asking GitHub whether a token was issued to *this* app
 (`POST /applications/{client_id}/token`), which needs the OAuth app's client secret — this
 deployment has nowhere to hold one, so the check is deliberately not built, and
@@ -389,12 +393,19 @@ already behind a credential, which on this route is nobody by construction. A ma
 is still its own `400` naming the shape expected, on the same reasoning that keeps a missing
 `Authorization` header distinguishable: a caller who presented nothing has learned nothing.
 
-**Signing in twice conflicts, for now.** The name comes from the login, and insert-if-free
-refuses a name a live credential already holds, so a second sign-in gets a `409` naming the
-credential in the way. What *should* happen there is a real question — the plaintext of the
-first token exists nowhere, so "sign in again" is the only recovery a lost credential could
-have — and it is answered in its own change rather than fallen into here. Until then the
-remedy is `DELETE /admin/clients/:name`, which needs an operator.
+**Signing in again rotates.** The live credential under that login's name is revoked and a
+fresh one minted under the same name, which is the only recovery there can be for a lost
+token — the plaintext exists nowhere, so there is nothing to look up. The retired row keeps
+its `revoked_at` as the record of when it stopped being trusted, and this is exactly the
+revoke-then-mint path the live-only name index exists for. A login that has never signed in
+before finds no name to retire and simply mints.
+
+The revoke resolves by name and by nothing else, so `POST /admin/clients` and the exchange
+share one namespace. A credential you hand-minted as `projedi1234` is named after somebody's
+GitHub login, and that person's next sign-in will retire it and replace it with a
+`publish`-scoped one — including if it was your own `admin` credential. Naming a credential
+after a login is how the exchange makes rotation work; name your hand-minted ones after the
+agent that holds them, not after a person.
 
 The allowlist gates *minting* and nothing else: taking a login out of `STELE_GITHUB_OWNERS`
 does not disturb a credential that login already holds, because the list is consulted at the

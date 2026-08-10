@@ -298,9 +298,8 @@ gap, asserted today only against the in-memory fake.
   credential, so a `BearerTokenMiddleware` in front of it would demand the thing it issues,
   and `RequireScopeMiddleware` would ask about scopes on a request with no credential to
   have them. What it hands out carries `publish` and only `publish`, so an owner walks away
-  with a credential that can neither mint nor revoke. What the route does about a login that
-  has signed in before is the open question issue #27 names, answered in its own commit; until
-  then insert-if-free refuses the name and the caller gets a `409`.
+  with a credential that can neither mint nor revoke — the route itself does revoke, which is
+  a different sentence and is argued out under repeat sign-in below.
   `MinimumCLIVersionMiddleware` is off it too, and that is the omission
   most likely to be "fixed": the gate is registered *after* authentication everywhere else
   so it never answers an unauthenticated prober, and here it would also gate the bootstrap
@@ -498,6 +497,25 @@ Don't "fix" these without a reason; the README argues them out in full.
   missing-`Authorization`-header rule. `GitHubExchangeTests.everyRefusalIsOneByteIdentical401`
   compares whole responses — headers included, since a `content-length` two bytes apart is
   the same leak.
+- **A repeat GitHub sign-in revokes and re-mints under the same name.** It is not a `409`
+  and not a no-op: the live credential holding the login's name is revoked, then a fresh one
+  minted under it, which is the only recovery available for a lost token because the
+  plaintext exists nowhere. It composes `revoke(name:)` and `create(name:scopes:expiresAt:)`
+  and adds no `ClientStoring` primitive — insert-if-free already refuses a live duplicate
+  atomically and `revoke` already resolves several-rows-one-name, so the only thing between
+  them is ordering, and ordering that means "what a login is" is route policy with one
+  caller. It rides migration 4's live-only name index, which is what makes revoke-then-mint
+  legal at all. `GitHubExchangeTests.aRepeatLoginDisturbsNoOtherCredentialAndNoEarlierRetirement`
+  pins the half that a looser `revoke` would get away with.
+  **The consequence to keep straight is that `revoke(name:)` resolves by name and by nothing
+  else**, so the exchange and `POST /admin/clients` mint into one namespace: a hand-minted
+  credential named after somebody's GitHub login is retired by that person's next sign-in,
+  whatever scopes it carried, and replaced by a `publish`-only one. That is the price of
+  naming a credential after the login — weighed against a `github-` prefix and kept, because
+  the name is the handle an operator recognises — and
+  `GitHubExchangeTests.aSignInRetiresAHandMintedCredentialUnderTheLoginsName` is where the
+  decision lives rather than being inherited. The route comment says the same: what a sign-in
+  *hands out* can neither mint nor revoke, but the route itself revokes.
 - **`STELE_UPLOAD_TOKEN` can no longer publish.** It resolves to `Client.sharedToken`,
   which carries `admin` and nothing else, so `POST /pages` and `PUT /pages/:slug` answer it
   with a `403`. That is the demotion, not a bug: it became the credential that *mints*
