@@ -137,6 +137,26 @@ the raw bytes rather than on a decoded shape, so a field a future `Encodable` co
 adds by accident is caught. `ScopeEnforcementTests` covers the other half — which valid
 credentials are refused, and with which status code.
 
+`GitHubIdentifyingTests` covers the seam's shared policy — `owner(presenting:allowedBy:)` —
+directly rather than through a route, and it is not made redundant by the HTTP tests that
+will assert the same collapse from outside. What a caller observes is one `401`, so a test at
+that level can only prove four paths *look* alike; here each path is named and pinned to nil
+individually, so an edit that reintroduces a distinction fails with a message saying which
+one came back. `aTokenThatCouldNotBePresentedIsRefusedWithoutAskingGitHub` is the one to read
+twice: it asserts nil against a conformer that *throws*, which is the only way to state "the
+primitive was never called" — and the throw it is avoiding would surface as the `500` reserved
+for a GitHub outage, manufactured on demand by anyone sending one newline.
+
+`GitHubAPITests` covers the one decision inside `GitHubAPI`: `verdict(forStatus:)`, which says
+which of GitHub's answers is a verdict on the presented token and which is GitHub declining to
+answer. That mapping is the load-bearing half of the seam's nil-versus-throw contract and
+`InMemoryGitHub` is a dictionary standing beside it rather than a check on it — the same
+relationship `InMemoryPageStore.hasExpired` has with `PageStore`'s SQL. Widening `rejected`
+past `401` is the silent edit it exists to catch: it would turn every GitHub 5xx, and every
+`403` GitHub answers a rate-limited source address with, into "your sign-in was refused".
+Taking the status *code* rather than an `HTTPResponseStatus` is what keeps the function
+assertable without a socket or an undeclared `NIOHTTP1` import.
+
 `PageStoreDatabaseTests` is the one suite that needs Postgres, gated on
 `STELE_TEST_DATABASE_URL` so a plain `swift test` stays hermetic:
 
