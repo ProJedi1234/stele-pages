@@ -41,7 +41,7 @@ public struct Slug: Hashable, Sendable, CustomStringConvertible {
     /// rejected at write time instead of silently 404ing later.
     public static let reserved: Set<String> = [
         "pages", "page", "healthz", "health", "skill", "status", "metrics",
-        "api", "admin", "static", "assets", "robots", "favicon",
+        "api", "admin", "auth", "static", "assets", "robots", "favicon",
         "index", "about", "login", "logout", "new", "edit", "delete",
     ]
 

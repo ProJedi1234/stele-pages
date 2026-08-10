@@ -1,4 +1,5 @@
 import Foundation
+import HTTPTypes
 import Hummingbird
 import HummingbirdTesting
 import Testing
@@ -52,15 +53,29 @@ enum TestFixture {
     /// `publish` — because that is now the only kind of credential that can write a page.
     /// A suite testing the admin routes, or the shared token's own behaviour, passes its
     /// own store or authenticates with `token`.
+    ///
+    /// The default `github` identifies no token at all, so every suite that does not opt in
+    /// gets a sign-in route that refuses everything. That is deliberate rather than merely
+    /// convenient: nothing in this package may reach the network, and a fake that answered
+    /// *something* by default would let a test pass while proving nothing about which
+    /// identity it had arranged.
+    ///
+    /// It is the one parameter here taken as `some …`, where the two stores are concrete.
+    /// GitHub is the dependency with a second fake worth building — the one that throws,
+    /// standing in for an outage — and a concrete parameter would push the suite that needs
+    /// it into building its own application beside this one, which is how two fixtures
+    /// start disagreeing about what the default deployment looks like.
     static func makeApp(
         store: InMemoryPageStore = InMemoryPageStore(),
         clients: InMemoryClientStore = InMemoryClientStore(holding: publishToken),
+        github: some GitHubIdentifying = InMemoryGitHub(),
         environment: [String: String] = [:]
     ) throws -> Application<RouterResponder<SteleRequestContext>> {
         Application(router: buildRouter(
             configuration: try configuration(environment: environment),
             store: store,
-            clients: clients
+            clients: clients,
+            github: github
         ))
     }
 
@@ -126,5 +141,34 @@ enum TestFixture {
         if raw is NSNull { return nil }
         let text = try #require(raw as? String, "`expires` must be a string or null")
         return try Date(text, strategy: .iso8601)
+    }
+}
+
+/// Everything a caller probing for valid credentials can observe about a refusal, reduced
+/// to something `==` can compare in one go.
+///
+/// Deliberately the *whole* response rather than a chosen subset: the point of the type is
+/// that a future header — a `WWW-Authenticate` that names the failure, a `Retry-After` on
+/// one branch only — is included in the comparison without anyone remembering to add it.
+/// Headers are canonicalised and sorted because their order is not part of the message and
+/// nothing observable depends on it.
+///
+/// It lives here rather than in `ClientAuthTests`, where it began, because two surfaces now
+/// have the same property to defend: the bearer routes collapse unknown, revoked and expired
+/// credentials into one 401, and `POST /auth/github/exchange` collapses a rejected GitHub
+/// token, a non-owner and an unconfigured allowlist into another. Two copies of a drift
+/// detector is its own kind of drift — the copy that stops comparing headers is the one
+/// nobody notices.
+struct Rejection: Equatable, Sendable {
+    let status: HTTPResponse.Status
+    let headers: [String]
+    let body: [UInt8]
+
+    init(_ response: TestResponse) {
+        self.status = response.status
+        self.headers = response.headers
+            .map { "\($0.name.canonicalName): \($0.value)" }
+            .sorted()
+        self.body = Array(buffer: response.body)
     }
 }

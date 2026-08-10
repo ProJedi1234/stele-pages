@@ -563,7 +563,7 @@ struct PublishSkill: Sendable {
         | `426` | The installed tool is older than this deployment requires (`\#(minimumCLIVersion)`). | Run `\#(SteleCLI.installCommand)`, then retry once. |
         | `503` | The server could not allocate a slug. | Retry once, or pass `--slug`. |
 
-        ## The whole API
+        ## The routes the tool uses
 
         The tool talks to these so you do not have to.
 

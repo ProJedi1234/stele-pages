@@ -178,27 +178,9 @@ struct ClientAuthTests {
     }
 }
 
-/// Everything a caller probing for valid credentials can observe about a refusal, reduced
-/// to something `==` can compare in one go.
-///
-/// Deliberately the *whole* response rather than a chosen subset: the point of the type is
-/// that a future header — a `WWW-Authenticate` that names the failure, a `Retry-After` on
-/// one branch only — is included in the comparison without anyone remembering to add it.
-/// Headers are canonicalised and sorted because their order is not part of the message and
-/// nothing observable depends on it.
-private struct Rejection: Equatable, Sendable {
-    let status: HTTPResponse.Status
-    let headers: [String]
-    let body: [UInt8]
-
-    init(_ response: TestResponse) {
-        self.status = response.status
-        self.headers = response.headers
-            .map { "\($0.name.canonicalName): \($0.value)" }
-            .sorted()
-        self.body = Array(buffer: response.body)
-    }
-}
+// `Rejection`, which used to live here, is now in `TestFixture.swift`: the exchange route
+// defends the same byte-identity property on a second surface, and one detector shared beats
+// two that can drift apart.
 
 /// A store that authenticates fine and cannot record a use — the shape of a database that
 /// is up for reads and refusing writes.
