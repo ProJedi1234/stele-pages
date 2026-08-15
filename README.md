@@ -177,6 +177,8 @@ happens to run the app, which is rarely the machine you chose for durable storag
 | `GET /:slug`       | none   | The stored page, or a 404 page if it's absent or expired |
 | `GET /assets/stele.css` | none | The shared stylesheet (see "A shared look")         |
 | `GET /skill`       | none   | The publish skill, as Markdown (see "Teaching an agent to publish") |
+| `GET /assets/favicon.png` | none | The site icon, linked by the built-in pages          |
+| `GET /favicon.ico` | none   | The same icon, at the path browsers ask for unprompted — so an uploaded page's tab gets one too |
 | `POST /pages`      | `publish` | Stores the request body, takes `?slug=` and `?ttl=`, returns `{slug, url, expires}` as `201` |
 | `PUT /pages/:slug` | `publish` | Replaces a stored page's body and content type, returns `{slug, url, expires}` as `200` |
 | `PATCH /pages/:slug` | `publish` | Renames a page with `?slug=` and retimes it with `?ttl=`, leaving its contents alone, returns `{slug, url, expires}` as `200` |

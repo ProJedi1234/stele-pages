@@ -293,7 +293,8 @@ gap, asserted today only against the in-memory fake.
   backtrack to `/:slug`, so `GET /assets` would otherwise answer with the framework's own
   plain-text 404 — the one distinguishable response on the public read surface. That path
   belongs in `NotFoundTests.all404sAreIdentical`, which is what makes the regression loud.
-  A first segment that *carries its own value* (`/skill`) is the other case: the trie
+  A first segment that *carries its own value* (`/skill`, and `/favicon.ico` — the one
+  reserved name with a dot in it) is the other case: the trie
   resolves it, so it needs no stub and must stay **out** of `all404sAreIdentical` — that
   test asserts a 404, and a route that answers 200 there would either fail or, worse, be
   "fixed" by deleting the route's content. The distinction is whether the bare segment is
@@ -600,9 +601,17 @@ Don't "fix" these without a reason; the README argues them out in full.
   days rather than whatever is left of them. It cannot revive an expired page: the same
   live-row predicate applies, so `?ttl=never` on a dead page is a `404`. All of these look
   like bugs and are not.
-- **The shared stylesheet and the publish skill are Swift strings, not SwiftPM
-  resources.** They live as raw literals in `Sources/SteleCore/Stylesheet.swift` and
-  `Sources/SteleCore/PublishSkill.swift`. The Dockerfile's runtime stage copies
+- **The shared stylesheet, the publish skill and the favicon are compiled into the binary,
+  not SwiftPM resources.** They live as raw literals in `Sources/SteleCore/Stylesheet.swift`
+  and `Sources/SteleCore/PublishSkill.swift`, and — because the icon is a raster with no
+  vector original — as base64 in `Sources/SteleCore/Favicon.swift`, decoded to empty rather
+  than through a `!`: a static `let` is lazy, so a force-unwrap would trap inside the first
+  request that asked for the icon. `FaviconTests.theEmbeddedBytesAreARealPNG` is what makes
+  a corrupted literal a build failure instead of a silent empty body. The icon answers on
+  two paths — `/assets/favicon.png`, which the built-in pages link, and `/favicon.ico`,
+  which browsers ask for on their own and is the only way a page an uploader wrote gets an
+  icon at all. Same bytes and `image/png` on both; the `.ico` is where to look, not what
+  the format is. The Dockerfile's runtime stage copies
   only the built executable, and SwiftPM emits a resource bundle as a *sibling directory*
   of that executable which `--static-swift-stdlib` does not embed — so a `Bundle.module`
   lookup would pass `swift test` on a dev machine and 500 in production, the worst
