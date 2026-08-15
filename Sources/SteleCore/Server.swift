@@ -210,7 +210,15 @@ public enum ServerRoute {
     /// forward-looking list and not a description of the routes that exist.
     public static let auth = "auth"
 
-    public static let names: Set<String> = [healthz, pages, assets, skill, admin, auth]
+    /// The site icon, at the root, where a browser looks for it without being told. Unlike
+    /// every other name here it carries an extension, because that is the path browsers
+    /// request by convention — and it is a first segment, so it belongs in `names` and in
+    /// `Slug.reserved` like the rest. It is also the one route here that exists for pages
+    /// this server did not write: an uploaded page links no icon of ours, so this is the
+    /// only way its tab gets one.
+    public static let favicon = "favicon.ico"
+
+    public static let names: Set<String> = [healthz, pages, assets, skill, admin, auth, favicon]
 
     /// The one collection under `/admin`, as its *second* segment. Kept out of `names` for
     /// the same reason `stele.css` is: that set is exactly what `Slug.reserved` has to
@@ -831,8 +839,25 @@ public func buildRouter(
             ifNoneMatch: request.headers[.ifNoneMatch],
             etag: Stylesheet.etag,
             contentType: Stylesheet.contentType,
-            body: Stylesheet.css
+            body: ByteBuffer(string: Stylesheet.css)
         )
+    }
+
+    // The site icon, on the same terms as the stylesheet: it ships with the binary and
+    // changes by deploy. Served from two paths for one reason each — `/assets/favicon.png`
+    // is what the built-in pages link, and `/favicon.ico` is what a browser asks for when
+    // nothing links anything, which is every page an uploader wrote. Same bytes, same
+    // `image/png` content type: the `.ico` in that path is a convention about where to
+    // look, not a claim about the format, and browsers have taken PNGs there for years.
+    for iconPath in [Favicon.path, "/\(ServerRoute.favicon)"] {
+        router.get(RouterPath(iconPath)) { request, _ -> Response in
+            shippedDocumentResponse(
+                ifNoneMatch: request.headers[.ifNoneMatch],
+                etag: Favicon.etag,
+                contentType: Favicon.contentType,
+                body: ByteBuffer(bytes: Favicon.bytes)
+            )
+        }
     }
 
     // Rendered once here rather than per request: it interpolates this deployment's own base
@@ -851,7 +876,7 @@ public func buildRouter(
             ifNoneMatch: request.headers[.ifNoneMatch],
             etag: skill.etag,
             contentType: PublishSkill.contentType,
-            body: skill.markdown
+            body: ByteBuffer(string: skill.markdown)
         )
     }
 
@@ -895,8 +920,8 @@ public func buildRouter(
     return router
 }
 
-/// The one response shape for documents that ship with the binary — today the stylesheet
-/// and the publish skill. Both mutate in place across deploys (which is the feature: an
+/// The one response shape for documents that ship with the binary — today the stylesheet,
+/// the publish skill and the site icon. All mutate in place across deploys (which is the feature: an
 /// edit reaches every page, or every agent, at once), so a cache must always come back and
 /// ask; `no-cache` forces that, and the strong ETag makes the ask a bodyless round trip
 /// rather than a re-download. No `nosniff`, because these bytes are ours — that header is
@@ -906,7 +931,7 @@ private func shippedDocumentResponse(
     ifNoneMatch: String?,
     etag: String,
     contentType: String,
-    body: String
+    body: ByteBuffer
 ) -> Response {
     if ifNoneMatchHits(ifNoneMatch, etag: etag) {
         return Response(status: .notModified, headers: [.eTag: etag, .cacheControl: "no-cache"])
@@ -915,7 +940,7 @@ private func shippedDocumentResponse(
     return Response(
         status: .ok,
         headers: [.contentType: contentType, .eTag: etag, .cacheControl: "no-cache"],
-        body: .init(byteBuffer: ByteBuffer(string: body))
+        body: .init(byteBuffer: body)
     )
 }
 
@@ -1372,7 +1397,8 @@ func notFoundPage() -> String {
     <html lang="en"><head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Not found</title>
-    <link rel="stylesheet" href="\(Stylesheet.path)"></head>
+    <link rel="stylesheet" href="\(Stylesheet.path)">
+    <link rel="icon" href="\(Favicon.path)"></head>
     <body class="narrow"><h1>Nothing here</h1>
     <p>No page is published at this address. Check the link, or publish one with
     <code>POST /pages</code>.</p></body></html>

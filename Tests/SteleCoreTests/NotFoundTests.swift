@@ -36,10 +36,11 @@ struct NotFoundTests {
         // further down). Each of those four needs its own GET responder, because the trie
         // matches the literal node and does not backtrack to `/:slug`.
         //
-        // `/skill` is deliberately absent, even though this list otherwise mirrors
-        // `ServerRoute.names`: it answers with the publish document, not a 404, so it has
-        // no uniform-404 responder to compare. Adding it here is the instinctive "fix" and
-        // is wrong — `PublishSkillTests.servesTheSkill` is what covers that path.
+        // `/skill` and `/favicon.ico` are deliberately absent, even though this list
+        // otherwise mirrors `ServerRoute.names`: each answers with its own content, not a
+        // 404, so neither has a uniform-404 responder to compare. Adding either is the
+        // instinctive "fix" and is wrong — `PublishSkillTests.servesTheSkill` and
+        // `FaviconTests.theRootPathIsAnEndpointRatherThanA404` cover those paths.
         let paths = [
             "/x", "/quiet-cedar-otter", "/brisk-maple-compass", "/\(ServerRoute.pages)",
             "/\(ServerRoute.assets)", "/\(ServerRoute.admin)", "/\(ServerRoute.auth)",

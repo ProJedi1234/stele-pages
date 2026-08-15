@@ -39,7 +39,8 @@ func landingPage(baseURL: String, recent: [PageSummary]?, now: Date = Date()) ->
     <html lang="en"><head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>stele</title>
-    <link rel="stylesheet" href="\(Stylesheet.path)"></head>
+    <link rel="stylesheet" href="\(Stylesheet.path)">
+    <link rel="icon" href="\(Favicon.path)"></head>
     <body>
     <h1>stele</h1>
     <p class="muted">Publish an HTML file, get a readable link back.</p>
