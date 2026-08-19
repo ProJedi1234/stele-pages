@@ -30,11 +30,12 @@ struct NotFoundTests {
         )
 
         // Malformed (too short), well-formed but never published, published but past its
-        // deadline, and four bare segments whose real endpoints are elsewhere: `/pages`
+        // deadline, and five bare segments whose real endpoints are elsewhere: `/pages`
         // (its responders are POST and the `:slug` child), `/assets` (the stylesheet),
-        // `/admin` (the client routes) and `/auth` (the GitHub exchange, two segments
-        // further down). Each of those four needs its own GET responder, because the trie
-        // matches the literal node and does not backtrack to `/:slug`.
+        // `/admin` (the client routes), `/auth` (the GitHub exchange, two segments further
+        // down) and `/static` (attachment bytes, one segment down). Each of those five
+        // needs its own GET responder, because the trie matches the literal node and does
+        // not backtrack to `/:slug`.
         //
         // `/skill` and `/favicon.ico` are deliberately absent, even though this list
         // otherwise mirrors `ServerRoute.names`: each answers with its own content, not a
@@ -44,6 +45,12 @@ struct NotFoundTests {
         let paths = [
             "/x", "/quiet-cedar-otter", "/brisk-maple-compass", "/\(ServerRoute.pages)",
             "/\(ServerRoute.assets)", "/\(ServerRoute.admin)", "/\(ServerRoute.auth)",
+            "/\(ServerRoute.staticFiles)",
+            // A slug under `/static` that is a *text* page, which is a miss on this path
+            // for the same reason an absent one is: it names no bytes. It answers the same
+            // page as the rest, so a scanner cannot use this route to learn which slugs
+            // exist as pages either.
+            "/\(ServerRoute.staticFiles)/amber-willow-heron",
         ]
         // Collected inside the test closure and returned out of it: the closure is
         // `@Sendable`, so it cannot mutate a captured local.
