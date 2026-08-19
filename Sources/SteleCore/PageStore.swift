@@ -1,11 +1,43 @@
+import Crypto
 import Foundation
 import Logging
 import PostgresNIO
 
+/// The `pages.kind` column, which says which half of a row is populated.
+///
+/// A column rather than a rule inferred from `body IS NULL`, even though migration 6's
+/// CHECK constraint makes the two equivalent today. The equivalence is what a third kind
+/// would break, and the failure mode of inferring is silent: every existing read would
+/// classify the new kind as whichever side of the NULL it happened to land on. Asking a
+/// column that was deliberately written is a question with an answer.
+enum PageKind: String {
+    case text
+    case blob
+}
+
+/// What a page holds, as read back — never the bytes of an attachment.
+///
+/// The asymmetry with `PageBody`, which is the same distinction on the way *in*, is the
+/// point of having two types. A write has to carry an attachment's bytes; a read of a
+/// page's metadata must not, because the callers of `fetch` are the viewer and the router,
+/// and neither has any use for a 32 MB video it would have to buffer to ignore. Bytes come
+/// out through `fetchBlob` alone, which is the only method in the seam that can return
+/// them and the only one that takes a range to bound what it returns.
+public enum PageContent: Sendable, Equatable {
+    case text(String)
+    /// An attachment: everything about the bytes except the bytes.
+    ///
+    /// `byteSize` and `digest` are read from `page_blobs` rather than recomputed, which is
+    /// what lets the viewer render a size and the raw route emit an `ETag` without the
+    /// column that holds the bytes ever being named in the query — Postgres does not
+    /// detoast what it is not asked for.
+    case attachment(byteSize: Int, digest: String, filename: String?)
+}
+
 /// A stored page, as read back from the database.
 public struct Page: Sendable, Equatable {
     public var slug: Slug
-    public var body: String
+    public var content: PageContent
     public var contentType: String
     public var createdAt: Date
     /// When the page stops being served, or nil if it never does.
@@ -59,6 +91,15 @@ public enum PageStoreError: Error, Equatable {
     /// The generator lost the collision race repeatedly. Effectively impossible unless
     /// the table has grown to a meaningful fraction of the keyspace.
     case couldNotAllocateSlug(attempts: Int)
+    /// A `pages` row says it is an attachment and `page_blobs` has nothing under its slug.
+    ///
+    /// Unreachable through this store: the two rows are written in one transaction and the
+    /// foreign key cascades, so nothing short of a hand-edited database produces it. It is
+    /// an error rather than a nil because the alternative is a 404 for a page that provably
+    /// exists — the row is right there — and a reader cannot tell that apart from an expiry
+    /// they missed. Failing loudly is what puts it in the log instead of in a bug report
+    /// six weeks later.
+    case blobMissing(Slug)
 }
 
 /// All database access, and the schema's history along with it. Every statement here is
@@ -80,11 +121,18 @@ public struct PageStore: Sendable {
         // outlive its `expires_at` by any amount of time; filtering here means a page stops
         // being served at exactly its deadline no matter when — or whether — anything gets
         // around to deleting it.
+        // A LEFT JOIN rather than a second query, and `b.bytes` is deliberately not among
+        // the columns: Postgres does not detoast a value the query never names, so this
+        // reads an attachment's size and digest without touching the megabytes sitting
+        // beside them. That property is the whole reason the bytes live in their own table,
+        // and it is one an incautious `SELECT b.*` would silently give back.
         let rows = try await client.query(
             """
-            SELECT body, content_type, created_at, expires_at, client_id
-            FROM pages WHERE slug = \(slug.value)
-              AND (expires_at IS NULL OR expires_at > now())
+            SELECT p.kind, p.body, p.content_type, p.filename, p.created_at,
+                   p.expires_at, p.client_id, b.byte_size, b.digest
+            FROM pages p LEFT JOIN page_blobs b ON b.slug = p.slug
+            WHERE p.slug = \(slug.value)
+              AND (p.expires_at IS NULL OR p.expires_at > now())
             """,
             logger: logger
         )
@@ -98,12 +146,21 @@ public struct PageStore: Sendable {
         // `client_id` is optional for a different reason and permanently so: the shared
         // token has no row to point at, and pages written before migration 3 have no owner
         // to name.
-        for try await (body, contentType, createdAt, expiresAt, clientID) in rows.decode(
-            (String, String, Date, Date?, Int64?).self, context: .default
+        // `body` is `String?` now and `byte_size`/`digest` are optional for the mirror-image
+        // reason: exactly one side of that pair is populated in any row, and which one is
+        // what `kind` says. Decoding either as non-optional would compile and then throw on
+        // precisely the rows the other kind produces.
+        for try await (kind, body, contentType, filename, createdAt, expiresAt, clientID,
+                       byteSize, digest) in rows.decode(
+            (String, String?, String, String?, Date, Date?, Int64?, Int64?, String?).self,
+            context: .default
         ) {
             return Page(
                 slug: slug,
-                body: body,
+                content: try Self.content(
+                    kind: kind, slug: slug, body: body,
+                    filename: filename, byteSize: byteSize, digest: digest
+                ),
                 contentType: contentType,
                 createdAt: createdAt,
                 expiresAt: expiresAt,
@@ -111,6 +168,35 @@ public struct PageStore: Sendable {
             )
         }
         return nil
+    }
+
+    /// Resolves the two half-populated column sets a row can carry into the one that
+    /// `kind` says is real.
+    ///
+    /// `kind` is the authority rather than "body is NULL, so it must be an attachment",
+    /// which is the same reading the CHECK constraint in migration 6 enforces. Inferring
+    /// from the NULL would work today and would quietly pick a side the day a third kind
+    /// exists; asking the column that was written to answer this question does not.
+    private static func content(
+        kind: String, slug: Slug, body: String?,
+        filename: String?, byteSize: Int64?, digest: String?
+    ) throws -> PageContent {
+        switch kind {
+        case PageKind.blob.rawValue:
+            // The CHECK constraint guarantees the `pages` half; the foreign key guarantees
+            // the `page_blobs` half. Both still get asserted here, because a decode that
+            // trusts a schema it cannot see is how a hand-edited database becomes a crash
+            // in a request handler.
+            guard let byteSize, let digest else { throw PageStoreError.blobMissing(slug) }
+            return .attachment(byteSize: Int(byteSize), digest: digest, filename: filename)
+        default:
+            // A row whose `kind` this build does not recognise reads as text, which is what
+            // the column defaults to and what every row written before migration 6 is. The
+            // alternative — throwing — would make an older binary booted against a newer
+            // database fail the *read* path rather than only declining to write the new
+            // kind, and a rollback is exactly when that matters.
+            return .text(body ?? "")
+        }
     }
 
     /// The most recently published live pages, newest first.
@@ -167,7 +253,25 @@ public struct PageStore: Sendable {
 
     /// - Returns: true if the row was inserted, false if the slug was already taken.
     public func insert(
-        slug: Slug, body: String, contentType: String, expiresAt: Date?, clientID: Int64?
+        slug: Slug, body: PageBody, contentType: String, expiresAt: Date?, clientID: Int64?
+    ) async throws -> Bool {
+        switch body {
+        case .text(let text):
+            return try await insertText(
+                slug: slug, text: text, contentType: contentType,
+                expiresAt: expiresAt, clientID: clientID
+            )
+        case .blob(let bytes, let filename):
+            return try await insertBlob(
+                slug: slug, bytes: bytes, filename: filename, contentType: contentType,
+                expiresAt: expiresAt, clientID: clientID
+            )
+        }
+    }
+
+    /// The `pages`-only half of `insert`, for a page whose body is text.
+    private func insertText(
+        slug: Slug, text: String, contentType: String, expiresAt: Date?, clientID: Int64?
     ) async throws -> Bool {
         // ON CONFLICT DO NOTHING makes the uniqueness check and the insert one atomic
         // step. Checking first and then inserting would leave a window where two
@@ -179,8 +283,9 @@ public struct PageStore: Sendable {
         // is what turns that credential into the nil, upstream of this call.
         let rows = try await client.query(
             """
-            INSERT INTO pages (slug, body, content_type, expires_at, client_id)
-            VALUES (\(slug.value), \(body), \(contentType), \(expiresAt), \(clientID))
+            INSERT INTO pages (slug, kind, body, content_type, expires_at, client_id)
+            VALUES (\(slug.value), \(PageKind.text.rawValue), \(text), \(contentType),
+                    \(expiresAt), \(clientID))
             ON CONFLICT (slug) DO NOTHING
             RETURNING slug
             """,
@@ -193,10 +298,85 @@ public struct PageStore: Sendable {
         return false
     }
 
+    /// The two-table half of `insert`, for a page whose body is bytes.
+    ///
+    /// One transaction, because a `pages` row claiming to be an attachment with no
+    /// `page_blobs` row under it is the one state the schema cannot express and every read
+    /// would then have to defend against — `PageStoreError.blobMissing` exists for a
+    /// database somebody edited by hand, not for a window this store leaves open.
+    ///
+    /// A leased connection rather than two `client.query` calls: the pool hands out a
+    /// different connection per call, so a BEGIN issued that way would open a transaction on
+    /// one connection and the INSERT would run outside it on another.
+    private func insertBlob(
+        slug: Slug, bytes: [UInt8], filename: String?, contentType: String,
+        expiresAt: Date?, clientID: Int64?
+    ) async throws -> Bool {
+        try await client.withConnection { connection in
+            try await connection.withTransaction(logger: logger) { transaction in
+                // The same untargeted `ON CONFLICT DO NOTHING` the text path uses, and it
+                // still decides the whole outcome: if this claims no row the slug was taken,
+                // and the blob insert below must not run. Returning early inside the
+                // transaction commits an empty one, which is the cheapest correct thing.
+                let claimed = try await transaction.query(
+                    """
+                    INSERT INTO pages
+                        (slug, kind, body, content_type, filename, expires_at, client_id)
+                    VALUES (\(slug.value), \(PageKind.blob.rawValue), NULL, \(contentType),
+                            \(filename), \(expiresAt), \(clientID))
+                    ON CONFLICT (slug) DO NOTHING
+                    RETURNING slug
+                    """,
+                    logger: logger
+                )
+
+                var inserted = false
+                for try await _ in claimed.decode(String.self, context: .default) {
+                    inserted = true
+                }
+                guard inserted else { return false }
+
+                // `Data`, not `[UInt8]`: PostgresNIO encodes an array as a Postgres *array*
+                // — here `char[]` — rather than as `bytea`, which is the same trap
+                // `ClientStore` documents for `token_hash` and fails at bind time with a
+                // type mismatch that names neither this column nor that reason.
+                try await transaction.query(
+                    """
+                    INSERT INTO page_blobs (slug, bytes, byte_size, digest)
+                    VALUES (\(slug.value), \(Data(bytes)), \(Int64(bytes.count)),
+                            \(Self.digest(of: bytes)))
+                    """,
+                    logger: logger
+                )
+                return true
+            }
+        }
+    }
+
     /// - Returns: `.replaced` with the page's unchanged expiry, or `.noSuchPage` if no live
     ///   row exists at that slug.
     public func update(
-        slug: Slug, body: String, contentType: String?, clientID: Int64?
+        slug: Slug, body: PageBody, contentType: String?, clientID: Int64?
+    ) async throws -> PageUpdateOutcome {
+        // Both kinds run in one transaction, including text-replacing-text, which needs no
+        // second statement. That uniformity is the point: a replacement may change a page's
+        // *kind*, so the `page_blobs` row has to be created or removed in step with the
+        // `pages` row it belongs to, and a text path that skipped the transaction would be
+        // one branch out of four where it does not.
+        try await client.withConnection { connection in
+            try await connection.withTransaction(logger: logger) { transaction in
+                try await Self.applyUpdate(
+                    slug: slug, body: body, contentType: contentType, clientID: clientID,
+                    on: transaction, logger: logger
+                )
+            }
+        }
+    }
+
+    /// The body of `update`, inside the caller's transaction.
+    private static func applyUpdate(
+        slug: Slug, body: PageBody, contentType: String?, clientID: Int64?,
+        on transaction: PostgresConnection, logger: Logger
     ) async throws -> PageUpdateOutcome {
         // A single UPDATE is its own existence check: the WHERE clause and the write are
         // one statement, and RETURNING tells us whether a row matched. `created_at` is
@@ -216,10 +396,32 @@ public struct PageStore: Sendable {
         // The same expired-row exclusion the fetch uses appears here so that a PUT to an
         // expired-but-unreclaimed page is a 404 exactly as a GET of it is — the write
         // surface and the read surface agree on which pages exist.
-        let rows = try await client.query(
+        //
+        // `kind`, `body` and `filename` are assigned rather than coalesced, because a
+        // replacement decides all three: a PUT of a PNG over an HTML page makes it an
+        // attachment, and a PUT of HTML over a PNG makes it text again. `content_type` keeps
+        // its COALESCE — that one really can be "no opinion", which is what an absent
+        // request header means and what preserves a stylesheet's type across a re-upload.
+        let kind: PageKind
+        let text: String?
+        let filename: String?
+        switch body {
+        case .text(let value):
+            kind = .text
+            text = value
+            filename = nil
+        case .blob(_, let name):
+            kind = .blob
+            text = nil
+            filename = name
+        }
+
+        let rows = try await transaction.query(
             """
             UPDATE pages
-            SET body = \(body),
+            SET kind = \(kind.rawValue),
+                body = \(text),
+                filename = \(filename),
                 content_type = COALESCE(\(contentType), content_type),
                 client_id = \(clientID)
             WHERE slug = \(slug.value)
@@ -229,10 +431,119 @@ public struct PageStore: Sendable {
             logger: logger
         )
 
+        var expiry: Date??
         for try await expiresAt in rows.decode(Date?.self, context: .default) {
-            return .replaced(expiresAt: expiresAt)
+            expiry = expiresAt
         }
-        return .noSuchPage
+        guard let expiresAt = expiry else { return .noSuchPage }
+
+        // Unconditional, and that is what makes the four kind transitions three statements
+        // instead of a truth table. The row for the *old* bytes goes whatever the new body
+        // is — replacing an attachment means its previous bytes are dead either way — and
+        // the insert below only runs when the new body has bytes of its own.
+        try await transaction.query(
+            "DELETE FROM page_blobs WHERE slug = \(slug.value)", logger: logger
+        )
+
+        if case .blob(let bytes, _) = body {
+            try await transaction.query(
+                """
+                INSERT INTO page_blobs (slug, bytes, byte_size, digest)
+                VALUES (\(slug.value), \(Data(bytes)), \(Int64(bytes.count)),
+                        \(digest(of: bytes)))
+                """,
+                logger: logger
+            )
+        }
+
+        return .replaced(expiresAt: expiresAt)
+    }
+
+    /// - Returns: the requested slice of an attachment's bytes, or nil if no live
+    ///   attachment exists at that slug.
+    public func fetchBlob(slug: Slug, range: Range<Int>?) async throws -> PageBlobSlice? {
+        // The range is applied by Postgres rather than by slicing a fetched value, which is
+        // the entire reason `page_blobs.bytes` is `STORAGE EXTERNAL`: an uncompressed TOAST
+        // value supports a genuine partial read, so a seek into the middle of a video reads
+        // the pages it lands on instead of the whole file. With the default EXTENDED
+        // storage this same statement would be correct and would decompress from the start
+        // every time.
+        //
+        // `substring` is 1-indexed, hence the `+ 1`. `Int32` and not `Int64`, because the
+        // overload Postgres offers for `bytea` takes `integer` — binding a `bigint` fails
+        // to resolve the function at all rather than widening to it, which is a `42883` at
+        // runtime and compiles perfectly. `clamping:` because the caller's range comes from
+        // a `Range:` header eventually, and saturating is the honest answer for an offset
+        // past anything this column can hold.
+        // Clamped *before* the `+ 1`, not after, and that order is the whole point. The
+        // offset originates in a `Range:` header, so `Int.max` is a value a caller can
+        // simply send; `Int32(clamping: lowerBound + 1)` would overflow on the addition
+        // before the clamp ever ran, and an overflow in Swift is a trap — which makes it an
+        // unauthenticated way to take the process down. Clamping first bounds the operand,
+        // and the saturated case skips the increment rather than repeating the problem one
+        // width down. Every value that did not trap keeps the result it had.
+        let offset = Int32(clamping: range?.lowerBound ?? 0)
+        let start = offset == .max ? offset : offset + 1
+
+        // An upper bound past what an `Int32` can express *is* "to the end", and is read
+        // that way rather than clamped to a large number. That spelling is what lets a
+        // caller who does not know the size — every `bytes=N-` request, which is what a
+        // video player sends after its first probe — ask for the rest of a file in one
+        // read. Clamping to `Int32.max` instead would work today only because the
+        // configured ceiling is far below it, which is a correctness argument resting on a
+        // number in another file.
+        let length: Int32?
+        if let range, range.upperBound < Int(Int32.max) {
+            length = Int32(clamping: range.count)
+        } else {
+            length = nil
+        }
+
+        // The deadline predicate again, on `pages`, because the bytes have no expiry of
+        // their own and this route is a read like any other. Without it an expired
+        // attachment would keep serving through `/static` after `GET /:slug` had started
+        // 404ing it — the write surface and the read surface disagreeing about which pages
+        // exist, in the one place where the disagreement is invisible from a browser.
+        // Two statements rather than one with a nullable length. A nil bind reaches
+        // Postgres as `unknown`, which `substring` cannot resolve an overload against, and
+        // the alternatives are worse than a branch: casting the NULL puts a type name in
+        // the SQL to keep in step with the bind, and passing a huge length instead of NULL
+        // is a magic number defending against nothing. "To the end" has its own spelling in
+        // SQL, so this uses it.
+        let query: PostgresQuery = if let length {
+            """
+            SELECT p.content_type, p.filename, b.byte_size, b.digest,
+                   substring(b.bytes FROM \(start) FOR \(length))
+            FROM page_blobs b JOIN pages p ON p.slug = b.slug
+            WHERE b.slug = \(slug.value)
+              AND (p.expires_at IS NULL OR p.expires_at > now())
+            """
+        } else {
+            """
+            SELECT p.content_type, p.filename, b.byte_size, b.digest,
+                   substring(b.bytes FROM \(start))
+            FROM page_blobs b JOIN pages p ON p.slug = b.slug
+            WHERE b.slug = \(slug.value)
+              AND (p.expires_at IS NULL OR p.expires_at > now())
+            """
+        }
+
+        let rows = try await client.query(query, logger: logger)
+
+        for try await (contentType, filename, byteSize, digest, bytes) in rows.decode(
+            (String, String?, Int64, String, Data).self, context: .default
+        ) {
+            return PageBlobSlice(
+                bytes: Array(bytes),
+                contentType: contentType,
+                filename: filename,
+                // The size of the *whole* attachment, not of the slice — a `206` has to
+                // report both, and only one of them is `bytes.count`.
+                totalSize: Int(byteSize),
+                digest: digest
+            )
+        }
+        return nil
     }
 
     /// - Returns: `.amended` with the resulting slug and deadline, `.noSuchPage` if no live
@@ -292,6 +603,23 @@ public struct PageStore: Sendable {
             guard let newSlug else { throw error }
             return .slugTaken(newSlug)
         }
+    }
+
+    /// SHA-256 of an attachment's bytes, lowercase hex, stored in `page_blobs.digest`.
+    ///
+    /// Deliberately not `strongETag(over:)`, which every other validator in this server
+    /// comes from. That helper hashes bytes the caller is already holding, and the entire
+    /// point of this column is that the reader is *not* holding them: the viewer and the
+    /// `304` path need a validator without detoasting a 32 MB video to compute one. So the
+    /// digest is taken once, at write time, and read back as a column. The HTTP layer
+    /// quotes it into an entity-tag; what is stored is a fact about the bytes rather than
+    /// an HTTP artefact.
+    ///
+    /// SHA-256 rather than FNV-1a because this one is written down and outlives the
+    /// request that made it — a stored digest is the thing you compare against when asking
+    /// whether two uploads are the same bytes, and 64 bits is not enough to answer that.
+    static func digest(of bytes: [UInt8]) -> String {
+        SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
     }
 
     /// SQLSTATE `unique_violation`. Named rather than typed at the catch site so the one
@@ -565,6 +893,69 @@ extension PageStore {
                 // addressed by — so this is the answer to "which account minted this?" that
                 // an operator reads out of a listing, not a key anything joins on.
                 "ALTER TABLE clients ADD COLUMN github_login text",
+            ]
+        ),
+        Migration(
+            version: 6,
+            statements: [
+                // Attachments: a page whose body is bytes. The bytes go in their own table
+                // and everything else about them stays in `pages`, which is what keeps one
+                // slug namespace, one expiry column and one reclamation path for both kinds
+                // — every route that already deletes, renames, expires or lists a page does
+                // so for an attachment with no new code.
+                //
+                // `body` becomes nullable because an attachment has none. That is the one
+                // constraint this migration relaxes, and the CHECK below is what stops the
+                // relaxation reaching text pages, where a NULL body would be a page serving
+                // nothing behind a 200.
+                "ALTER TABLE pages ALTER COLUMN body DROP NOT NULL",
+                // `NOT NULL DEFAULT 'text'` is the backfill: every row that predates this
+                // column is a text page, and Postgres stores a constant default in the
+                // catalog rather than rewriting the table for it. Unlike version 2's
+                // deadline there is nothing ambiguous to resolve later — a row written
+                // before attachments existed cannot have been one.
+                "ALTER TABLE pages ADD COLUMN kind text NOT NULL DEFAULT 'text'",
+                // The original filename, for the one thing a slug cannot carry: what a
+                // browser should call the file when it saves it. Nullable because a text
+                // page was never a file.
+                "ALTER TABLE pages ADD COLUMN filename text",
+                """
+                ALTER TABLE pages ADD CONSTRAINT pages_kind_ck
+                    CHECK (kind IN ('text', 'blob'))
+                """,
+                // The invariant `PageStore.content(kind:…)` reads back. Written as an
+                // equality between two booleans rather than as two ORed implications
+                // because it has to close both directions: a text page with no body and an
+                // attachment carrying one are both rows this code would misread, and only
+                // one of them is the obvious mistake.
+                """
+                ALTER TABLE pages ADD CONSTRAINT pages_kind_body_ck
+                    CHECK ((kind = 'text') = (body IS NOT NULL))
+                """,
+                // `ON DELETE CASCADE` is what makes `deleteExpired`, `delete(slug:)` and
+                // every expiry sweep reclaim an attachment's bytes without knowing
+                // attachments exist. `ON UPDATE CASCADE` does the same for `applyAmendment`,
+                // whose rename is an UPDATE of the primary key this references.
+                //
+                // Both are properties of storing the bytes in Postgres. A future object
+                // store would have to do this work in the application, with no transaction
+                // spanning the two — which is the sweeper this server currently does not
+                // need, and the real cost of that swap.
+                """
+                CREATE TABLE page_blobs (
+                    slug      text PRIMARY KEY
+                              REFERENCES pages (slug) ON UPDATE CASCADE ON DELETE CASCADE,
+                    bytes     bytea  NOT NULL,
+                    byte_size bigint NOT NULL,
+                    digest    text   NOT NULL
+                )
+                """,
+                // EXTERNAL, not the default EXTENDED, and this is load-bearing rather than
+                // a tuning knob: TOAST only supports a genuine partial read of an
+                // *uncompressed* value, so `fetchBlob`'s `substring` is a seek with this
+                // line and a decompress-from-the-start without it. Video and images arrive
+                // compressed anyway, so what EXTENDED would buy on this column is nothing.
+                "ALTER TABLE page_blobs ALTER COLUMN bytes SET STORAGE EXTERNAL",
             ]
         ),
     ]

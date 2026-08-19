@@ -368,7 +368,7 @@ struct PageStoreDatabaseTests {
             let versions = try await PostgresFixture.appliedVersions(on: database.client)
             #expect(versions == PageStore.migrations.map(\.version))
             let page = try await database.store.fetch(slug: Slug(unchecked: "quiet-cedar-otter"))
-            #expect(page?.body == "<h1>before</h1>")
+            #expect(page?.content.text == "<h1>before</h1>")
             #expect(page?.contentType == "text/html")
             #expect(page?.createdAt == createdAtBefore)
             // Expiring in a week, not permanent. The window is generous because the assertion
@@ -838,14 +838,14 @@ struct PageStoreDatabaseTests {
             #expect(
                 try await store.insert(
                     slug: slug,
-                    body: "<h1>one</h1>",
+                    body: .text("<h1>one</h1>"),
                     contentType: PageContentType.default,
                     expiresAt: nil,
                     clientID: first.id
                 )
             )
             let published = try #require(try await store.fetch(slug: slug))
-            #expect(published.body == "<h1>one</h1>")
+            #expect(published.content.text == "<h1>one</h1>")
             #expect(published.clientID == first.id)
 
             // A second writer takes the attribution with the bytes, and the nil content type
@@ -853,11 +853,11 @@ struct PageStoreDatabaseTests {
             // deliberately differently.
             #expect(
                 try await store.update(
-                    slug: slug, body: "<h1>two</h1>", contentType: nil, clientID: second.id
+                    slug: slug, body: .text("<h1>two</h1>"), contentType: nil, clientID: second.id
                 ) == .replaced(expiresAt: nil)
             )
             let replaced = try #require(try await store.fetch(slug: slug))
-            #expect(replaced.body == "<h1>two</h1>")
+            #expect(replaced.content.text == "<h1>two</h1>")
             #expect(replaced.contentType == PageContentType.default)
             #expect(replaced.clientID == second.id)
             // And the page is still the same page: `created_at` is the moment it was first
@@ -870,7 +870,7 @@ struct PageStoreDatabaseTests {
             #expect(
                 try await store.insert(
                     slug: orphan,
-                    body: "<h1>unowned</h1>",
+                    body: .text("<h1>unowned</h1>"),
                     contentType: PageContentType.default,
                     expiresAt: nil,
                     clientID: Client.sharedToken.attributableID
@@ -882,17 +882,17 @@ struct PageStoreDatabaseTests {
             #expect(
                 try await store.insert(
                     slug: slug,
-                    body: "<h1>mine now</h1>",
+                    body: .text("<h1>mine now</h1>"),
                     contentType: PageContentType.default,
                     expiresAt: nil,
                     clientID: first.id
                 ) == false
             )
-            #expect(try await store.fetch(slug: slug)?.body == "<h1>two</h1>")
+            #expect(try await store.fetch(slug: slug)?.content.text == "<h1>two</h1>")
             #expect(
                 try await store.update(
                     slug: try Slug(custom: "never-published"),
-                    body: "<h1>nowhere</h1>",
+                    body: .text("<h1>nowhere</h1>"),
                     contentType: nil,
                     clientID: first.id
                 ) == .noSuchPage
@@ -904,7 +904,7 @@ struct PageStoreDatabaseTests {
             await #expect(throws: (any Error).self) {
                 _ = try await store.insert(
                     slug: try Slug(custom: "dangling-foreign-key"),
-                    body: "<h1>no</h1>",
+                    body: .text("<h1>no</h1>"),
                     contentType: PageContentType.default,
                     expiresAt: nil,
                     clientID: Client.sharedToken.id
@@ -945,7 +945,7 @@ struct PageStoreDatabaseTests {
             ] as [(Slug, String, Date?)] {
                 let inserted = try await store.insert(
                     slug: slug,
-                    body: body,
+                    body: .text(body),
                     contentType: PageContentType.default,
                     expiresAt: expiresAt,
                     clientID: nil
@@ -958,12 +958,12 @@ struct PageStoreDatabaseTests {
             // about cleanup that happened to have run.
             #expect(try await store.fetch(slug: dead) == nil)
             let livePage = try await store.fetch(slug: live)
-            #expect(livePage?.body == "<h1>live</h1>")
+            #expect(livePage?.content.text == "<h1>live</h1>")
             // `timestamptz` keeps microseconds and `Date` keeps a `Double` of seconds, so the
             // instant comes back near-identical rather than identical.
             #expect(Self.isNear(livePage?.expiresAt, deadline))
             let permanentPage = try await store.fetch(slug: permanent)
-            #expect(permanentPage?.body == "<h1>permanent</h1>")
+            #expect(permanentPage?.content.text == "<h1>permanent</h1>")
             #expect(permanentPage?.expiresAt == nil)
 
             // The index carries the same predicate, and this is the assertion it exists for.
@@ -988,7 +988,7 @@ struct PageStoreDatabaseTests {
             // The same predicate on the write side, so `PUT` and `GET` agree about which
             // pages exist — and the expired row is not resurrected with a new body.
             let deadOutcome = try await store.update(
-                slug: dead, body: "<h1>zombie</h1>", contentType: nil, clientID: nil
+                slug: dead, body: .text("<h1>zombie</h1>"), contentType: nil, clientID: nil
             )
             #expect(deadOutcome == .noSuchPage)
             let deadBody = try await PostgresFixture.scalar(
@@ -998,7 +998,7 @@ struct PageStoreDatabaseTests {
             #expect(deadBody == "<h1>dead</h1>")
 
             switch try await store.update(
-                slug: live, body: "<h1>replaced</h1>", contentType: nil, clientID: nil
+                slug: live, body: .text("<h1>replaced</h1>"), contentType: nil, clientID: nil
             ) {
             case .replaced(let stored):
                 // Reported and unmoved: a replacement is a new body at an old address.
@@ -1261,17 +1261,17 @@ struct PageStoreDatabaseTests {
             // the foreign key it has to satisfy is pinned by
             // `pagesAreStoredFetchedAndReattributedAgainstTheRealSchema` instead.
             let inserted = try await store.insert(
-                slug: slug, body: "<h1>here</h1>",
+                slug: slug, body: .text("<h1>here</h1>"),
                 contentType: PageContentType.default, expiresAt: nil, clientID: nil
             )
             #expect(inserted)
             let insertedBystander = try await store.insert(
-                slug: bystander, body: "<h1>elsewhere</h1>",
+                slug: bystander, body: .text("<h1>elsewhere</h1>"),
                 contentType: PageContentType.default, expiresAt: nil, clientID: nil
             )
             #expect(insertedBystander)
             let insertedDead = try await store.insert(
-                slug: dead, body: "<h1>expired</h1>",
+                slug: dead, body: .text("<h1>expired</h1>"),
                 contentType: PageContentType.default,
                 expiresAt: Date().addingTimeInterval(-60), clientID: nil
             )
@@ -1284,7 +1284,7 @@ struct PageStoreDatabaseTests {
             #expect(afterDelete == nil)
             // And the statement removed the row it was addressed at, not the table.
             let survivor = try await store.fetch(slug: bystander)
-            #expect(survivor?.body == "<h1>elsewhere</h1>")
+            #expect(survivor?.content.text == "<h1>elsewhere</h1>")
 
             // An expired page is already gone as far as every reader is concerned, so there
             // is nothing here to delete and nothing to report having deleted.
@@ -1300,12 +1300,12 @@ struct PageStoreDatabaseTests {
 
             // The freed slug, claimed again against a real primary key.
             let reinserted = try await store.insert(
-                slug: slug, body: "<h1>second tenant</h1>",
+                slug: slug, body: .text("<h1>second tenant</h1>"),
                 contentType: PageContentType.default, expiresAt: nil, clientID: nil
             )
             #expect(reinserted)
             let republished = try await store.fetch(slug: slug)
-            #expect(republished?.body == "<h1>second tenant</h1>")
+            #expect(republished?.content.text == "<h1>second tenant</h1>")
         }
     }
 
@@ -1350,14 +1350,14 @@ struct PageStoreDatabaseTests {
 
             #expect(
                 try await store.insert(
-                    slug: original, body: "<h1>here</h1>",
+                    slug: original, body: .text("<h1>here</h1>"),
                     contentType: "text/css; charset=utf-8",
                     expiresAt: nil, clientID: owner.id
                 )
             )
             #expect(
                 try await store.insert(
-                    slug: occupied, body: "<h1>theirs</h1>",
+                    slug: occupied, body: .text("<h1>theirs</h1>"),
                     contentType: PageContentType.default, expiresAt: nil, clientID: nil
                 )
             )
@@ -1393,8 +1393,8 @@ struct PageStoreDatabaseTests {
             )
             // The collision left both pages exactly as they were — the failure mode worth
             // ruling out is a half-applied move that destroys the page it landed on.
-            #expect(try await store.fetch(slug: original)?.body == "<h1>here</h1>")
-            #expect(try await store.fetch(slug: occupied)?.body == "<h1>theirs</h1>")
+            #expect(try await store.fetch(slug: original)?.content.text == "<h1>here</h1>")
+            #expect(try await store.fetch(slug: occupied)?.content.text == "<h1>theirs</h1>")
 
             // The move itself, with no expiry instruction: the `ELSE expires_at` arm has to
             // leave the NULL alone rather than treating an absent instruction as a deadline.
@@ -1408,7 +1408,7 @@ struct PageStoreDatabaseTests {
             #expect(untouched == nil)
 
             let atNewName = try #require(try await store.fetch(slug: renamed))
-            #expect(atNewName.body == "<h1>here</h1>")
+            #expect(atNewName.content.text == "<h1>here</h1>")
             #expect(atNewName.contentType == "text/css; charset=utf-8")
             // Still the same page, first published at the same instant, by the same
             // credential. `client_id` is *not* reassigned here — that is the difference
@@ -1421,7 +1421,7 @@ struct PageStoreDatabaseTests {
             #expect(try await store.fetch(slug: original) == nil)
             #expect(
                 try await store.insert(
-                    slug: original, body: "<h1>second tenant</h1>",
+                    slug: original, body: .text("<h1>second tenant</h1>"),
                     contentType: PageContentType.default, expiresAt: nil, clientID: nil
                 )
             )
@@ -1456,7 +1456,7 @@ struct PageStoreDatabaseTests {
             let target = try Slug(custom: "amber-willow-heron")
             #expect(
                 try await store.insert(
-                    slug: dead, body: "<h1>expired</h1>",
+                    slug: dead, body: .text("<h1>expired</h1>"),
                     contentType: PageContentType.default,
                     expiresAt: Date().addingTimeInterval(-60), clientID: nil
                 )
@@ -1477,6 +1477,435 @@ struct PageStoreDatabaseTests {
             // rename did not quietly happen anyway.
             #expect(try await store.fetch(slug: target) == nil)
             #expect(try await store.deleteExpired() == 1)
+        }
+    }
+
+    /// What version 6 adds, and what it leaves alone.
+    ///
+    /// Driven with a prefix of the list rather than `migrate()` so it keeps meaning what it
+    /// says as versions are appended — the same reason version 3's test does. The row seeded
+    /// before the migration is what proves the `kind` backfill: `NOT NULL DEFAULT 'text'`
+    /// has to reach a page written when neither the column nor attachments existed, and a
+    /// default Postgres stores in the catalog does exactly that without rewriting the table.
+    @Test func migrationSixAddsAttachmentStorageAndLeavesExistingPagesText() async throws {
+        try await PostgresFixture.withThrowawaySchema { database in
+            let store = database.store
+            try await store.migrate(Array(PageStore.migrations.prefix(5)))
+            // Raw SQL, not `store.insert`, and the reason is the finding itself: this build
+            // writes `kind` on every insert, so the store cannot put a row into a version 5
+            // schema at all. That is correct — `migrate()` runs before the server binds, so
+            // no deployment is ever in this state — but it means a test seeding a
+            // pre-migration row has to speak the old schema itself, exactly as
+            // `upgradesADatabaseCreatedByTheOldBootstrap` does.
+            try await database.client.query(
+                """
+                INSERT INTO pages (slug, body, content_type)
+                VALUES ('quiet-cedar-otter', '<h1>before</h1>', 'text/html')
+                """,
+                logger: PostgresFixture.logger
+            )
+
+            try await store.migrate(Array(PageStore.migrations.prefix(6)))
+
+            // The page that predates attachments is text, says so in the column, and still
+            // has its body.
+            let page = try await store.fetch(slug: Slug(unchecked: "quiet-cedar-otter"))
+            #expect(page?.content.text == "<h1>before</h1>")
+            let kind = try await PostgresFixture.scalar(
+                "SELECT kind FROM pages WHERE slug = 'quiet-cedar-otter'",
+                as: String.self, on: database.client
+            )
+            #expect(kind == "text")
+
+            // `body` is the one column this migration relaxes. Asserted directly, because
+            // the CHECK below is what makes the relaxation safe and a test that only
+            // exercised the CHECK would pass against a schema that never dropped NOT NULL.
+            let bodyNullable = try await PostgresFixture.scalar(
+                """
+                SELECT is_nullable FROM information_schema.columns
+                WHERE table_schema = \(database.schema) AND table_name = 'pages'
+                  AND column_name = 'body'
+                """,
+                as: String.self, on: database.client
+            )
+            #expect(bodyNullable == "YES")
+
+            var blobColumns: [String: (type: String, nullable: String)] = [:]
+            let rows = try await database.client.query(
+                """
+                SELECT column_name, data_type, is_nullable FROM information_schema.columns
+                WHERE table_schema = \(database.schema) AND table_name = 'page_blobs'
+                """,
+                logger: PostgresFixture.logger
+            )
+            for try await (name, type, nullable) in rows.decode(
+                (String, String, String).self, context: .default
+            ) {
+                blobColumns[name] = (type, nullable)
+            }
+            #expect(Set(blobColumns.keys) == ["slug", "bytes", "byte_size", "digest"])
+            #expect(blobColumns["bytes"]?.type == "bytea")
+            #expect(blobColumns["byte_size"]?.type == "bigint")
+            #expect(blobColumns.values.allSatisfy { $0.nullable == "NO" })
+
+            // EXTERNAL storage, which is the assertion most likely to be lost to a
+            // well-meaning schema tidy-up and the one with no visible symptom: with the
+            // default EXTENDED every statement here still returns the right bytes, and
+            // `fetchBlob`'s `substring` silently stops being a partial read.
+            //
+            // `e` is EXTERNAL. The default this replaces is `x`, EXTENDED — the two codes
+            // are not in the order the names suggest, so an assertion written from the
+            // names alone passes on precisely the storage mode this line exists to rule out.
+            let storage = try await PostgresFixture.scalar(
+                """
+                SELECT attstorage::text FROM pg_attribute
+                WHERE attrelid = 'page_blobs'::regclass AND attname = 'bytes'
+                """,
+                as: String.self, on: database.client
+            )
+            #expect(storage == "e")
+
+            // Both cascade actions, read off the constraint rather than inferred from
+            // behaviour. `c` is CASCADE in `pg_constraint`; a foreign key that defaulted to
+            // NO ACTION would make every delete of an attachment fail and every rename with
+            // it, and the delete tests below would catch the first but not the second.
+            let cascades = try await PostgresFixture.scalar(
+                """
+                SELECT confdeltype::text || confupdtype::text FROM pg_constraint
+                WHERE conrelid = 'page_blobs'::regclass AND contype = 'f'
+                """,
+                as: String.self, on: database.client
+            )
+            #expect(cascades == "cc")
+
+            // The CHECK closes both directions, so both are asked about. An attachment
+            // carrying a body is the half that looks harmless and is not: it is the row
+            // `PageStore.content(kind:…)` would read as an attachment while a text page's
+            // worth of HTML sat in the column beside it, unreachable and unnoticed.
+            await #expect(throws: PSQLError.self) {
+                try await database.client.query(
+                    """
+                    INSERT INTO pages (slug, kind, body, content_type)
+                    VALUES ('no-body-text', 'text', NULL, 'text/html')
+                    """,
+                    logger: PostgresFixture.logger
+                )
+            }
+            await #expect(throws: PSQLError.self) {
+                try await database.client.query(
+                    """
+                    INSERT INTO pages (slug, kind, body, content_type)
+                    VALUES ('bodied-blob', 'blob', '<h1>hi</h1>', 'image/png')
+                    """,
+                    logger: PostgresFixture.logger
+                )
+            }
+            await #expect(throws: PSQLError.self) {
+                try await database.client.query(
+                    """
+                    INSERT INTO pages (slug, kind, body, content_type)
+                    VALUES ('third-kind', 'video', NULL, 'video/mp4')
+                    """,
+                    logger: PostgresFixture.logger
+                )
+            }
+        }
+    }
+
+    /// The attachment data path against real Postgres, which is the only place several of
+    /// its type claims can be checked at all.
+    ///
+    /// The bytes are deliberately not valid UTF-8. `bytes` binds as `Data` because
+    /// PostgresNIO encodes a `[UInt8]` as a Postgres *array* — the same trap `ClientStore`
+    /// documents for `token_hash` — and a payload that happened to be text would survive
+    /// several of the wrong encodings.
+    @Test func attachmentsRoundTripAgainstTheRealSchema() async throws {
+        try await PostgresFixture.withThrowawaySchema { database in
+            let store = database.store
+            try await store.migrate()
+
+            // A PNG header, then bytes chosen to be invalid UTF-8 in both directions.
+            let bytes: [UInt8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+                + [0xFF, 0xFE, 0x00, 0xC0, 0x80, 0x41]
+            let slug = Slug(unchecked: "amber-willow-heron")
+
+            #expect(
+                try await store.insert(
+                    slug: slug,
+                    body: .blob(bytes: bytes, filename: "screenshot.png"),
+                    contentType: "image/png",
+                    expiresAt: nil,
+                    clientID: nil
+                )
+            )
+
+            // The metadata read describes the attachment and carries none of it. There is
+            // nowhere in `PageContent` to put bytes, which is the property being relied on
+            // rather than merely asserted.
+            let page = try #require(try await store.fetch(slug: slug))
+            let attachment = try #require(page.content.attachment)
+            #expect(attachment.byteSize == bytes.count)
+            #expect(attachment.filename == "screenshot.png")
+            #expect(attachment.digest == PageStore.digest(of: bytes))
+            #expect(page.contentType == "image/png")
+
+            // The whole thing, byte for byte. A NUL and a lone 0xFF both survive, which is
+            // what says this column is `bytea` and not something that went through a text
+            // encoding on the way.
+            let whole = try #require(try await store.fetchBlob(slug: slug, range: nil))
+            #expect(whole.bytes == bytes)
+            #expect(whole.totalSize == bytes.count)
+            #expect(whole.contentType == "image/png")
+            #expect(whole.filename == "screenshot.png")
+            #expect(whole.digest == PageStore.digest(of: bytes))
+
+            // A slice from the middle — the request a video player makes when somebody
+            // drags the scrubber, and the one `substring`'s 1-indexing gets wrong by one in
+            // whichever direction the off-by-one goes.
+            let middle = try #require(try await store.fetchBlob(slug: slug, range: 4..<9))
+            #expect(middle.bytes == Array(bytes[4..<9]))
+            #expect(middle.totalSize == bytes.count)
+
+            // From an offset to the end, which is the open-ended `Range:` header and the
+            // only case that passes a NULL length.
+            let tail = try #require(
+                try await store.fetchBlob(slug: slug, range: 10..<bytes.count)
+            )
+            #expect(tail.bytes == Array(bytes[10...]))
+
+            // The same request written the way a caller who does not know the size has to
+            // write it. `bytes=10-` has no end, so the range it resolves to is open at the
+            // top, and this must read the rest of the file rather than nothing — the
+            // failure it guards is a length bind of zero or a clamp to something arbitrary.
+            let openEnded = try #require(
+                try await store.fetchBlob(slug: slug, range: 10..<Int.max)
+            )
+            #expect(openEnded.bytes == Array(bytes[10...]))
+            #expect(openEnded.totalSize == bytes.count)
+
+            // The offsets a `Range:` header can carry but no file can hold. These are the
+            // arithmetic this method has to survive rather than the bytes it has to return:
+            // an offset of `Int.max` reaches the `+ 1` that turns a stored byte offset into
+            // `substring`'s 1-indexed one, and an unguarded addition there traps — taking
+            // the process, from an unauthenticated request, over a header anyone can send.
+            let saturated = try #require(
+                try await store.fetchBlob(slug: slug, range: Int.max..<Int.max)
+            )
+            #expect(saturated.bytes.isEmpty)
+            #expect(saturated.totalSize == bytes.count)
+            let saturatedOpen = try #require(
+                try await store.fetchBlob(slug: slug, range: (Int.max - 1)..<Int.max)
+            )
+            #expect(saturatedOpen.bytes.isEmpty)
+
+            // Past the end: empty bytes and the *real* total, which is what the route needs
+            // to answer 416. Clamping to something satisfiable here would have it answer a
+            // request nobody made.
+            let beyond = try #require(
+                try await store.fetchBlob(slug: slug, range: 999..<1024)
+            )
+            #expect(beyond.bytes.isEmpty)
+            #expect(beyond.totalSize == bytes.count)
+
+            // A text page has no bytes in the sense this method means, and says so with nil
+            // rather than with an empty slice — which a caller would render as a zero-byte
+            // image.
+            _ = try await store.insert(
+                slug: Slug(unchecked: "plain-cedar-otter"),
+                body: .text("<h1>hi</h1>"),
+                contentType: "text/html",
+                expiresAt: nil,
+                clientID: nil
+            )
+            #expect(
+                try await store.fetchBlob(slug: Slug(unchecked: "plain-cedar-otter"), range: nil)
+                    == nil
+            )
+        }
+    }
+
+    /// The three cascades, which are the whole argument for keeping attachments in the
+    /// `pages` namespace: delete, rename and expiry reclaim the bytes with no code in this
+    /// repo doing it.
+    ///
+    /// Asserted against `page_blobs` directly rather than through `fetchBlob`, because the
+    /// question is whether the *row* went — an orphaned blob row is invisible to every read
+    /// in the store and would show up only as a table that grows forever.
+    @Test func theSchemaCascadesReclaimAttachmentBytes() async throws {
+        try await PostgresFixture.withThrowawaySchema { database in
+            let store = database.store
+            try await store.migrate()
+
+            func blobSlugs() async throws -> [String] {
+                try await PostgresFixture.column(
+                    "SELECT slug FROM page_blobs ORDER BY slug",
+                    as: String.self, on: database.client
+                )
+            }
+
+            let bytes: [UInt8] = [0xDE, 0xAD, 0xBE, 0xEF]
+            let deleted = Slug(unchecked: "first-cedar-otter")
+            let renamed = Slug(unchecked: "second-willow-heron")
+            let expired = Slug(unchecked: "third-ash-falcon")
+
+            for (slug, expiresAt) in [
+                (deleted, nil), (renamed, nil),
+                (expired, Date(timeIntervalSinceNow: -60)),
+            ] as [(Slug, Date?)] {
+                _ = try await store.insert(
+                    slug: slug,
+                    body: .blob(bytes: bytes, filename: "clip.mp4"),
+                    contentType: "video/mp4",
+                    expiresAt: expiresAt,
+                    clientID: nil
+                )
+            }
+            #expect(try await blobSlugs() == [deleted.value, renamed.value, expired.value].sorted())
+
+            // ON DELETE CASCADE.
+            #expect(try await store.delete(slug: deleted))
+            #expect(try await blobSlugs().contains(deleted.value) == false)
+
+            // ON UPDATE CASCADE: a rename is an UPDATE of the primary key this references,
+            // so the bytes follow the row. Without it the rename fails outright — which is
+            // why this asserts the bytes are still *readable* at the new name and not just
+            // that a row exists.
+            let target = Slug(unchecked: "moved-ash-otter")
+            let outcome = try await store.amend(slug: renamed, newSlug: target, newExpiry: nil)
+            #expect(outcome == .amended(slug: target, expiresAt: nil))
+            #expect(try await blobSlugs().contains(target.value))
+            #expect(try await store.fetchBlob(slug: target, range: nil)?.bytes == bytes)
+
+            // And the expiry sweep, which is the one that runs unprompted on every upload.
+            // `amend` above already reclaimed it, so this asserts the outcome rather than
+            // re-running the sweep: the expired attachment's bytes are gone with its row.
+            #expect(try await blobSlugs().contains(expired.value) == false)
+            #expect(try await store.fetch(slug: expired) == nil)
+        }
+    }
+
+    /// A replacement decides a page's kind, in both directions, and the bytes follow.
+    ///
+    /// The blob-to-text direction is the one with a failure mode that hides: the `pages`
+    /// row is correct and readable, and only the `page_blobs` row left behind says anything
+    /// is wrong — through a table that grows and a CHECK that no longer describes reality.
+    @Test func replacingAPageChangesItsKindAndReclaimsTheOldBytes() async throws {
+        try await PostgresFixture.withThrowawaySchema { database in
+            let store = database.store
+            try await store.migrate()
+
+            let slug = Slug(unchecked: "quiet-cedar-otter")
+            let original: [UInt8] = [0x01, 0x02, 0x03]
+            _ = try await store.insert(
+                slug: slug,
+                body: .blob(bytes: original, filename: "before.png"),
+                contentType: "image/png",
+                expiresAt: nil,
+                clientID: nil
+            )
+
+            // Blob replaced by blob: new bytes, new digest, new filename, same row.
+            let replacement: [UInt8] = [0x0A, 0x0B, 0x0C, 0x0D, 0x0E]
+            #expect(
+                try await store.update(
+                    slug: slug,
+                    body: .blob(bytes: replacement, filename: "after.png"),
+                    contentType: nil,
+                    clientID: nil
+                ) == .replaced(expiresAt: nil)
+            )
+            let afterBlob = try #require(try await store.fetchBlob(slug: slug, range: nil))
+            #expect(afterBlob.bytes == replacement)
+            #expect(afterBlob.filename == "after.png")
+            #expect(afterBlob.digest == PageStore.digest(of: replacement))
+            // Exactly one row, not two: the DELETE inside the transaction is what stops a
+            // replacement accumulating the bytes of every version that came before it.
+            #expect(
+                try await PostgresFixture.column(
+                    "SELECT slug FROM page_blobs", as: String.self, on: database.client
+                ) == [slug.value]
+            )
+
+            // Blob replaced by text: the page becomes text, and the bytes go.
+            #expect(
+                try await store.update(
+                    slug: slug,
+                    body: .text("<h1>now html</h1>"),
+                    contentType: "text/html; charset=utf-8",
+                    clientID: nil
+                ) == .replaced(expiresAt: nil)
+            )
+            #expect(try await store.fetch(slug: slug)?.content.text == "<h1>now html</h1>")
+            #expect(try await store.fetchBlob(slug: slug, range: nil) == nil)
+            #expect(
+                try await PostgresFixture.column(
+                    "SELECT slug FROM page_blobs", as: String.self, on: database.client
+                ).isEmpty
+            )
+            // The filename went with the bytes. A text page that kept `after.png` would
+            // offer it as a download name from the row's own column.
+            //
+            // Asked as `IS NULL` rather than by decoding the column: `scalar` decodes a
+            // non-optional, so a genuine NULL comes back as a decoding error rather than as
+            // the nil this is looking for — and an assertion that a decode *failed* is not
+            // the same claim as an assertion that the column is empty.
+            let filenameIsNull = try await PostgresFixture.scalar(
+                "SELECT filename IS NULL FROM pages WHERE slug = \(slug.value)",
+                as: Bool.self, on: database.client
+            )
+            #expect(filenameIsNull == true)
+
+            // And text replaced by blob, which is the same transition run backwards and the
+            // one that has to insert a `page_blobs` row where there was none.
+            #expect(
+                try await store.update(
+                    slug: slug,
+                    body: .blob(bytes: original, filename: "again.png"),
+                    contentType: "image/png",
+                    clientID: nil
+                ) == .replaced(expiresAt: nil)
+            )
+            #expect(try await store.fetchBlob(slug: slug, range: nil)?.bytes == original)
+            #expect(try await store.fetch(slug: slug)?.content.text == nil)
+        }
+    }
+
+    /// An expired attachment serves no bytes, and the row is still there.
+    ///
+    /// The counterpart of `expiryPredicatesHideReclaimAndSpareTheRightRows` for the one read
+    /// that does not go through `fetch`. Inverting `fetchBlob`'s predicate is invisible from
+    /// a browser — `GET /:slug` starts 404ing on the deadline while the embed URL keeps
+    /// streaming — so the row is left physically present here and the assertion is about the
+    /// query rather than about cleanup.
+    @Test func anExpiredAttachmentServesNoBytesButKeepsItsRow() async throws {
+        try await PostgresFixture.withThrowawaySchema { database in
+            let store = database.store
+            try await store.migrate()
+
+            let slug = Slug(unchecked: "amber-willow-heron")
+            _ = try await store.insert(
+                slug: slug,
+                body: .blob(bytes: [0x01, 0x02], filename: "clip.mp4"),
+                contentType: "video/mp4",
+                expiresAt: Date(timeIntervalSinceNow: -60),
+                clientID: nil
+            )
+
+            #expect(try await store.fetchBlob(slug: slug, range: nil) == nil)
+            #expect(try await store.fetch(slug: slug) == nil)
+            // Still on disk, and still reclaimable — which is what proves the nil above came
+            // from the deadline predicate rather than from a sweep that had already run.
+            #expect(
+                try await PostgresFixture.column(
+                    "SELECT slug FROM page_blobs", as: String.self, on: database.client
+                ) == [slug.value]
+            )
+            #expect(try await store.deleteExpired() == 1)
+            #expect(
+                try await PostgresFixture.column(
+                    "SELECT slug FROM page_blobs", as: String.self, on: database.client
+                ).isEmpty
+            )
         }
     }
 }

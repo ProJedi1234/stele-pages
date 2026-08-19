@@ -348,7 +348,7 @@ public func buildRouter(
             do {
                 slug = try await store.create(
                     requestedSlug: requestedSlug,
-                    body: body,
+                    body: .text(body),
                     contentType: contentType ?? PageContentType.default,
                     expiresAt: lifetime.expiresAt,
                     // Who wrote it, recorded at the moment it is written. The optional
@@ -422,7 +422,7 @@ public func buildRouter(
             let expiresAt: Date?
             switch try await store.update(
                 slug: slug,
-                body: body,
+                body: .text(body),
                 contentType: contentType,
                 clientID: context.client?.attributableID
             ) {
@@ -893,7 +893,12 @@ public func buildRouter(
     router.get("/:slug") { _, context -> Response in
         guard let raw = context.parameters.get("slug"),
               let slug = try? Slug(custom: raw),
-              let page = try await store.fetch(slug: slug)
+              let page = try await store.fetch(slug: slug),
+              // An attachment has no presentation yet — the viewer that renders one is the
+              // next layer. Until it lands this falls through to the same uniform 404 an
+              // absent slug gets, which is the right placeholder precisely because it is
+              // indistinguishable: nothing here leaks that a row exists.
+              case .text(let body) = page.content
         else {
             // Anything that isn't a live page gets the same 404, whether the slug was
             // malformed, reserved, or simply absent. Distinguishing them would let a
@@ -913,7 +918,7 @@ public func buildRouter(
                 // bytes with nothing for the caller to bust it with.
                 .cacheControl: "no-cache",
             ],
-            body: .init(byteBuffer: ByteBuffer(string: page.body))
+            body: .init(byteBuffer: ByteBuffer(string: body))
         )
     }
 
