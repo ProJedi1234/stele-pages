@@ -56,11 +56,17 @@ public enum SteleCLI {
     public static let slugFlag = "--slug"
     public static let ttlFlag = "--ttl"
     public static let contentTypeFlag = "--content-type"
+    /// What the saved file should be called. Attachments only — `stele attach` is the one
+    /// command that uploads something with a name of its own, because a slug is a name for
+    /// a URL and a file saved as `quiet-cedar-otter` opens in nothing.
+    public static let filenameFlag = "--filename"
     public static let hostFlag = "--host"
     public static let jsonFlag = "--json"
 
     /// Every flag above, which is what the document is held to.
-    public static let flags = [slugFlag, ttlFlag, contentTypeFlag, hostFlag, jsonFlag]
+    public static let flags = [
+        slugFlag, ttlFlag, contentTypeFlag, filenameFlag, hostFlag, jsonFlag,
+    ]
 
     /// How the CLI reports an outcome, and the *only* thing about a failure that is stable
     /// enough to branch on.
@@ -117,8 +123,11 @@ public enum SteleCLI {
         ),
         CLIExit(
             6,
-            "The page itself was refused: too large, or a type the server will not store.",
-            "Drop inline images, or publish one of the accepted types."
+            "The file itself was refused: too large, or a type the server will not store.",
+            """
+            For a page, drop inline images — publish them with `stele attach` and link them \
+            instead. For an attachment, it is over this deployment's size limit.
+            """
         ),
         CLIExit(
             7,

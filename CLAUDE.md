@@ -180,6 +180,26 @@ address with, into "your sign-in was refused". Taking the status *code* rather t
 `HTTPResponseStatus` is what keeps the function assertable without a socket or an
 undeclared `NIOHTTP1` import.
 
+`PublishAttachmentTests`, `ServeAttachmentTests` and `AttachmentViewerTests` cover the three
+HTTP layers of attachments. The assertions worth keeping are the ones about what *did not*
+need writing: `theExistingVerbsReachAnAttachment` runs `PATCH` and `DELETE` against one, and
+`anAttachmentIsListedOnTheLandingPageLikeAnyOtherPage` shows the index rendering a badge for
+a kind it has never heard of — both are evidence the namespace stayed whole, and both would
+have to be deleted rather than fixed if it were ever split. `aFilenameIsEscapedWhereverItIs
+Rendered` is the negative one: it asserts the escaped form in element content *and* in the
+`og:title` attribute, so an escaper that stops covering attributes fails here rather than in
+a report six months later.
+
+`PublishSkillTests` grew two more sieves of the kind `doesNotClaimALifetimeIsUnchangeable`
+established. `doesNotClaimAPageCannotCarryImages` is the important one: the document's
+one-file rule used to say an `<img src="logo.png">` is "a dead link" — true, and true only of
+a *sibling* file — and once `stele attach` existed an absolute reading of that would teach an
+agent to refuse a request it can satisfy, while reading as considered policy rather than a
+stale sentence. It caught this feature's own first draft of the section. Note also that the
+two content-type lists are anchored on phrases differing by one word ("attachment types" and
+"accepted types"): `line(after:)` takes the first match, so two sections sharing a phrase
+would leave one test reading the other's list and passing on it.
+
 `PageStoreDatabaseTests` is the one suite that needs Postgres, gated on
 `STELE_TEST_DATABASE_URL` so a plain `swift test` stays hermetic:
 
@@ -281,6 +301,37 @@ gap, asserted today only against the in-memory fake.
 
 ## Conventions
 
+- **An attachment is a page whose body is bytes, and that is one sentence on purpose.** It
+  gets a row in `pages` like any other page, so the slug namespace, the expiry column,
+  reclamation, rename, delete and the uniform 404 are the ones that already existed —
+  `theExistingVerbsReachAnAttachment` asserts that rather than assuming it. Only the bytes
+  live elsewhere, in `page_blobs`, keyed by the same slug with `ON DELETE CASCADE` and
+  `ON UPDATE CASCADE`; those two cascades are why `delete`, `deleteExpired` and
+  `applyAmendment`'s rename reclaim and move an attachment's bytes with no code doing it.
+  Do not split the namespace: two tables with independent primary keys cannot enforce that a
+  page and an attachment never share a name, and everything above would need a second
+  implementation.
+- **Bytes come out through `fetchBlob` and nowhere else.** `PageContent` is what a read
+  gives back and has nowhere to put them — the viewer, the landing index, the expiry sweep
+  and every rename read metadata, and a shape that *could* carry 32 MB is one a later
+  `SELECT *` would fill twenty times over. `PageBody` is the write-side counterpart and does
+  carry them, because a write has to. The asymmetry is the design, not an oversight.
+  `fetchBlob` is also the only method that takes a range, which is the same fact said twice.
+- **An attachment has two URLs, and neither may learn the other's job.** `GET /:slug` serves
+  the *presentation* — the bytes for a text page, a viewer page for an attachment — and
+  `GET /static/:slug` serves the bytes alone. Which one a caller gets is decided by what was
+  stored, **never** by an `Accept` header: content negotiation would make an `<img src>`
+  behave differently depending on a header its author cannot see, and that is the failure the
+  split exists to prevent. A text page at `/static/:slug` is a miss, so that route cannot be
+  used to enumerate which slugs exist as pages either.
+- **`htmlEscaped` is for text a caller chose, and the filename is the only such text today.**
+  `recentIndex`'s comment predicted this: every other rendered value comes from a fixed
+  vocabulary. `validatedFilename` refuses what would break a *header* — quotes, backslashes,
+  control characters, path separators — and `<`, `>` and `&` are not on that list because
+  they are ordinary in a filename and harmless in a `Content-Disposition`. They are not
+  harmless in HTML. The escaper covers attribute context too, deliberately: one that is safe
+  in element content and not in an attribute is one whose correctness depends on where
+  somebody pastes the call.
 - **`Slug` is the validation chokepoint.** Every slug reaches the database through
   `Slug(custom:)`; `Slug(unchecked:)` is internal and only for values read back out. If
   you hold a `Slug`, it is already safe in a URL path.
@@ -429,6 +480,39 @@ gap, asserted today only against the in-memory fake.
 
 Don't "fix" these without a reason; the README argues them out in full.
 
+- **A `Range` this server will not honour is ignored, not refused.** RFC 9110 §14.2 permits
+  it, and it is the safer half of the permission: a `416` would deny a client the resource
+  over a header it could simply not have sent. Multi-range is ignored for a second reason —
+  answering it means `multipart/byteranges`, a whole second body format for a request no
+  media player makes. Only a range starting at or past the end earns the `416`, and its
+  `Content-Range` is the bare total, which is how a client that guessed wrong learns the
+  size. Range support itself is not optional: Safari probes a `<video>` source with
+  `bytes=0-1` and refuses to play if it gets a `200` and the whole body.
+- **`page_blobs.bytes` is `SET STORAGE EXTERNAL`, and that line is load-bearing.** TOAST
+  supports a genuine partial read only of an *uncompressed* value, so `fetchBlob`'s
+  `substring` is a seek with it and a decompress-from-the-start without it. Nothing else
+  would say so — every statement returns the right bytes either way. The `attstorage` code
+  for EXTERNAL is `e`; `x` is EXTENDED, the default it replaces, so an assertion written from
+  the names alone passes on exactly the mode the line exists to rule out.
+- **SVG is not on the attachment allowlist and should stay off it.** It is the one image
+  format that runs script when navigated to directly, and the viewer's whole job is to be a
+  page you navigate to. That this server already hosts uploaded HTML is not an argument for
+  adding it: HTML arrives from a caller who knows they are publishing a document, and an
+  `<img>` is the shape nobody inspects.
+- **An absent `Content-Type` means text, on every write.** The type is what says a body is
+  bytes, so inferring that from the bytes would be the content sniffing every stored page is
+  served with `nosniff` to prevent. A PNG `PUT` with no header therefore fails the UTF-8
+  check rather than being stored as an unreadable page. The corollary is in `update`'s SQL:
+  `content_type` is COALESCEd only while the *kind* holds still, because across a kind change
+  the stored type describes bytes that are being discarded — a plain COALESCE left
+  `image/png` on a page that had become HTML, behind a `200`.
+- **`STELE_MAX_ATTACHMENT_BYTES` is bounded at boot by the backend, not by taste.** Bytes
+  live in a `bytea` and PostgresNIO materialises a whole column value on any unranged read,
+  so a limit above `maxSupportedAttachmentBytes` is not a stricter policy but an OOM waiting
+  for whichever upload first reaches it. Same distinction `maxExpiresInSeconds` draws.
+  Raising it is what an object-store backend would earn — and that swap gives back both
+  cascades, since "delete the row" and "delete the object" become two operations with no
+  transaction between them, which is the sweeper this server currently does without.
 - **Reads are unauthenticated.** Slugs are pretty, not secret — an 11.8M keyspace is
   scannable. Access control would need a real auth check, not a longer slug.
 - **The landing page publishes the live namespace, and that is the point of it.** `GET /`

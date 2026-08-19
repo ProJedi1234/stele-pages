@@ -61,8 +61,10 @@ struct PublishSkill: Sendable {
     let markdown: String
     let etag: String
 
-    init(baseURL: String, maxPageBytes: Int) {
-        let markdown = Self.render(baseURL: baseURL, maxPageBytes: maxPageBytes)
+    init(baseURL: String, maxPageBytes: Int, maxAttachmentBytes: Int) {
+        let markdown = Self.render(
+            baseURL: baseURL, maxPageBytes: maxPageBytes, maxAttachmentBytes: maxAttachmentBytes
+        )
         self.markdown = markdown
         self.etag = strongETag(over: markdown.utf8)
     }
@@ -85,9 +87,13 @@ struct PublishSkill: Sendable {
     /// `Stylesheet.componentClasses` / `.syntaxTokenClasses` — in both directions — by
     /// `PublishSkillTests.componentTableMatchesTheStylesheet` and
     /// `.documentsEverySyntaxTokenClass`.
-    private static func render(baseURL: String, maxPageBytes: Int) -> String {
+    private static func render(
+        baseURL: String, maxPageBytes: Int, maxAttachmentBytes: Int
+    ) -> String {
         let reserved = Slug.reserved.sorted().map { "`\($0)`" }.joined(separator: ", ")
-        let contentTypes = PageContentType.allowed.keys.sorted()
+        let contentTypes = PageContentType.everyAllowedType
+            .map { "`\($0)`" }.joined(separator: ", ")
+        let attachmentTypes = PageContentType.allowedAttachments.keys.sorted()
             .map { "`\($0)`" }.joined(separator: ", ")
         let tones = Stylesheet.toneClasses.map { "`\($0)`" }.joined(separator: ", ")
         let exits = SteleCLI.exits
@@ -189,12 +195,14 @@ struct PublishSkill: Sendable {
 
         - **One file.** There is no bundler and there are no sibling assets.
           `<script src="./app.js">` or `<img src="logo.png">` is a dead link the moment the
-          page is published, because nothing else was uploaded alongside it.
+          page is published, because nothing else was uploaded alongside it. Images and video
+          are not stuck outside, though — publish each one first with `stele attach` and put
+          the URL it prints in the `src`. See "Attachments" below.
         - **`<meta charset="utf-8">` in the `<head>`.** Pages are served as UTF-8; a page
           that does not declare it renders mojibake in some browsers.
         - **Valid UTF-8, non-empty, no NUL bytes.** Otherwise the upload is a `400`.
         - **At most \#(maxPageBytes) bytes.** Over that is a `413`. Inline images blow past
-          that fast — prefer an absolute `https://` image URL to a large `data:` URI.
+          that fast — `stele attach` is what they are for, and a `data:` URI is what to avoid.
         - **The only external subresource that is safe is this server's own stylesheet.**
           Everything else — your CSS, your JavaScript, your SVG — goes inline.
 
@@ -494,6 +502,76 @@ struct PublishSkill: Sendable {
         As with `stele amend`, a client that answers that it does not recognise the command is
         an install predating it: run `\#(SteleCLI.installCommand)` and try once more.
 
+        ## Attachments: images, video and files
+
+        Images and video are published on their own and linked from a page, rather than
+        bundled into one. Publish the image first, then put the URL you get back into the
+        page's `src`:
+
+        ```sh
+        src=$(stele attach screenshot.png)
+        # then, in the page you are writing:
+        # <img src="$src">
+        ```
+
+        `stele attach` prints **the URL of the bytes**, which is the one you embed. That is
+        what makes it the value on stdout: a page-writing agent needs it far more often than
+        it needs anything else about the upload.
+
+        Every attachment has a second URL, and the difference matters:
+
+        | URL | Serves | Use it for |
+        | --- | --- | --- |
+        | `\#(baseURL)/\#(ServerRoute.staticFiles)/quiet-cedar-otter` | the file itself, nothing around it | `<img src>`, `<video src>`, a download link |
+        | `\#(baseURL)/quiet-cedar-otter` | a page *about* the file — it rendered, with its name, size and deadline | sharing the link with a person |
+
+        Put the first in a page and the second in a chat message. Getting them the wrong way
+        round is the mistake worth avoiding: an `<img>` pointed at the viewer renders nothing,
+        because the viewer is an HTML document.
+
+        The attachment types are exactly these, and anything else is a `415`:
+        \#(attachmentTypes)
+
+        At most \#(maxAttachmentBytes) bytes, which is a different and much larger limit than
+        the one on a page. Over it is a `413`.
+
+        ### Flags
+
+        ```sh
+        stele attach clip.mp4 \#(SteleCLI.ttlFlag) never
+        stele attach diagram.png \#(SteleCLI.filenameFlag) architecture.png
+        ```
+
+        `\#(SteleCLI.slugFlag)` and `\#(SteleCLI.ttlFlag)` mean exactly what they mean on
+        `stele publish`, including the default: an attachment you say nothing about expires in
+        \#(PageLifetime.defaultDays) days.
+
+        `\#(SteleCLI.filenameFlag)` sets the name a browser saves the file under. It defaults
+        to the name of the file you uploaded, and is worth setting when that name is a
+        temporary one — a slug is a name for a URL, and a download called
+        `quiet-cedar-otter` opens in nothing.
+
+        ### Give an attachment the lifetime of the page that embeds it
+
+        This is the one thing to get right, and nothing will warn you. A page and the images
+        inside it are separate publications with separate deadlines, so:
+
+        ```sh
+        url=$(stele attach chart.png \#(SteleCLI.ttlFlag) never)   # matching the page below
+        # …write the page using $url…
+        stele publish report.html \#(SteleCLI.ttlFlag) never
+        ```
+
+        A permanent page whose screenshots were published with the default becomes a page full
+        of broken images a week later, and no request fails at the time. **Ask for the same
+        lifetime on both**, and when the user asks for a permanent page, that includes
+        everything in it.
+
+        The other verbs reach an attachment exactly as they reach a page, at its slug:
+        `stele update` replaces the bytes without moving the URL, `stele amend` renames or
+        retimes it, `stele delete` takes it down. Replacing is the one to reach for when the
+        evidence changes — every page already embedding it keeps working.
+
         ### The commands, in full
 
         | Command | Who runs it | Does |
@@ -505,6 +583,7 @@ struct PublishSkill: Sendable {
         | `stele update <slug> <file> [\#(SteleCLI.contentTypeFlag) <type>]` | you | Replaces a page already published at that name. |
         | `stele amend <slug> [\#(SteleCLI.slugFlag) <name>] [\#(SteleCLI.ttlFlag) <days>]` | you | Renames a page, moves its deadline, or both. Sends no file and changes no contents. |
         | `stele delete <slug>` | you | Takes the page down and frees its name. Prints no URL, because there is no page left. |
+        | `stele attach <file> [\#(SteleCLI.slugFlag) <name>] [\#(SteleCLI.ttlFlag) <days>] [\#(SteleCLI.filenameFlag) <name>]` | you | Publishes an image, video or file. Prints the URL of the bytes — the one you embed. |
         | `stele skill` | you | Prints this document, fetched live from the server. |
         | `stele admin clients` (`create`, `list`, `revoke`) | **an operator** | Mints, lists and revokes credentials. Needs the `\#(ClientScope.admin.rawValue)` scope, which yours does not have. |
 
@@ -558,7 +637,7 @@ struct PublishSkill: Sendable {
         | `403` | The credential is valid but not allowed to publish. | Do not retry. Ask the user for one with the `\#(ClientScope.publish.rawValue)` scope. |
         | `404` | `stele update`, `stele amend` or `stele delete` against a name with no live page at it — including an expired one. | Publish it instead, with `--slug`. Nothing to do if you were deleting it. |
         | `409` | That slug is taken. | Choose another name. |
-        | `413` | Page is over \#(maxPageBytes) bytes. | Drop inline images; link them instead. |
+        | `413` | Page is over \#(maxPageBytes) bytes, or an attachment is over \#(maxAttachmentBytes). | Publish images with `stele attach` and link them, rather than inlining them. |
         | `415` | Content type not on the allowlist. | Publish one of the accepted types. |
         | `426` | The installed tool is older than this deployment requires (`\#(minimumCLIVersion)`). | Run `\#(SteleCLI.installCommand)`, then retry once. |
         | `503` | The server could not allocate a slug. | Retry once, or pass `--slug`. |
@@ -571,7 +650,8 @@ struct PublishSkill: Sendable {
         | --- | --- | --- |
         | `GET /` | none | Usage page, and a public index of recently published pages |
         | `GET /\#(ServerRoute.healthz)` | none | `ok` |
-        | `GET /:slug` | none | The stored page, or a 404 page if it is absent or expired |
+        | `GET /:slug` | none | The stored page — or, for an attachment, a page about it — or a 404 page if it is absent or expired |
+        | `GET /\#(ServerRoute.staticFiles)/:slug` | none | An attachment's bytes, with the type it was stored as. Supports `Range`, so video seeks |
         | `GET \#(Stylesheet.path)` | none | The shared stylesheet |
         | `GET \#(PublishSkill.path)` | none | This document |
         | `POST /\#(ServerRoute.pages)` | `\#(ClientScope.publish.rawValue)` | Stores the body, takes `?slug=` and `?\#(PageLifetime.queryParameter)=`, returns `{slug, url, expires}` as `201` |

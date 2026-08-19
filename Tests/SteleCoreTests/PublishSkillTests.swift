@@ -12,7 +12,8 @@ import Testing
 /// other.
 private let skillDocument = PublishSkill(
     baseURL: TestFixture.baseURL,
-    maxPageBytes: Configuration.defaultMaxPageBytes
+    maxPageBytes: Configuration.defaultMaxPageBytes,
+    maxAttachmentBytes: Configuration.defaultMaxAttachmentBytes
 )
 
 /// The publish skill at `GET /skill`.
@@ -206,12 +207,16 @@ struct PublishSkillTests {
     /// Every other assertion in this suite passes with a copy-pasted ETag; this one does not.
     @Test func etagIsBoundToTheRendering() {
         let again = PublishSkill(
-            baseURL: TestFixture.baseURL, maxPageBytes: Configuration.defaultMaxPageBytes
+            baseURL: TestFixture.baseURL,
+            maxPageBytes: Configuration.defaultMaxPageBytes,
+            maxAttachmentBytes: Configuration.defaultMaxAttachmentBytes
         )
         #expect(again.etag == skillDocument.etag)
 
         let elsewhere = PublishSkill(
-            baseURL: "https://other.example", maxPageBytes: Configuration.defaultMaxPageBytes
+            baseURL: "https://other.example",
+            maxPageBytes: Configuration.defaultMaxPageBytes,
+            maxAttachmentBytes: Configuration.defaultMaxAttachmentBytes
         )
         #expect(elsewhere.etag != skillDocument.etag)
 
@@ -310,11 +315,30 @@ struct PublishSkillTests {
     /// capability lost, and one listed but no longer accepted is a guaranteed failed
     /// publish. Set equality over the one line that carries the whole list checks both at
     /// once, which is also why this is one test rather than one per type.
+    /// The attachment half of the same claim, pinned separately because it is a separate
+    /// list with a separate failure.
+    ///
+    /// The anchor phrases differ by one word — "attachment types" here, "accepted types"
+    /// below — and that is load-bearing rather than incidental: `line(after:)` takes the
+    /// first match, so two sections sharing a phrase would leave one of these tests reading
+    /// the other's list and passing on it.
+    @Test func listsEveryAllowedAttachmentType() throws {
+        let line = try Self.line(
+            after: "attachment types are exactly these", in: skillDocument.markdown
+        )
+        #expect(
+            Set(Self.backtickedTokens(in: line))
+                == Set(PageContentType.allowedAttachments.keys)
+        )
+    }
+
     @Test func listsEveryAllowedContentType() throws {
         let line = try Self.line(
             after: "accepted types are exactly these", in: skillDocument.markdown
         )
-        #expect(Set(Self.backtickedTokens(in: line)) == Set(PageContentType.allowed.keys))
+        #expect(
+            Set(Self.backtickedTokens(in: line)) == Set(PageContentType.everyAllowedType)
+        )
     }
 
     /// The scope vocabulary, held set-equal to `ClientScope` off the route table's own auth
@@ -527,10 +551,84 @@ struct PublishSkillTests {
     /// document — rather than the interpolation — fails here. The default rendering is
     /// checked too: without it, a document that mentioned every plausible number would pass.
     @Test func documentsTheConfiguredSizeLimit() {
-        let unusual = PublishSkill(baseURL: TestFixture.baseURL, maxPageBytes: 424_242)
+        let unusual = PublishSkill(
+            baseURL: TestFixture.baseURL, maxPageBytes: 424_242, maxAttachmentBytes: 828_282
+        )
         #expect(unusual.markdown.contains("424242"))
         #expect(!skillDocument.markdown.contains("424242"))
         #expect(skillDocument.markdown.contains("\(Configuration.defaultMaxPageBytes)"))
+    }
+
+    /// Both attachment URLs are named, and the document says which is which.
+    ///
+    /// A route missing from this document is a capability an agent does not use, and here
+    /// the two routes are easy to confuse in a way that fails silently: an `<img>` pointed at
+    /// the viewer renders nothing, and the agent has no way to see that from a `201`.
+    @Test func documentsBothAttachmentURLs() {
+        #expect(skillDocument.markdown.contains("stele attach"))
+        #expect(
+            skillDocument.markdown
+                .contains("\(TestFixture.baseURL)/\(ServerRoute.staticFiles)/quiet-cedar-otter")
+        )
+        #expect(skillDocument.markdown.contains("`GET /\(ServerRoute.staticFiles)/:slug`"))
+        // The distinction stated as an instruction, not left to be inferred from a table.
+        #expect(
+            skillDocument.markdown
+                .contains("Put the first in a page and the second in a chat message.")
+        )
+    }
+
+    /// The one attachment mistake nothing warns about: a permanent page whose images were
+    /// published with the default lifetime.
+    ///
+    /// The server cannot catch this — it would have to parse uploaded HTML to know which
+    /// attachments a page references — so the document is the only place it can be caught,
+    /// which is exactly why it is pinned here rather than trusted to survive an edit.
+    @Test func documentsThatAnAttachmentNeedsTheLifetimeOfItsPage() {
+        #expect(skillDocument.markdown.contains("Ask for the same\nlifetime on both"))
+        #expect(
+            skillDocument.markdown
+                .contains("becomes a page full\nof broken images a week later")
+        )
+    }
+
+    /// The attachment limit is interpolated, like the page limit beside it, and the two are
+    /// different numbers — a document that rendered one for both would pass a test that only
+    /// looked for the configured value.
+    @Test func documentsTheConfiguredAttachmentLimit() {
+        let unusual = PublishSkill(
+            baseURL: TestFixture.baseURL, maxPageBytes: 424_242, maxAttachmentBytes: 828_282
+        )
+        #expect(unusual.markdown.contains("828282"))
+        #expect(!skillDocument.markdown.contains("828282"))
+        #expect(skillDocument.markdown.contains("\(Configuration.defaultMaxAttachmentBytes)"))
+    }
+
+    /// The negative counterpart, and it exists for the reason
+    /// `doesNotClaimALifetimeIsUnchangeable` does.
+    ///
+    /// This document used to say an `<img src="logo.png">` is "a dead link the moment the
+    /// page is published, because nothing else was uploaded alongside it" — true, and true
+    /// only of a *sibling* file. `stele attach` shipped, and an absolute claim that a page
+    /// cannot carry an image would now teach an agent to refuse a request it can satisfy,
+    /// while reading as a considered constraint rather than a stale sentence. The rule keeps
+    /// its original wording about sibling assets and must keep pointing at the way out.
+    @Test(arguments: [
+        "cannot carry an image", "there is no way to include an image",
+        "images are not supported", "cannot include images",
+    ])
+    func doesNotClaimAPageCannotCarryImages(fragment: String) {
+        #expect(!skillDocument.markdown.contains(fragment), "\(fragment)")
+    }
+
+    /// And the positive half: the rule that refuses sibling assets has to name the thing
+    /// that works, on the same line an agent is reading when it hits the limitation.
+    @Test func theOneFileRulePointsAtAttachments() throws {
+        #expect(
+            skillDocument.markdown.contains(
+                "publish each one first with `stele attach` and put"
+            )
+        )
     }
 
     /// An agent choosing its own slug needs the actual bounds, not "short". Interpolated from
