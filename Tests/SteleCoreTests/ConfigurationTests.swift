@@ -21,11 +21,54 @@ struct ConfigurationTests {
         #expect(configuration.port == 8080)
         #expect(configuration.slugWords == 3)
         #expect(configuration.maxPageBytes == 1024 * 1024)
+        #expect(configuration.maxAttachmentBytes == 32 * 1024 * 1024)
         #expect(configuration.baseURL == "http://127.0.0.1:8080")
         // GitHub sign-in is unconfigured until an operator configures it, and
         // unconfigured means nobody may mint — see `GitHubConfigurationTests`.
         #expect(configuration.githubOwners.isEmpty)
         #expect(configuration.githubClientID == nil)
+    }
+
+    /// The attachment limit is configurable, and bounded by what the storage backend can
+    /// honestly serve rather than by taste.
+    ///
+    /// The refusal is at boot, which is the whole point of it: bytes live in a `bytea` and
+    /// PostgresNIO materialises a whole value on any read that is not ranged, so a limit
+    /// above the ceiling is not a stricter policy but an OOM waiting for whichever upload
+    /// first reaches for it. An operator who sets it deliberately finds out while they are
+    /// still looking at the terminal.
+    @Test func theAttachmentLimitIsConfigurableAndBounded() throws {
+        let raised = try Configuration(
+            environment: Self.environment(["STELE_MAX_ATTACHMENT_BYTES": "67108864"])
+        )
+        #expect(raised.maxAttachmentBytes == 67_108_864)
+
+        // Exactly at the ceiling is allowed — a bound nobody can reach is a different bound.
+        let atCeiling = try Configuration(
+            environment: Self.environment([
+                "STELE_MAX_ATTACHMENT_BYTES": "\(Configuration.maxSupportedAttachmentBytes)"
+            ])
+        )
+        #expect(atCeiling.maxAttachmentBytes == Configuration.maxSupportedAttachmentBytes)
+
+        #expect(throws: ConfigurationError.self) {
+            try Configuration(
+                environment: Self.environment([
+                    "STELE_MAX_ATTACHMENT_BYTES":
+                        "\(Configuration.maxSupportedAttachmentBytes + 1)"
+                ])
+            )
+        }
+        #expect(throws: ConfigurationError.self) {
+            try Configuration(
+                environment: Self.environment(["STELE_MAX_ATTACHMENT_BYTES": "0"])
+            )
+        }
+        #expect(throws: ConfigurationError.self) {
+            try Configuration(
+                environment: Self.environment(["STELE_MAX_ATTACHMENT_BYTES": "lots"])
+            )
+        }
     }
 
     @Test func requiresAnUploadToken() {

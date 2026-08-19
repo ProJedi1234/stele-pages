@@ -180,6 +180,15 @@ struct Rejection: Equatable, Sendable {
 /// it is skipping is the attachment one and an accessor returning nil there would let a
 /// handler silently serve an empty body for a page it does not know how to render.
 extension PageContent {
+    /// Whether two contents are both text or both attachments, which is what the store's
+    /// `CASE WHEN kind = …` asks of a replacement.
+    func isSameKind(as other: PageContent) -> Bool {
+        switch (self, other) {
+        case (.text, .text), (.attachment, .attachment): true
+        default: false
+        }
+    }
+
     var text: String? {
         guard case .text(let value) = self else { return nil }
         return value

@@ -20,14 +20,68 @@ public enum PageContentType {
         "text/markdown": "text/markdown; charset=utf-8",
     ]
 
+    /// Types stored as bytes rather than as text — the attachment half of the allowlist.
+    ///
+    /// A separate table rather than more rows in `allowed`, because membership *is* the
+    /// decision: which of these two dictionaries a request's type appears in determines
+    /// whether its body is validated as UTF-8, which byte limit applies, and which column
+    /// it lands in. One table with a flag beside each row would put that decision in a
+    /// field somebody can forget to read.
+    ///
+    /// No `charset` on any of them: these are not text, and a charset parameter on a PNG is
+    /// a claim about an encoding it does not have. The value is the same string as the key
+    /// for that reason, which is not an invitation to collapse the two — the canonical form
+    /// of a *text* type differs from its key, and this table is read by the same code.
+    ///
+    /// SVG is deliberately absent and should stay absent. It is the one image format that
+    /// executes script when navigated to directly, and the viewer's whole job is to be a
+    /// page you navigate to. That the server already hosts uploaded HTML is not an argument
+    /// for adding it: HTML arrives from a caller who knows they are publishing a document,
+    /// while an `<img>` is the shape nobody inspects.
+    static let allowedAttachments: [String: String] = [
+        "image/png": "image/png",
+        "image/jpeg": "image/jpeg",
+        "image/gif": "image/gif",
+        "image/webp": "image/webp",
+        "video/mp4": "video/mp4",
+        "video/webm": "video/webm",
+        "application/pdf": "application/pdf",
+    ]
+
+    /// Every type this server will store, in one sorted list, for the message a `415` is
+    /// answered with. Derived rather than typed out, so a type added to either table shows
+    /// up in the refusal that names them.
+    static var everyAllowedType: [String] {
+        (Array(allowed.keys) + Array(allowedAttachments.keys)).sorted()
+    }
+
     /// Normalises a request `Content-Type` to its canonical stored form, or nil if it
     /// isn't something we're willing to serve back. An *absent* header never reaches
     /// this — the write handlers decide what absence means for their verb.
     static func normalize(_ raw: String) -> String? {
-        let base = raw.split(separator: ";").first.map {
+        allowed[base(of: raw)]
+    }
+
+    /// Resolves a request `Content-Type` to its canonical stored form *and* to the kind of
+    /// body that type implies, or nil if it is not something we are willing to serve back.
+    ///
+    /// One lookup answering both questions, because they are the same question asked twice:
+    /// a type is stored as bytes precisely when it is in the attachment table. A caller that
+    /// normalised first and then asked "is this binary?" would be free to disagree with
+    /// itself, and the disagreement — text validated as UTF-8 and then written to the blob
+    /// column, or the reverse — is one no test would think to write.
+    static func resolve(_ raw: String) -> (stored: String, kind: PageKind)? {
+        let base = base(of: raw)
+        if let text = allowed[base] { return (text, .text) }
+        if let attachment = allowedAttachments[base] { return (attachment, .blob) }
+        return nil
+    }
+
+    /// The type and subtype, lowercased, with any parameters dropped.
+    private static func base(of raw: String) -> String {
+        raw.split(separator: ";").first.map {
             $0.trimmingCharacters(in: .whitespaces).lowercased()
         } ?? ""
-        return allowed[base]
     }
 
     /// A short tag for a stored content type — "CSS", "PLAIN", "MARKDOWN" — or nil for HTML,
@@ -348,7 +402,7 @@ public func buildRouter(
             do {
                 slug = try await store.create(
                     requestedSlug: requestedSlug,
-                    body: .text(body),
+                    body: body,
                     contentType: contentType ?? PageContentType.default,
                     expiresAt: lifetime.expiresAt,
                     // Who wrote it, recorded at the moment it is written. The optional
@@ -422,7 +476,7 @@ public func buildRouter(
             let expiresAt: Date?
             switch try await store.update(
                 slug: slug,
-                body: .text(body),
+                body: body,
                 contentType: contentType,
                 clientID: context.client?.attributableID
             ) {
@@ -1210,37 +1264,76 @@ private func validatedLifetime(_ raw: Substring?) throws -> PageLifetime {
 private func readValidatedPage(
     request: Request,
     configuration: Configuration
-) async throws -> (body: String, contentType: String?) {
+) async throws -> (body: PageBody, contentType: String?) {
     let contentType: String?
+    let kind: PageKind
     if let raw = request.headers[.contentType] {
-        guard let normalized = PageContentType.normalize(raw) else {
+        guard let resolved = PageContentType.resolve(raw) else {
             throw HTTPError(
                 .unsupportedMediaType,
                 message: """
                     Unsupported Content-Type. Allowed: \
-                    \(PageContentType.allowed.keys.sorted().joined(separator: ", ")).
+                    \(PageContentType.everyAllowedType.joined(separator: ", ")).
                     """
             )
         }
-        contentType = normalized
+        contentType = resolved.stored
+        kind = resolved.kind
     } else {
+        // No header means text, and it has to: the type is what says a body is bytes, so
+        // deciding that from the bytes themselves would be content sniffing — the exact
+        // guess `nosniff` is sent on every stored page to prevent a browser making. An
+        // attachment therefore names its type or is not one, and a PNG PUT with no header
+        // fails the UTF-8 check below rather than being stored as an unreadable page.
         contentType = nil
+        kind = .text
     }
 
+    // The filename belongs to an attachment and to nothing else, so asking for one on a
+    // text write is refused rather than dropped — the same reading `PUT`'s `?ttl=` gets. A
+    // caller who sent it believes the page will download under that name, and a `200` would
+    // confirm it.
+    let requestedFilename = request.uri.queryParameters[Substring(filenameQueryParameter)]
+    guard kind == .blob || requestedFilename == nil else {
+        throw HTTPError(
+            .badRequest,
+            message: """
+                ?\(filenameQueryParameter)= applies to an attachment. This request's \
+                Content-Type is a text type, which is stored as a page rather than as a file.
+                """
+        )
+    }
+    let filename = try requestedFilename.map { try validatedFilename(String($0)) }
+
+    // The limit follows the kind, because the two answer different questions: one is how
+    // much HTML an operator will host, the other how much of a screen recording. Checked
+    // before the body is read rather than after, which is what `collect(upTo:)` gives —
+    // a request over the limit is refused as it streams instead of after it has all
+    // arrived.
+    let limit = kind == .blob ? configuration.maxAttachmentBytes : configuration.maxPageBytes
     let buffer: ByteBuffer
     do {
-        buffer = try await request.body.collect(upTo: configuration.maxPageBytes)
+        buffer = try await request.body.collect(upTo: limit)
     } catch is NIOTooManyBytesError {
         // Only the size limit gets this message. Anything else — a dropped connection,
         // cancellation during shutdown — rethrows as itself, so a transport fault is
         // never reported as a too-large page.
         throw HTTPError(
             .contentTooLarge,
-            message: "Page exceeds the \(configuration.maxPageBytes) byte limit."
+            message: kind == .blob
+                ? "Attachment exceeds the \(limit) byte limit."
+                : "Page exceeds the \(limit) byte limit."
         )
     }
     guard buffer.readableBytes > 0 else {
         throw HTTPError(.badRequest, message: "Request body is empty.")
+    }
+
+    // Bytes are stored as they arrived. None of the three checks below applies to them:
+    // an attachment is not required to be UTF-8, a NUL is ordinary in a PNG, and `bytea`
+    // holds every byte a `text` column cannot.
+    if kind == .blob {
+        return (.blob(bytes: Array(buffer.readableBytesView), filename: filename), contentType)
     }
     // A validating decode straight out of the buffer, not `ByteBuffer.getString`: that
     // one is `String?` but never actually returns nil — it decodes with
@@ -1257,7 +1350,56 @@ private func readValidatedPage(
         throw HTTPError(.badRequest, message: "Request body contains a NUL byte.")
     }
 
-    return (body, contentType)
+    return (.text(body), contentType)
+}
+
+/// The query parameter naming an attachment's original filename.
+let filenameQueryParameter = "filename"
+
+/// The longest filename worth storing. Generous next to anything a real file is called,
+/// and short enough that the header it ends up in stays a header.
+private let maxFilenameLength = 255
+
+/// Validates `?filename=`, which is the one caller-supplied string in this server that is
+/// echoed back into a response *header* rather than into a path or a body.
+///
+/// That is what the checks are for. `Content-Disposition` is a structured header, so a
+/// filename carrying a quote or a backslash can close the quoted string early and a CR or
+/// LF can end the header outright — the classic response-splitting shape. A slug goes
+/// through `Slug(custom:)` for the same kind of reason; this is that chokepoint for the
+/// other string a caller gets to choose.
+///
+/// Path separators go too, and not because of this server: the name is a hint to whichever
+/// browser saves the file, and `../../.bashrc` is a hint worth refusing to pass on.
+private func validatedFilename(_ raw: String) throws -> String {
+    guard !raw.isEmpty else {
+        throw HTTPError(
+            .badRequest,
+            message: "?\(filenameQueryParameter)= is empty. Omit it, or name the file."
+        )
+    }
+    guard raw.count <= maxFilenameLength else {
+        throw HTTPError(
+            .badRequest,
+            message: """
+                ?\(filenameQueryParameter)= is at most \(maxFilenameLength) characters.
+                """
+        )
+    }
+    // Explicit rather than a regular expression, so the message can name the character the
+    // caller actually sent — which is the difference between a fixable mistake and a
+    // refusal they have to guess at.
+    let forbidden: Set<Character> = ["\"", "\\", "/", "\r", "\n", "\0"]
+    if let offender = raw.first(where: { forbidden.contains($0) || $0.isASCII && $0.asciiValue! < 0x20 }) {
+        throw HTTPError(
+            .badRequest,
+            message: """
+                ?\(filenameQueryParameter)= contains \(offender.debugDescription), which \
+                cannot appear in a filename this server hands to a browser.
+                """
+        )
+    }
+    return raw
 }
 
 /// The one JSON response every API route answers with, so the two encoder settings below

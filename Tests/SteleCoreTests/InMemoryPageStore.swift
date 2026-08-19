@@ -179,10 +179,24 @@ actor InMemoryPageStore: PageStoring {
         // `client_id = …`: the column is who last wrote the page. A fake that preserved it
         // would let `AttributionTests.updatingReattributesThePage` pass against the store and
         // fail against reality, or the reverse.
+        // The store's `COALESCE(…, CASE WHEN kind = … THEN content_type ELSE default END)`,
+        // in Swift. An absent content type preserves the stored one only while the kind
+        // holds still; across a kind change the stored type describes bytes that are being
+        // discarded, and a fake that kept it would let `image/png` ride onto an HTML page
+        // here and be caught only by the Postgres suite.
+        let resolvedContentType: String
+        if let contentType {
+            resolvedContentType = contentType
+        } else if content(of: body).isSameKind(as: existing.content) {
+            resolvedContentType = existing.contentType
+        } else {
+            resolvedContentType = PageContentType.default
+        }
+
         pages[slug] = Page(
             slug: slug,
             content: content(of: body),
-            contentType: contentType ?? existing.contentType,
+            contentType: resolvedContentType,
             createdAt: existing.createdAt,
             expiresAt: existing.expiresAt,
             clientID: clientID
