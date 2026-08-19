@@ -1076,17 +1076,44 @@ public func buildRouter(
     router.get("/:slug") { _, context -> Response in
         guard let raw = context.parameters.get("slug"),
               let slug = try? Slug(custom: raw),
-              let page = try await store.fetch(slug: slug),
-              // An attachment has no presentation yet — the viewer that renders one is the
-              // next layer. Until it lands this falls through to the same uniform 404 an
-              // absent slug gets, which is the right placeholder precisely because it is
-              // indistinguishable: nothing here leaks that a row exists.
-              case .text(let body) = page.content
+              let page = try await store.fetch(slug: slug)
         else {
             // Anything that isn't a live page gets the same 404, whether the slug was
             // malformed, reserved, or simply absent. Distinguishing them would let a
             // scanner map the namespace faster than guessing.
             return htmlResponse(status: .notFound, html: notFoundPage())
+        }
+
+        // The top-level slug serves the *presentation*. For a text page that is the bytes
+        // themselves; for an attachment it is a page about the attachment, because a PNG
+        // served here would leave the two URLs doing the same job and the embed URL with no
+        // reason to exist. Which one a caller gets is decided by what was stored, never by
+        // an `Accept` header — content negotiation would make an `<img src>` behave
+        // differently depending on a header its author cannot see.
+        guard case .text(let body) = page.content else {
+            guard case .attachment(let byteSize, _, let filename) = page.content else {
+                return htmlResponse(status: .notFound, html: notFoundPage())
+            }
+            return htmlResponse(
+                status: .ok,
+                html: attachmentPage(
+                    slug: slug,
+                    contentType: page.contentType,
+                    filename: filename,
+                    byteSize: byteSize,
+                    createdAt: page.createdAt,
+                    expiresAt: page.expiresAt,
+                    baseURL: configuration.baseURL
+                ),
+                // The same reasoning the text branch below states, and it applies here for
+                // an extra reason: this page is *derived*. A `PUT` changes the size and the
+                // filename it prints and a `PATCH` changes the deadline, all without moving
+                // the URL, so a heuristic cache would keep describing an attachment that no
+                // longer looks like that. No `nosniff`, unlike the branch below — this
+                // document is ours, and that header is this repo's marker for bytes we did
+                // not write.
+                extra: [.cacheControl: "no-cache"]
+            )
         }
 
         return Response(
@@ -1650,10 +1677,20 @@ public func buildApplication(
     return app
 }
 
-func htmlResponse(status: HTTPResponse.Status, html: String) -> Response {
-    Response(
+/// - Parameter extra: headers to add beyond the content type. The viewer is the one caller
+///   that passes any: it renders a filename, a size and a deadline that a later `PUT` or
+///   `PATCH` can all change, so it needs the same `no-cache` a stored page gets. The
+///   landing page and the 404 deliberately pass none — the 404 is a constant, and the
+///   index is cheap enough to re-render that a heuristic cache holding it briefly costs a
+///   reader nothing they would notice.
+func htmlResponse(
+    status: HTTPResponse.Status, html: String, extra: HTTPFields = [:]
+) -> Response {
+    var headers: HTTPFields = [.contentType: "text/html; charset=utf-8"]
+    for field in extra { headers[field.name] = field.value }
+    return Response(
         status: status,
-        headers: [.contentType: "text/html; charset=utf-8"],
+        headers: headers,
         body: .init(byteBuffer: ByteBuffer(string: html))
     )
 }

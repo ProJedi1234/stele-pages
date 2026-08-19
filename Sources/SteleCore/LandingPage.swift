@@ -162,13 +162,13 @@ private func expiresCell(_ expiresAt: Date?, now: Date) -> String {
 /// the precision it drops has to go somewhere, or the page is the only place this information
 /// exists and it is now approximate. `datetime` is the machine-readable copy; `title` is the
 /// same string, so hovering a row recovers the exact moment without a round trip.
-private func timeElement(_ instant: Date, text: String) -> String {
+func timeElement(_ instant: Date, text: String) -> String {
     let iso = instant.formatted(.iso8601)
     return "<time datetime=\"\(iso)\" title=\"\(iso)\">\(text)</time>"
 }
 
 /// "just now", "9m ago", "2h ago", "6d ago".
-private func publishedLabel(_ createdAt: Date, now: Date) -> String {
+func publishedLabel(_ createdAt: Date, now: Date) -> String {
     let elapsed = now.timeIntervalSince(createdAt)
     // Also the clock-skew branch: a `created_at` stamped by a database whose clock runs ahead
     // of this process gives a negative interval, and "just now" is the right thing to say
@@ -178,7 +178,7 @@ private func publishedLabel(_ createdAt: Date, now: Date) -> String {
 }
 
 /// "in 6d", "in 3h", or "any moment" for a page inside its last minute.
-private func expiryLabel(_ expiresAt: Date?, now: Date) -> String {
+func expiryLabel(_ expiresAt: Date?, now: Date) -> String {
     guard let expiresAt else { return "never" }
     let remaining = expiresAt.timeIntervalSince(now)
     // `recent` only returns pages whose deadline is still ahead, but it is the *database's*
@@ -196,7 +196,7 @@ private func expiryLabel(_ expiresAt: Date?, now: Date) -> String {
 /// the direction that matters for an expiry. Weeks and months are skipped on purpose: a
 /// month is not a fixed number of days, and a list that mixed "5w" and "1mo" would be
 /// comparing two units that overlap.
-private func coarse(_ seconds: TimeInterval) -> String {
+func coarse(_ seconds: TimeInterval) -> String {
     let whole = Int(seconds)
     switch whole {
     case ..<3_600: return "\(whole / 60)m"
