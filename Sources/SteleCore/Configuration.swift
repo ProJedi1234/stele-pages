@@ -106,6 +106,30 @@ public struct Configuration: Sendable {
     /// retyping it, where a bump here would strand their copies.
     public static let defaultMaxPageBytes = 1024 * 1024
 
+    /// The `maxAttachmentBytes` an unset `STELE_MAX_ATTACHMENT_BYTES` resolves to: 32 MiB.
+    ///
+    /// Its own number rather than a multiple of `defaultMaxPageBytes`, which answers a
+    /// different question — that one is how much HTML an operator wants to allow, and this
+    /// one is how much of a screen recording. Comfortable for screenshots and short
+    /// evidence clips, which is what attachments are for.
+    public static let defaultMaxAttachmentBytes = 32 * 1024 * 1024
+
+    /// The largest `STELE_MAX_ATTACHMENT_BYTES` the Postgres backend will start with:
+    /// 128 MiB.
+    ///
+    /// A property of the storage backend, not a policy — the same distinction
+    /// `maxExpiresInSeconds` draws. Bytes live in `page_blobs.bytes`, and PostgresNIO
+    /// materialises a whole column value on any read that is not ranged, so the ceiling is
+    /// about what one request may be asked to hold in the container's memory. Above it the
+    /// process refuses to boot and names both the variable and the backend, because the
+    /// alternative is accepting the number and discovering it as an OOM during whichever
+    /// upload first reaches for it.
+    ///
+    /// Raising this is what an object-store backend would earn. It is deliberately not
+    /// something an operator can raise from the environment: the environment is where the
+    /// *policy* lives, and this is a fact about the code underneath it.
+    public static let maxSupportedAttachmentBytes = 128 * 1024 * 1024
+
     public var host: String
     public var port: Int
     /// Origin used to build the URL returned by `POST /pages`. Purely cosmetic — the
@@ -113,6 +137,8 @@ public struct Configuration: Sendable {
     public var baseURL: String
     public var uploadToken: String
     public var maxPageBytes: Int
+    /// The largest attachment this deployment accepts. See `defaultMaxAttachmentBytes`.
+    public var maxAttachmentBytes: Int
     public var slugWords: Int
     public var database: PostgresClient.Configuration
     /// Kept for logging, since `PostgresClient.Configuration` doesn't expose these back.
@@ -213,6 +239,32 @@ public struct Configuration: Sendable {
             self.maxPageBytes = parsed
         } else {
             self.maxPageBytes = Self.defaultMaxPageBytes
+        }
+
+        if let rawMaxAttachment = value("STELE_MAX_ATTACHMENT_BYTES") {
+            guard let parsed = Int(rawMaxAttachment), parsed > 0 else {
+                throw ConfigurationError.invalid(
+                    "STELE_MAX_ATTACHMENT_BYTES", value: rawMaxAttachment,
+                    hint: "Expected a positive integer."
+                )
+            }
+            // Checked at boot rather than per request, because the failure it prevents is
+            // not a rejected upload — it is the one accepted upload that takes the process
+            // with it. An operator who set this deliberately finds out while they are still
+            // looking at the terminal.
+            guard parsed <= Self.maxSupportedAttachmentBytes else {
+                throw ConfigurationError.invalid(
+                    "STELE_MAX_ATTACHMENT_BYTES", value: rawMaxAttachment,
+                    hint: """
+                        At most \(Self.maxSupportedAttachmentBytes) bytes while attachments \
+                        are stored in Postgres, which materialises a whole value on an \
+                        unranged read.
+                        """
+                )
+            }
+            self.maxAttachmentBytes = parsed
+        } else {
+            self.maxAttachmentBytes = Self.defaultMaxAttachmentBytes
         }
 
         if let rawWords = value("STELE_SLUG_WORDS") {

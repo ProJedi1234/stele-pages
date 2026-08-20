@@ -402,6 +402,18 @@ public struct PageStore: Sendable {
         // attachment, and a PUT of HTML over a PNG makes it text again. `content_type` keeps
         // its COALESCE — that one really can be "no opinion", which is what an absent
         // request header means and what preserves a stylesheet's type across a re-upload.
+        //
+        // But only while the kind holds still. `kind` inside the CASE is the row's *old*
+        // value, so "no opinion" preserves the stored type for a replacement of like with
+        // like and falls back to the default when the page changes kind — because the
+        // stored type describes bytes that are being thrown away, and keeping it would
+        // serve HTML as `image/png` behind a `200`. `nosniff` stops that being dangerous
+        // and nothing stops it being wrong.
+        //
+        // The ELSE arm is only ever reached by a text body: an attachment write names its
+        // type or is refused before it reaches the store, so a nil `contentType` here is
+        // provably a text one. That is the router's guarantee rather than this statement's,
+        // which is why the fallback is spelled out instead of being derived from `kind`.
         let kind: PageKind
         let text: String?
         let filename: String?
@@ -422,7 +434,11 @@ public struct PageStore: Sendable {
             SET kind = \(kind.rawValue),
                 body = \(text),
                 filename = \(filename),
-                content_type = COALESCE(\(contentType), content_type),
+                content_type = COALESCE(
+                    \(contentType),
+                    CASE WHEN kind = \(kind.rawValue) THEN content_type
+                         ELSE \(PageContentType.default) END
+                ),
                 client_id = \(clientID)
             WHERE slug = \(slug.value)
               AND (expires_at IS NULL OR expires_at > now())
