@@ -45,6 +45,52 @@ public enum PageExpiry: Sendable, Equatable {
     }
 }
 
+/// The bytes a write carries, and which of the two shapes a page can take they make it.
+///
+/// The counterpart of `PageContent`, which is what a *read* gives back, and the pair is
+/// deliberately asymmetric: this one holds an attachment's bytes because a write has to,
+/// and that one does not because a read of a page's metadata must not. Collapsing them
+/// into one type would give every `fetch` a field big enough for a video and one comment
+/// asking callers not to fill it.
+///
+/// A page's kind is decided entirely here, on every write. There is no "leave the kind
+/// alone" case, because a `PUT` that replaced a PNG with HTML while the row still called
+/// itself an attachment would be a page the reader cannot render and the schema's CHECK
+/// constraint would refuse anyway.
+public enum PageBody: Sendable, Equatable {
+    case text(String)
+    /// - Parameter filename: what a browser should call this if it saves it, or nil if the
+    ///   uploader offered none. Not derived from the slug: `quiet-cedar-otter` is a name
+    ///   for a URL, and a file saved under it opens in nothing.
+    case blob(bytes: [UInt8], filename: String?)
+}
+
+/// A slice of an attachment's bytes, with what a response needs to describe it.
+///
+/// `totalSize` is the whole attachment rather than `bytes.count`, and the difference is the
+/// entire point of the type: a `206` has to state both, and a caller handed only the slice
+/// has no way to build a `Content-Range` or to know it reached the end.
+public struct PageBlobSlice: Sendable, Equatable {
+    public var bytes: [UInt8]
+    public var contentType: String
+    public var filename: String?
+    /// The size of the whole attachment, not of `bytes`.
+    public var totalSize: Int
+    /// The stored content digest. Quoted into an entity-tag by the HTTP layer; see
+    /// `PageStore.digest(of:)` for why it is a column rather than something recomputed.
+    public var digest: String
+
+    public init(
+        bytes: [UInt8], contentType: String, filename: String?, totalSize: Int, digest: String
+    ) {
+        self.bytes = bytes
+        self.contentType = contentType
+        self.filename = filename
+        self.totalSize = totalSize
+        self.digest = digest
+    }
+}
+
 /// What an amendment found at the address it was aimed at.
 ///
 /// Three cases rather than `PageUpdateOutcome`'s two, because an amendment can fail in a way
@@ -89,6 +135,28 @@ public protocol PageStoring: Sendable {
     /// serve expired pages for as long as nobody happened to publish.
     func fetch(slug: Slug) async throws -> Page?
 
+    /// Reads part or all of a live attachment's bytes, or nil if there is no live
+    /// attachment at that slug.
+    ///
+    /// The only method in this seam that returns bytes, and the only one that takes a range
+    /// — those two facts are the same fact. Every other read is metadata, and keeping the
+    /// bytes reachable through exactly one door is what stops a 32 MB video being buffered
+    /// by a caller that wanted a filename.
+    ///
+    /// "Live" means what it does everywhere else here: an expired attachment is nil, so the
+    /// raw byte route and `GET /:slug` stop serving it at the same instant. A conformer that
+    /// skipped the deadline here would keep an expired video streaming after every other
+    /// surface had agreed it was gone.
+    ///
+    /// A text page is nil too. It has no bytes in the sense this method means — its body is
+    /// a `String` on `Page`, reachable through `fetch`.
+    ///
+    /// - Parameter range: a half-open byte range, or nil for the whole attachment. A range
+    ///   that starts past the end yields an empty `bytes` with the real `totalSize`, which
+    ///   is what a caller needs to answer `416` — clamping it to something satisfiable here
+    ///   would answer a request nobody made.
+    func fetchBlob(slug: Slug, range: Range<Int>?) async throws -> PageBlobSlice?
+
     /// The most recently published live pages, newest first, at most `limit` of them.
     ///
     /// "Live" means what it means everywhere else in this protocol, and here the cost of
@@ -125,7 +193,7 @@ public protocol PageStoring: Sendable {
     ///   backed by a database has a foreign key here and cannot invent a row.
     /// - Returns: true if the page was stored, false if the slug was already taken.
     func insert(
-        slug: Slug, body: String, contentType: String, expiresAt: Date?, clientID: Int64?
+        slug: Slug, body: PageBody, contentType: String, expiresAt: Date?, clientID: Int64?
     ) async throws -> Bool
 
     /// Replaces the body — and, when `contentType` is non-nil, the content type — of an
@@ -143,7 +211,7 @@ public protocol PageStoring: Sendable {
     ///   current bytes came from a credential with no row behind it. `createdAt` and the
     ///   expiry are what stay fixed across a replacement; provenance follows the bytes.
     func update(
-        slug: Slug, body: String, contentType: String?, clientID: Int64?
+        slug: Slug, body: PageBody, contentType: String?, clientID: Int64?
     ) async throws -> PageUpdateOutcome
 
     /// Moves a *live* page to a new slug, changes its deadline, or both, as one atomic step:
@@ -230,7 +298,7 @@ extension PageStoring {
     ///   permanent.
     public func create(
         requestedSlug: Slug?,
-        body: String,
+        body: PageBody,
         contentType: String,
         expiresAt: Date?,
         clientID: Int64?,

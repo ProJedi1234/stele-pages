@@ -172,3 +172,24 @@ struct Rejection: Equatable, Sendable {
         self.body = Array(buffer: response.body)
     }
 }
+
+/// Reading a text page's body in an assertion, without the `case .text(let body) = …`
+/// dance at every site.
+///
+/// Test-only on purpose. Production code pattern-matches `PageContent`, because the branch
+/// it is skipping is the attachment one and an accessor returning nil there would let a
+/// handler silently serve an empty body for a page it does not know how to render.
+extension PageContent {
+    var text: String? {
+        guard case .text(let value) = self else { return nil }
+        return value
+    }
+
+    /// The counterpart, for asserting on an attachment's metadata.
+    var attachment: (byteSize: Int, digest: String, filename: String?)? {
+        guard case .attachment(let byteSize, let digest, let filename) = self else {
+            return nil
+        }
+        return (byteSize, digest, filename)
+    }
+}

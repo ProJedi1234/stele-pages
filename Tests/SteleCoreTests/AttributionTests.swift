@@ -108,7 +108,7 @@ struct AttributionTests {
         let stored = try #require(await store.fetch(slug: try Slug(custom: "my-page")))
         #expect(first.id != second.id)
         #expect(stored.clientID == second.id)
-        #expect(stored.body == "<h1>replaced</h1>")
+        #expect(stored.content.text == "<h1>replaced</h1>")
     }
 
     /// The one credential with nothing to attribute to. `Client.sharedToken` is synthesised
@@ -124,7 +124,7 @@ struct AttributionTests {
         let store = InMemoryPageStore()
         let slug = try await store.create(
             requestedSlug: try Slug(custom: "orphan-page"),
-            body: "<h1>hi</h1>",
+            body: .text("<h1>hi</h1>"),
             contentType: PageContentType.default,
             expiresAt: nil,
             clientID: Client.sharedToken.attributableID,
@@ -137,12 +137,12 @@ struct AttributionTests {
         // And an update by the same credential clears rather than preserves: the bytes it
         // just wrote have no honest owner either.
         _ = try await store.update(
-            slug: slug, body: "<h1>replaced</h1>", contentType: nil, clientID: 7
+            slug: slug, body: .text("<h1>replaced</h1>"), contentType: nil, clientID: 7
         )
         #expect(try await store.fetch(slug: slug)?.clientID == 7)
         _ = try await store.update(
             slug: slug,
-            body: "<h1>again</h1>",
+            body: .text("<h1>again</h1>"),
             contentType: nil,
             clientID: Client.sharedToken.attributableID
         )

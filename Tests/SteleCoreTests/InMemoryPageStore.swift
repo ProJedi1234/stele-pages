@@ -26,6 +26,14 @@ import Foundation
 actor InMemoryPageStore: PageStoring {
     private var pages: [Slug: Page] = [:]
 
+    /// The bytes, kept beside the pages rather than on `Page`, mirroring the two tables.
+    ///
+    /// Not a convenience: `Page` carries `PageContent`, which has nowhere to put bytes, and
+    /// that is exactly the property the read seam is built around. A fake that hung the
+    /// bytes off the page would let a router test read them through `fetch` and pass —
+    /// against a store where that column is never selected.
+    private var blobs: [Slug: [UInt8]] = [:]
+
     /// When true, every insert reports the slug as taken, so the shared retry loop runs
     /// to genuine exhaustion — this is how the 503 path is driven.
     private let failInserts: Bool
@@ -61,6 +69,24 @@ actor InMemoryPageStore: PageStoring {
         expiresAt: Date? = nil,
         clientID: Int64? = nil
     ) {
+        seed(
+            slug: slug,
+            body: .text(body),
+            contentType: contentType,
+            expiresAt: expiresAt,
+            clientID: clientID
+        )
+    }
+
+    /// The same, for a page of either kind. The `String` overload above stays because
+    /// almost every test seeds text and `body: "<h1>hi</h1>"` is what those tests are about.
+    func seed(
+        slug: Slug,
+        body: PageBody,
+        contentType: String = PageContentType.default,
+        expiresAt: Date? = nil,
+        clientID: Int64? = nil
+    ) {
         pages[slug] = page(
             slug: slug,
             body: body,
@@ -68,6 +94,7 @@ actor InMemoryPageStore: PageStoring {
             expiresAt: expiresAt,
             clientID: clientID
         )
+        store(body, at: slug)
     }
 
     /// Every slug physically present, expired or not.
@@ -84,8 +111,43 @@ actor InMemoryPageStore: PageStoring {
         return page
     }
 
+    /// Mirrors `PageStore.fetchBlob`, expiry predicate included — an expired attachment is
+    /// nil here exactly as it is there, which is what keeps `/static` and `GET /:slug`
+    /// agreeing about when a page stops existing.
+    ///
+    /// The out-of-range case is the one worth copying carefully: a range starting past the
+    /// end yields empty bytes and the real `totalSize`, because that is what the caller
+    /// needs to answer `416`. A fake that clamped it, or returned nil, would let the route
+    /// answer a request nobody made and pass.
+    func fetchBlob(slug: Slug, range: Range<Int>?) async throws -> PageBlobSlice? {
+        guard let page = pages[slug], !hasExpired(page),
+              case .attachment(_, let digest, let filename) = page.content,
+              let bytes = blobs[slug]
+        else { return nil }
+
+        // Clamped at both ends, mirroring what `substring` does with a range that overruns
+        // the value — including an upper bound of `Int.max`, which is how a caller spells
+        // "to the end" when it does not know where the end is.
+        let slice: [UInt8]
+        if let range {
+            let start = min(range.lowerBound, bytes.count)
+            let end = min(range.upperBound, bytes.count)
+            slice = Array(bytes[start..<max(start, end)])
+        } else {
+            slice = bytes
+        }
+
+        return PageBlobSlice(
+            bytes: slice,
+            contentType: page.contentType,
+            filename: filename,
+            totalSize: bytes.count,
+            digest: digest
+        )
+    }
+
     func insert(
-        slug: Slug, body: String, contentType: String, expiresAt: Date?, clientID: Int64?
+        slug: Slug, body: PageBody, contentType: String, expiresAt: Date?, clientID: Int64?
     ) async throws -> Bool {
         // `pages[slug] == nil`, not "no *live* page at slug": an expired row holds its name
         // until it is deleted, exactly as it does in Postgres, which is what makes
@@ -98,11 +160,12 @@ actor InMemoryPageStore: PageStoring {
             expiresAt: expiresAt,
             clientID: clientID
         )
+        store(body, at: slug)
         return true
     }
 
     func update(
-        slug: Slug, body: String, contentType: String?, clientID: Int64?
+        slug: Slug, body: PageBody, contentType: String?, clientID: Int64?
     ) async throws -> PageUpdateOutcome {
         guard let existing = pages[slug], !hasExpired(existing) else { return .noSuchPage }
         // `createdAt` and `expiresAt` are both carried across from the existing row, matching
@@ -118,12 +181,18 @@ actor InMemoryPageStore: PageStoring {
         // fail against reality, or the reverse.
         pages[slug] = Page(
             slug: slug,
-            body: body,
+            content: content(of: body),
             contentType: contentType ?? existing.contentType,
             createdAt: existing.createdAt,
             expiresAt: existing.expiresAt,
             clientID: clientID
         )
+        // The unconditional delete the store's UPDATE path does, for the same reason: a
+        // replacement decides the page's kind, so bytes left behind by the previous one
+        // would outlive the row that referenced them. In Postgres the row is removed by an
+        // explicit DELETE inside the same transaction; here it is a dictionary.
+        blobs.removeValue(forKey: slug)
+        store(body, at: slug)
         return .replaced(expiresAt: existing.expiresAt)
     }
 
@@ -187,9 +256,14 @@ actor InMemoryPageStore: PageStoring {
         // behaviour here would let the router quietly re-attribute a page to whoever renamed
         // it.
         pages.removeValue(forKey: slug)
+        // The bytes move with the row. In Postgres this is the foreign key's
+        // `ON UPDATE CASCADE` and costs no code at all; here it has to be written, and
+        // getting it wrong would leave a renamed attachment serving nothing from `/static`
+        // while `fetch` still described it.
+        if let bytes = blobs.removeValue(forKey: slug) { blobs[target] = bytes }
         pages[target] = Page(
             slug: target,
-            body: existing.body,
+            content: existing.content,
             contentType: existing.contentType,
             createdAt: existing.createdAt,
             expiresAt: expiresAt,
@@ -210,12 +284,17 @@ actor InMemoryPageStore: PageStoring {
         // and would let the router answer 204 for a page the fake's own `fetch` hides.
         guard let existing = pages[slug], !hasExpired(existing) else { return false }
         pages.removeValue(forKey: slug)
+        // `ON DELETE CASCADE` in the schema; a second line here.
+        blobs.removeValue(forKey: slug)
         return true
     }
 
     func deleteExpired() async throws -> Int {
         let dead = pages.filter { hasExpired($0.value) }
-        for slug in dead.keys { pages.removeValue(forKey: slug) }
+        for slug in dead.keys {
+            pages.removeValue(forKey: slug)
+            blobs.removeValue(forKey: slug)
+        }
         return dead.count
     }
 
@@ -231,12 +310,12 @@ actor InMemoryPageStore: PageStoring {
     /// Only `seed` and `insert` go through here — the two ways a page comes into existence.
     /// `update` builds its own `Page` precisely so it cannot pick up a new `createdAt`.
     private func page(
-        slug: Slug, body: String, contentType: String, expiresAt: Date?, clientID: Int64?
+        slug: Slug, body: PageBody, contentType: String, expiresAt: Date?, clientID: Int64?
     ) -> Page {
         clock += 1
         return Page(
             slug: slug,
-            body: body,
+            content: content(of: body),
             contentType: contentType,
             // Epoch-relative and one second apart: far enough in the past that every page in
             // these tests reads as years old, which is a stable label — a stamp near `now`
@@ -245,6 +324,30 @@ actor InMemoryPageStore: PageStoring {
             expiresAt: expiresAt,
             clientID: clientID
         )
+    }
+
+    /// Files the bytes of a blob body, and nothing for a text one.
+    private func store(_ body: PageBody, at slug: Slug) {
+        guard case .blob(let bytes, _) = body else { return }
+        blobs[slug] = bytes
+    }
+
+    /// The write-side body as the read side describes it — the fake's stand-in for the
+    /// column list `PageStore.content(kind:…)` reassembles a row from.
+    ///
+    /// The digest goes through `PageStore.digest(of:)` rather than being invented, so a
+    /// router test asserting an `ETag` is asserting the same string real Postgres stored.
+    private func content(of body: PageBody) -> PageContent {
+        switch body {
+        case .text(let text):
+            return .text(text)
+        case .blob(let bytes, let filename):
+            return .attachment(
+                byteSize: bytes.count,
+                digest: PageStore.digest(of: bytes),
+                filename: filename
+            )
+        }
     }
 }
 
