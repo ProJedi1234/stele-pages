@@ -272,7 +272,23 @@ public enum ServerRoute {
     /// only way its tab gets one.
     public static let favicon = "favicon.ico"
 
-    public static let names: Set<String> = [healthz, pages, assets, skill, admin, auth, favicon]
+    /// Raw attachment bytes, at `/static/:slug`. Only the first segment, like `assets` and
+    /// `admin`: the bytes live one level beneath it and `static` itself answers the uniform
+    /// 404.
+    ///
+    /// Already in `Slug.reserved` long before this route existed, which is exactly what
+    /// that forward-looking list is for — unlike `auth`, this name was never claimable, so
+    /// no deployment can be carrying a page it now shadows.
+    ///
+    /// The bytes get their own segment rather than a query parameter on `/:slug` because
+    /// the two are different resources: one is a page you look at and one is a file you
+    /// embed. A `?raw=1` would make the distinction something a caller can forget, and the
+    /// URL in an `<img src>` is the one nobody re-reads.
+    public static let staticFiles = "static"
+
+    public static let names: Set<String> = [
+        healthz, pages, assets, skill, admin, auth, favicon, staticFiles,
+    ]
 
     /// The one collection under `/admin`, as its *second* segment. Kept out of `names` for
     /// the same reason `stele.css` is: that set is exactly what `Slug.reserved` has to
@@ -941,6 +957,119 @@ public func buildRouter(
     // the page — the one distinguishable response on the public read surface. Outside any
     // auth group, for the same reason `/pages`' guard is.
     router.get(RouterPath("/\(ServerRoute.assets)")) { _, _ -> Response in
+        htmlResponse(status: .notFound, html: notFoundPage())
+    }
+
+    // Raw attachment bytes: what an `<img src>` or a `<video src>` points at, and the one
+    // read in this server that can answer a `206`.
+    //
+    // Unauthenticated like every other read, and a miss answers the same uniform 404 page
+    // `GET /:slug` does — absent, expired, malformed and "that slug is a text page" are one
+    // response here for the reason they are one there. A text page is a miss rather than a
+    // redirect to itself: this path means "the bytes of an attachment", and a page has none
+    // in that sense.
+    router.get(RouterPath("/\(ServerRoute.staticFiles)/:slug")) { request, context -> Response in
+        guard let raw = context.parameters.get("slug"),
+              let slug = try? Slug(custom: raw)
+        else { return htmlResponse(status: .notFound, html: notFoundPage()) }
+
+        let requested = RequestedRange.parse(request.headers[.range])
+
+        // A suffix range is the one shape that cannot be resolved without the total, so it
+        // costs a first read to learn it. An empty range is that read: `substring(… for 0)`
+        // returns no bytes and the row still reports `byte_size`, so this is a metadata
+        // query spelled in the vocabulary the seam already has rather than a second
+        // primitive that would exist for one branch.
+        let totalSize: Int
+        if case .suffix = requested {
+            guard let probe = try await store.fetchBlob(slug: slug, range: 0..<0) else {
+                return htmlResponse(status: .notFound, html: notFoundPage())
+            }
+            totalSize = probe.totalSize
+        } else {
+            // Every other shape resolves without knowing the size. An explicit end needs
+            // nothing, and `bytes=N-` resolves to a range open at the top — which is how
+            // `fetchBlob` is told to read to the end, so this is a real value rather than a
+            // placeholder standing in for one.
+            totalSize = Int.max
+        }
+
+        guard let slice = try await store.fetchBlob(
+            slug: slug, range: requested.resolved(totalSize: totalSize)
+        ) else {
+            return htmlResponse(status: .notFound, html: notFoundPage())
+        }
+
+        // The digest quoted into an entity-tag. Strong, because it identifies the bytes
+        // exactly — it came from them — and revalidation is what makes an embedded image
+        // free to re-request on every page load without re-sending it.
+        let etag = "\"\(slice.digest)\""
+        if ifNoneMatchHits(request.headers[.ifNoneMatch], etag: etag) {
+            return Response(
+                status: .notModified,
+                headers: [.eTag: etag, .cacheControl: "no-cache", .acceptRanges: "bytes"]
+            )
+        }
+
+        var headers: HTTPFields = [
+            .contentType: slice.contentType,
+            // These bytes are somebody else's, which is this repo's rule for where the
+            // header goes. It matters more here than on a stored page: the allowlist is
+            // what says a `.png` is a PNG, and a browser that sniffed its way to something
+            // else would be running it on this origin.
+            .xContentTypeOptions: "nosniff",
+            // Mutable in place, exactly like a page — `PUT` replaces the bytes and the URL
+            // does not move — so a cache must always come back and ask. The ETag is what
+            // makes the ask a bodyless round trip rather than a re-download of a video.
+            .cacheControl: "no-cache",
+            .eTag: etag,
+            // Advertised on every response, not only on a `206`. A player that cannot see
+            // this on the first request does not send a second one with a `Range`.
+            .acceptRanges: "bytes",
+        ]
+        if let disposition = attachmentDisposition(
+            contentType: slice.contentType, filename: slice.filename
+        ) {
+            headers[.contentDisposition] = disposition
+        }
+
+        guard let range = requested.resolved(totalSize: slice.totalSize) else {
+            return Response(
+                status: .ok, headers: headers,
+                body: .init(byteBuffer: ByteBuffer(bytes: slice.bytes))
+            )
+        }
+
+        // A range starting at or past the end is the one a `416` exists for, and the
+        // `Content-Range` on it is the bare total — which is how a client that guessed
+        // wrong learns the size to ask again with. `fetchBlob` reports the real total for
+        // exactly this branch rather than clamping the range into something satisfiable,
+        // which would answer a request nobody made.
+        guard range.lowerBound < slice.totalSize else {
+            var refused: HTTPFields = [
+                .contentRange: "bytes */\(slice.totalSize)",
+                .acceptRanges: "bytes",
+            ]
+            refused[.contentType] = nil
+            return Response(status: .rangeNotSatisfiable, headers: refused)
+        }
+
+        // Inclusive end, and computed from what came back rather than from what was asked
+        // for: the store clamps a range that overruns the file, and a `Content-Range`
+        // describing the request instead of the response is how a player ends up waiting
+        // for bytes that were never sent.
+        let end = range.lowerBound + slice.bytes.count - 1
+        headers[.contentRange] = "bytes \(range.lowerBound)-\(end)/\(slice.totalSize)"
+        return Response(
+            status: .partialContent, headers: headers,
+            body: .init(byteBuffer: ByteBuffer(bytes: slice.bytes))
+        )
+    }
+
+    // The same trie trap as `/pages`, `/assets`, `/admin` and `/auth`: registering the
+    // route above creates the literal `static` node, so `GET /static` matches it, finds no
+    // value, and does not backtrack to `/:slug`. Outside any group, like the others.
+    router.get(RouterPath("/\(ServerRoute.staticFiles)")) { _, _ -> Response in
         htmlResponse(status: .notFound, html: notFoundPage())
     }
 
