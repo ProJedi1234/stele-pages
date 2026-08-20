@@ -174,12 +174,13 @@ happens to run the app, which is rarely the machine you chose for durable storag
 | ------------------ | ------ | ------------------------------------------------------ |
 | `GET /`            | none   | Usage page, and an index of recently published pages   |
 | `GET /healthz`     | none   | `ok`                                                   |
-| `GET /:slug`       | none   | The stored page, or a 404 page if it's absent or expired |
+| `GET /:slug`       | none   | The stored page — or, for an attachment, a page *about* it — or a 404 page if it's absent or expired |
+| `GET /static/:slug` | none  | An attachment's bytes, with the stored type. Supports `Range`, so video seeks (see "Attachments") |
 | `GET /assets/stele.css` | none | The shared stylesheet (see "A shared look")         |
 | `GET /skill`       | none   | The publish skill, as Markdown (see "Teaching an agent to publish") |
 | `GET /assets/favicon.png` | none | The site icon, linked by the built-in pages          |
 | `GET /favicon.ico` | none   | The same icon, at the path browsers ask for unprompted — so an uploaded page's tab gets one too |
-| `POST /pages`      | `publish` | Stores the request body, takes `?slug=` and `?ttl=`, returns `{slug, url, expires}` as `201` |
+| `POST /pages`      | `publish` | Stores the request body, takes `?slug=`, `?ttl=` and `?filename=`, returns `{slug, url, expires}` as `201` |
 | `PUT /pages/:slug` | `publish` | Replaces a stored page's body and content type, returns `{slug, url, expires}` as `200` |
 | `PATCH /pages/:slug` | `publish` | Renames a page with `?slug=` and retimes it with `?ttl=`, leaving its contents alone, returns `{slug, url, expires}` as `200` |
 | `DELETE /pages/:slug` | `publish` | Removes a stored page and frees the slug, returns `204` |
@@ -452,6 +453,69 @@ lives in `Sources/SteleCore/SteleCLI.swift` alongside the clone URL and the inst
 commands, which are the only facts this repository hardcodes about that one — and the
 publish skill interpolates all of them rather than restating any.
 
+### Attachments
+
+An attachment is a page whose body is bytes. `POST /pages` with an image, video or PDF
+content type stores one, and it gets a row in `pages` like any other page — so the slug
+namespace, the expiry column, reclamation, rename, delete and the uniform 404 are the ones
+that already existed. Only the bytes live somewhere new, in `page_blobs`, keyed by the same
+slug with `ON DELETE CASCADE` and `ON UPDATE CASCADE`. Deleting an attachment, renaming it
+and letting it expire all reclaim its bytes with no code in this repository doing it.
+
+**Every attachment has two URLs, and the split is the point.** `GET /:slug` serves the
+presentation — for a text page the bytes themselves, for an attachment a viewer page showing
+the media with its name, size, type and deadline. `GET /static/:slug` serves the bytes and
+nothing around them, which is what an `<img src>` or a `<video src>` points at. A server with
+one URL per attachment has to choose between showing a page and serving a file, and either
+choice is wrong half the time.
+
+Which one a caller gets is decided by what was stored, never by an `Accept` header. Content
+negotiation would make an `<img src>` behave differently depending on a header its author
+cannot see.
+
+`/static/:slug` supports `Range`, and that is not an optimisation: Safari probes a `<video>`
+source with `bytes=0-1` and refuses to play if it gets a `200` and the whole body. It also
+bounds what one request costs — without it every concurrent reader materialises a whole
+attachment in memory. A range this server will not honour (malformed, or multi-range, which
+would mean `multipart/byteranges` for a request no player makes) is *ignored* rather than
+refused, which RFC 9110 §14.2 permits; only a range starting at or past the end earns a
+`416`, and its `Content-Range` is the bare total so a client that guessed wrong learns the
+size.
+
+The allowlist for attachments is `image/png`, `image/jpeg`, `image/gif`, `image/webp`,
+`video/mp4`, `video/webm` and `application/pdf`. **SVG is deliberately absent and should stay
+absent** — it is the one image format that runs script when navigated to directly, and the
+viewer's whole job is to be a page you navigate to. That this server already hosts uploaded
+HTML is not an argument for adding it: HTML arrives from someone who knows they are
+publishing a document, and an `<img>` is the shape nobody inspects.
+
+An absent `Content-Type` means text. The type is what says a body is bytes, so deciding that
+from the bytes themselves would be exactly the content sniffing every stored page is served
+with `nosniff` to prevent.
+
+`?filename=` records what a browser should save the file as, and is echoed into
+`Content-Disposition` — `inline` for images and video, `attachment` for everything else. It
+is the one caller-supplied string in this server that reaches a response *header*, so it goes
+through a chokepoint like the one `Slug(custom:)` is for paths: no quotes, no backslashes, no
+control characters, no path separators. It is also the first caller-supplied string rendered
+into HTML, on the viewer, where `<`, `>` and `&` — perfectly ordinary in a filename and
+harmless in a header — have to be escaped.
+
+**A page and the attachments inside it are separate publications with separate deadlines.**
+Nothing warns you: a permanent page whose screenshots took the seven-day default becomes a
+page of broken images a week later, and no request fails at the time. The server cannot fix
+this without parsing uploaded HTML to learn which attachments a page references, so it is the
+publish skill's job to teach, and it does.
+
+`STELE_MAX_ATTACHMENT_BYTES` defaults to 32 MiB and the process refuses to boot above 128
+MiB. That ceiling is a property of the storage backend rather than a policy: bytes live in a
+`bytea` and PostgresNIO materialises a whole column value on any read that is not ranged, so
+a larger limit is not a stricter setting but an out-of-memory waiting for whichever upload
+first reaches it. Raising it is what an object store would earn — and that swap would also
+give back the two cascades, since "delete the row" and "delete the object" would become two
+operations with no transaction between them, which is the sweeper this server currently does
+without.
+
 ### How long a page lives
 
 **Pages are ephemeral by default.** A `POST` with no `?ttl=` expires 7 days after it is
@@ -679,6 +743,9 @@ it is the sign-in that refuses, not the process.
 The list gates *minting* and nothing else. Taking a login out of it does not disturb a
 credential that login already holds — credentials are cut off by revoking them, `DELETE
 /admin/clients/:name`, and the allowlist is consulted only at the moment one is issued.
+
+`STELE_MAX_ATTACHMENT_BYTES` is the largest attachment this deployment accepts, bounded at
+boot by what the Postgres backend can serve — see "Attachments".
 
 `STELE_GITHUB_CLIENT_ID` records which GitHub OAuth app the deployment trusts (GitHub →
 Settings → Developer settings → OAuth Apps). It is not a secret either. Two things about

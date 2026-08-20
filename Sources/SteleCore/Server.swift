@@ -939,7 +939,11 @@ public func buildRouter(
     // No bare-segment 404 stub, unlike `/pages` and `/assets`: `/skill` is a terminal node
     // that carries its own value, so the trie resolves it. It therefore must NOT appear in
     // `NotFoundTests.all404sAreIdentical`.
-    let skill = PublishSkill(baseURL: configuration.baseURL, maxPageBytes: configuration.maxPageBytes)
+    let skill = PublishSkill(
+        baseURL: configuration.baseURL,
+        maxPageBytes: configuration.maxPageBytes,
+        maxAttachmentBytes: configuration.maxAttachmentBytes
+    )
 
     router.get(RouterPath(PublishSkill.path)) { request, _ -> Response in
         shippedDocumentResponse(
