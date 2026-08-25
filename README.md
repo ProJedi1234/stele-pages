@@ -98,28 +98,35 @@ to delete the call in `buildRouter`'s `GET /` handler rather than to add a flag 
 ```sh
 cp .env.example .env
 openssl rand -hex 32          # put this in STELE_UPLOAD_TOKEN
-docker compose up -d          # app + Postgres; working at localhost:8080
+just up                       # app + Postgres; working at localhost:8080
 ```
 
 While actually writing code, run the database in Docker and the app on the host instead
 — a Swift change is a ~10s rebuild, versus rebuilding the image on every edit:
 
 ```sh
-docker compose up -d postgres
-set -a && . ./.env && set +a
-swift run stele
+just run                      # starts Postgres, loads .env, runs the server
 ```
+
+The recipes are a `justfile` at the root and `just` on its own lists them; each is a
+thin wrapper over the `swift` or `docker compose` command it names, so nothing here
+depends on having `just` installed. `just run` is `docker compose up -d --wait
+postgres`, then `set -a && . ./.env && set +a`, then `swift run stele`. In a git
+worktree, where `.env` is absent because it is gitignored, point the recipes at the main
+checkout's copy with `STELE_ENV_FILE=…`.
 
 The schema is an ordered, append-only list of migrations in code. Whatever a database
 hasn't applied yet runs on boot, under a Postgres advisory lock — so there's still no
 separate migrate step, and two instances starting at once are safe. See "Changing the
 schema" below.
 
-Run the tests with `swift test`. That run is hermetic and needs no database. The suite
-that exercises the migration runner against a real Postgres is gated on a separate
-variable:
+Run the tests with `just test`, or `swift test`. That run is hermetic and needs no
+database. The suite that exercises the migration runner against a real Postgres is gated
+on a separate variable, which `just test-db` sets after starting the database:
 
 ```sh
+just test-db
+# or, by hand:
 docker compose up -d postgres
 STELE_TEST_DATABASE_URL=postgres://stele:stele_dev_password@localhost:5432/postgres swift test
 ```
