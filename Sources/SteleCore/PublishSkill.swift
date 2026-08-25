@@ -158,7 +158,10 @@ struct PublishSkill: Sendable {
         \#(SteleCLI.completionsCommand)   # optional, zsh only
         ```
 
-        Two traps here, and both of them bite in a way that points somewhere else:
+        The second command needs `just` on the machine; `just --version` says whether it
+        is already there.
+
+        Two further traps, and both of them bite in a way that points somewhere else:
 
         - **`\#(SteleCLI.binaryDirectory)` must be on your `PATH`.** That is where the install
           writes the binary. If it is not on `PATH`, a *successful* install is followed by

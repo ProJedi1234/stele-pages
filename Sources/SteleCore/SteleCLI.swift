@@ -10,14 +10,14 @@
 ///
 /// Two facts and only two are hardcoded about the client repo: its clone URL and the
 /// minimum version. Everything else below is derived from them or from paths the
-/// client's own Makefile fixes.
+/// client's own justfile fixes.
 public enum SteleCLI {
     /// SSH rather than HTTPS: both repositories are private, and an agent that already has
     /// a key configured clones without an interactive credential prompt it cannot answer.
     public static let repository = "git@github.com:ProJedi1234/stele-cli.git"
 
     /// Where the skill tells an agent to put the checkout. A fixed path, not a suggestion:
-    /// every later instruction — `make -C …`, the reinstall a `426` asks for — has to name
+    /// every later instruction — `just -f …`, the reinstall a `426` asks for — has to name
     /// a directory, and one the document chose is one an agent can be told to reuse.
     public static let checkout = "~/repos/stele-cli"
 
@@ -27,15 +27,21 @@ public enum SteleCLI {
 
     public static let cloneCommand = "git clone \(repository) \(checkout)"
 
+    /// `just` has no `make -C`. `--justfile` on its own is the equivalent: it sets the
+    /// working directory to the justfile's own, so this stays a line an agent can run from
+    /// wherever it happens to be standing.
+    static let justInvocation = "just -f \(checkout)/justfile"
+
     /// Also the remedy a `426` names, which is why it is one constant rather than a string
     /// written out once per place that suggests it.
-    public static let installCommand = "make -C \(checkout) install"
+    public static let installCommand = "\(justInvocation) install"
 
-    public static let completionsCommand = "make -C \(checkout) install-completions"
+    public static let completionsCommand = "\(justInvocation) install-completions"
 
-    /// Where the client's Makefile installs the binary (`PREFIX ?= $(HOME)/.local`). Named
-    /// because a successful install followed by `command not found` reads as a failed
-    /// install, and the actual fault is a `PATH` that does not include this.
+    /// Where the client's justfile installs the binary (`PREFIX`, defaulting to
+    /// `~/.local`). Named because a successful install followed by `command not found`
+    /// reads as a failed install, and the actual fault is a `PATH` that does not include
+    /// this.
     public static let binaryDirectory = "~/.local/bin"
 
     /// The swiftly compatibility libraries a non-interactive `swift build` cannot find on

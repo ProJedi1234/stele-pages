@@ -11,12 +11,16 @@ decisions in doc comments.
 ## Commands
 
 ```sh
-swift build
-swift test
-swift test --filter SlugValidationTests       # one suite
-swift test --filter rejectsReservedNames      # one test
-swift run stele                               # needs env vars; see below
+just                                          # lists the recipes
+just build                                    # swift build
+just test                                     # swift test
+just test SlugValidationTests                 # one suite
+just test rejectsReservedNames                # one test
+just run                                      # Postgres in Docker, server on the host
 ```
+
+The `justfile` is a thin wrapper — every recipe is the `swift` or `docker compose`
+command it names, so the underlying `swift test --filter …` still works unchanged.
 
 Tests use **swift-testing** (`@Suite` / `@Test` / `#expect`), not XCTest. `--filter`
 matches the suite's *type* name and the test function name — not the `@Suite("…")`
@@ -31,15 +35,16 @@ Docker with the app on the host — a Swift change is a ~10s rebuild versus rebu
 image:
 
 ```sh
-docker compose up -d postgres
-set -a && . ./.env && set +a
-swift run stele
+just run    # docker compose up -d --wait postgres; . ./.env; swift run stele
 ```
 
-`docker compose up -d` runs the full local stack at `localhost:8080`. There is no migrate
-step — `PageStore.migrate()` applies the versioned migration list on boot. Applied
-versions live in `schema_migrations`, and the run is serialized by a Postgres advisory
-lock, so it is safe to run repeatedly and concurrently.
+`just up` runs the full local stack at `localhost:8080`. In a worktree, where `.env` is
+gitignored and therefore absent, `STELE_ENV_FILE=` points the recipes at the main
+checkout's copy.
+
+There is no migrate step — `PageStore.migrate()` applies the versioned migration list on
+boot. Applied versions live in `schema_migrations`, and the run is serialized by a
+Postgres advisory lock, so it is safe to run repeatedly and concurrently.
 
 ## Testing
 
@@ -204,6 +209,7 @@ would leave one test reading the other's list and passing on it.
 `STELE_TEST_DATABASE_URL` so a plain `swift test` stays hermetic:
 
 ```sh
+just test-db    # or the two commands by hand:
 docker compose up -d postgres
 STELE_TEST_DATABASE_URL=postgres://stele:stele_dev_password@localhost:5432/postgres swift test
 ```
