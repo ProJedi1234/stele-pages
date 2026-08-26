@@ -154,7 +154,8 @@ struct CreateClientRequest: Decodable {
     let expiresIn: Int?
 }
 
-/// The `POST /auth/github/exchange` request body: a GitHub access token, and nothing else.
+/// The `POST /auth/github/exchange` request body: the device code being polled, and nothing
+/// else.
 ///
 /// Nothing else, deliberately. The name of the credential to mint comes from the login
 /// GitHub reports rather than from the caller, so an owner cannot sign in as a name of their
@@ -162,12 +163,68 @@ struct CreateClientRequest: Decodable {
 /// `publish`; and the expiry is fixed at none. Every field this body might plausibly have
 /// grown is a field an unauthenticated caller would get to influence.
 ///
-/// `accessToken` in camelCase, matching `CreateClientRequest` rather than GitHub's
-/// snake_case `access_token`. This body is stele's contract with its own client — the GitHub
-/// token happens to be its payload, and borrowing GitHub's spelling for it would be the
-/// beginning of a wire format that looks like a proxy for theirs.
+/// This field used to be a GitHub access token, and the replacement is the whole point of
+/// the device flow: the CLI no longer obtains one, holds one or sends one. What it sends
+/// back is the `deviceCode` this server handed it at `POST /auth/github/device`, which is
+/// also the entirety of the server's state for a sign-in in progress — kept by not being
+/// kept. It is not a credential and buys nothing on its own: redeeming it is the client ID
+/// the client does not have, held here.
+///
+/// `deviceCode` in camelCase, matching `CreateClientRequest` rather than GitHub's snake_case
+/// `device_code`. This body is stele's contract with its own client — GitHub's code happens
+/// to be its payload, and borrowing GitHub's spelling for it would be the beginning of a
+/// wire format that looks like a proxy for theirs.
 struct GitHubExchangeRequest: Decodable {
-    let accessToken: String
+    let deviceCode: String
+}
+
+/// The `200` from `POST /auth/github/device`: GitHub's answer, passed through.
+///
+/// Every field is GitHub's and every field is needed by somebody. `userCode` and
+/// `verificationURI` are the two a person reads off a terminal and types into a browser;
+/// `interval` and `expiresIn` are the two the CLI obeys, being how often to poll and when to
+/// give up; `deviceCode` is what comes back in every poll body.
+///
+/// Passed through rather than reshaped, and *not* enriched. The temptation is a `pollURL` or
+/// a pre-built verification link with the code embedded — GitHub offers the latter as
+/// `verification_uri_complete` in some flows — and both are refused here for the same
+/// reason: the client already knows this server's own routes, and a link that carries the
+/// code is a link something will eventually open on the person's behalf, which is the
+/// browser-launching this flow deliberately does not do.
+///
+/// The camelCase is stele's, as everywhere else on this wire.
+struct GitHubDeviceStartResponse: Encodable {
+    let userCode: String
+    let verificationURI: String
+    let deviceCode: String
+    let interval: Int
+    let expiresIn: Int
+
+    init(_ code: GitHubDeviceCode) {
+        self.userCode = code.userCode
+        self.verificationURI = code.verificationURI
+        self.deviceCode = code.deviceCode
+        self.interval = code.interval
+        self.expiresIn = code.expiresIn
+    }
+}
+
+/// The `202` from `POST /auth/github/exchange`: nobody has authorised the code yet.
+///
+/// One field, and it is an instruction rather than a description: wait this many seconds and
+/// ask again. It is GitHub's number, which is why it is worth sending at all — the client
+/// already has an interval from the start response, and this one differs exactly when GitHub
+/// has told this server to slow down. A client that ignored it would earn its own `slow_down`
+/// and, eventually, a refusal.
+///
+/// A `202` rather than a `200` because the sign-in genuinely has not happened: the request
+/// was accepted and its outcome is not yet decided, which is what that status is for. Not a
+/// `401`, emphatically — the whole reason `.pending` is kept out of the refusal collapse is
+/// that a client told "refused" at second three of a sign-in gives up on one that was about
+/// to succeed.
+struct GitHubDevicePendingResponse: Encodable {
+    /// Seconds to wait before polling again.
+    let interval: Int
 }
 
 /// One credential as the admin API reports it.
@@ -310,8 +367,13 @@ public enum ServerRoute {
     /// a sibling here, and a single string would hide that the path has a shape.
     public static let authGitHub = "github"
 
-    /// The token exchange itself, the third segment: hand over a GitHub access token,
-    /// receive a stele credential.
+    /// Starting a device sign-in, the third segment: ask for a code, receive one to read
+    /// aloud and one to poll with. Kept out of `names` for the same reason its sibling is —
+    /// a third-segment name is not claimable as a slug.
+    public static let authDevice = "device"
+
+    /// The exchange itself, the third segment: hand back the device code, receive a stele
+    /// credential once somebody has authorised it.
     public static let authExchange = "exchange"
 }
 
@@ -773,51 +835,110 @@ public func buildRouter(
         htmlResponse(status: .notFound, html: notFoundPage())
     }
 
-    // Signing in with GitHub, and the first route in this server that is neither a public
-    // read nor behind a credential. It **is** the authentication, which is why it sits in no
-    // group at all: the caller is here precisely because they hold no stele token yet, and
-    // what they present instead is a GitHub access token they obtained from GitHub directly.
-    // A `BearerTokenMiddleware` in front of this would demand the thing it exists to issue.
+    // Signing in with GitHub, which is two routes and one flow. Neither is a public read
+    // and neither is behind a credential: together they **are** the authentication, which is
+    // why they sit in no group at all. The caller is here precisely because they hold no
+    // stele token yet, so a `BearerTokenMiddleware` in front of either would demand the
+    // thing they exist to issue.
+    //
+    // What the caller presents instead is nothing — the start route takes no input — and
+    // then a device code this server gave them. The GitHub access token that ultimately
+    // decides the sign-in is born and dies inside the second handler below: the client never
+    // sees it, never holds it and cannot present one of its own. The client ID that redeems
+    // the code is the server's, from `STELE_GITHUB_CLIENT_ID`, and is never served to
+    // anybody.
     //
     // No `RequireScopeMiddleware` either, and not as an oversight: a scope is a fact about a
-    // stele credential, and there is none on this request to have facts about. The credential
-    // this route *hands out* carries `publish` and only `publish` — a sign-in produces an
-    // agent's credential, never an operator's, so what an owner walks away with can neither
-    // mint nor revoke.
+    // stele credential, and there is none on these requests to have facts about. The
+    // credential the exchange *hands out* carries `publish` and only `publish` — a sign-in
+    // produces an agent's credential, never an operator's, so what an owner walks away with
+    // can neither mint nor revoke.
     //
-    // The route itself is a different question, and the honest answer is that it revokes:
+    // The exchange itself is a different question, and the honest answer is that it revokes:
     // whatever live credential holds the login's name, whoever minted it and whatever scopes
-    // it carries. That is the rotation below, and its sharp edge is that `POST
+    // it carried. That is the rotation below, and its sharp edge is that `POST
     // /admin/clients` and this route share one namespace — an operator who hand-mints
     // `projedi1234` has named it after somebody's GitHub login, and that person's next
     // sign-in retires it. See the README, and
     // `GitHubExchangeTests.aSignInRetiresAHandMintedCredentialUnderTheLoginsName`.
     //
-    // And no `MinimumCLIVersionMiddleware`, which is the one omission that looks like a
-    // mistake. The gate is deliberately registered *after* authentication everywhere else so
-    // it never answers an unauthenticated prober; here there is no authentication for it to
-    // sit after. It would also be gating the bootstrap on the thing being bootstrapped — a
-    // user whose CLI is too old would be told to upgrade by the one route that could have
-    // given them the credential everything else needs.
+    // And no `MinimumCLIVersionMiddleware` on either, which is the one omission that looks
+    // like a mistake. The gate is deliberately registered *after* authentication everywhere
+    // else so it never answers an unauthenticated prober; here there is no authentication for
+    // it to sit after. It would also be gating the bootstrap on the thing being bootstrapped
+    // — a user whose CLI is too old would be told to upgrade by the one pair of routes that
+    // could have given them the credential everything else needs.
+
+    // Start: ask GitHub for a device code and pass its answer through.
+    //
+    // The request body is not read at all, and that is a decision rather than an omission.
+    // There is nothing a caller could put in one: the client ID is the server's, the scope is
+    // fixed at empty, and every other field GitHub's endpoint accepts is one an
+    // unauthenticated stranger would then get to choose. Reading and rejecting a body would
+    // only add a second refusal shape to a route whose entire security argument is that it
+    // has one.
+    //
+    // The nil is a deployment with no `STELE_GITHUB_CLIENT_ID`, and it answers the same
+    // refusal every terminal refusal on the exchange gets — the same bytes, from the same
+    // constructor. Fail-closed, on the `STELE_GITHUB_OWNERS` precedent: an unconfigured
+    // deployment declines rather than fails, and a prober cannot tell "not set up here" from
+    // "set up and not for you". A thrown error is a GitHub this server could not reach, and
+    // it propagates to a `500` for the reason the exchange's outage does.
+    router.post(RouterPath(
+        "/\(ServerRoute.auth)/\(ServerRoute.authGitHub)/\(ServerRoute.authDevice)"
+    )) { _, context -> Response in
+        guard let code = try await github.requestDeviceCode() else {
+            throw githubSignInRefused
+        }
+        // Debug, not info, and for the same reason the seam's refusals are: this route is
+        // unauthenticated and takes no input, so an info line per request is a log anybody
+        // can fill at no cost to themselves. The sign-in that matters gets its info line at
+        // the bottom of the exchange, where a credential actually changed hands.
+        //
+        // The user code is not logged. It is short, it is readable, and it is the one thing
+        // standing between a stranger and somebody else's half-finished sign-in.
+        context.logger.debug("started a github device sign-in")
+        return try jsonResponse(status: .ok, payload: GitHubDeviceStartResponse(code))
+    }
+
+    // Poll and complete: hand the device code back until GitHub says somebody authorised it.
     router.post(RouterPath(
         "/\(ServerRoute.auth)/\(ServerRoute.authGitHub)/\(ServerRoute.authExchange)"
     )) { request, context -> Response in
         let payload = try await readGitHubExchangeRequest(request: request)
 
-        // One `guard`, one `throw`, and every refusal reaches it. Five different facts —
-        // GitHub rejected the token, the login is not an owner, this deployment has no
-        // owners, the token was empty, the token held bytes no `Authorization` header can
-        // carry — collapsed to one nil inside `owner(presenting:allowedBy:)` before they got
-        // here, so there is no shape in this handler that could accidentally be branched on.
-        // Every one of them belongs on that side of the seam rather than in a guard here: a
-        // second `throw` site is a second thing to keep byte-identical with the first, and
-        // the whole property being defended is that a caller cannot tell these apart.
-        guard let login = try await github.owner(
-            presenting: payload.accessToken,
+        // One `guard`, one `throw`, and every refusal reaches it. Six different facts —
+        // GitHub never issued this code, it expired, the person declined it, the account
+        // that authorised it is not an owner here, this deployment has no owners, this
+        // deployment has no client ID — collapsed to one nil inside
+        // `owner(redeeming:allowedBy:)` before they got here, so there is no shape in this
+        // handler that could accidentally be branched on. Every one of them belongs on that
+        // side of the seam rather than in a guard here: a second `throw` site is a second
+        // thing to keep byte-identical with the first, and the whole property being defended
+        // is that a caller cannot tell these apart.
+        guard let signIn = try await github.owner(
+            redeeming: payload.deviceCode,
             allowedBy: configuration.githubOwners,
             logger: context.logger
         )
-        else { throw githubExchangeRejected }
+        else { throw githubSignInRefused }
+
+        let login: String
+        switch signIn {
+        case .pending(let retryAfterSeconds):
+            // The one answer that is neither a credential nor a refusal, and the reason
+            // `.pending` is kept out of the collapse above: for as long as somebody is typing
+            // a code into a browser this is the *normal* state of the flow, and a client told
+            // "refused" at second three gives up on a sign-in that was going to succeed. The
+            // interval is GitHub's, forwarded rather than invented — it is the same number
+            // the start response carried unless GitHub has since asked for a slower poll.
+            return try jsonResponse(
+                status: .accepted,
+                payload: GitHubDevicePendingResponse(interval: retryAfterSeconds)
+            )
+        case .identified(let identified):
+            login = identified
+        }
 
         // Past the allowlist, so this caller is an owner and a distinguishing error is
         // licensed by exactly the rule the admin routes run on — there is nothing left to
@@ -871,7 +992,8 @@ public func buildRouter(
         }
 
         // The token is in scope on the line above and is named here rather than quoted. The
-        // login is not a secret; the credential it just bought is.
+        // login is not a secret; the credential it just bought is. Neither is the device
+        // code, which has done its job and is not worth a line of its own.
         context.logger.info(
             "minted a client credential via github",
             metadata: ["client": "\(created.client.name)", "login": "\(login)"]
@@ -886,17 +1008,18 @@ public func buildRouter(
         )
     }
 
-    // The same trie trap as `/pages`, `/assets` and `/admin`: registering the exchange above
-    // creates the literal `auth` node, so `GET /auth` matches it, finds no value, and does
-    // **not** backtrack to `/:slug`. Without this it would answer the framework's own
+    // The same trie trap as `/pages`, `/assets` and `/admin`: registering the two routes
+    // above creates the literal `auth` node, so `GET /auth` matches it, finds no value, and
+    // does **not** backtrack to `/:slug`. Without this it would answer the framework's own
     // plain-text 404 — the one distinguishable response on the public read surface. Outside
     // every group, like the others, and here that is not merely convention: a 401 on this
     // segment would advertise that signing in is a thing this deployment does.
     //
-    // `GET /auth/github` needs no stub of its own and deliberately does not get one. A
-    // two-segment path can never be a slug, so the framework's envelope there tells a
-    // scanner nothing the uniform page would not — the same reasoning `/pages/foo` already
-    // runs on.
+    // Neither `GET /auth/github` nor `GET /auth/github/device` needs a stub of its own and
+    // deliberately neither gets one. A path of two segments or more can never be a slug, so
+    // the framework's envelope there tells a scanner nothing the uniform page would not —
+    // the same reasoning `/pages/foo` already runs on. Only the *bare first segment* is
+    // ambiguous with `/:slug`, which is why it is the only depth that needs covering here.
     router.get(RouterPath("/\(ServerRoute.auth)")) { _, _ -> Response in
         htmlResponse(status: .notFound, html: notFoundPage())
     }
@@ -1343,11 +1466,13 @@ private func readCreateClientRequest(request: Request) async throws -> CreateCli
 /// and a rejected one: a caller who sent no credential at all has learned nothing about
 /// which credentials exist. What they get told is what the body should look like, which is
 /// public API, and being told it is what turns a mistyped field name into a fixable mistake
-/// instead of an indistinguishable refusal.
+/// instead of an indistinguishable refusal. A body carrying the *old* `accessToken` field
+/// lands here, which is the right answer for it: that shape is gone, the client that sends
+/// it needs upgrading, and a `401` would send its user to check their GitHub account instead.
 private func readGitHubExchangeRequest(request: Request) async throws -> GitHubExchangeRequest {
     let buffer: ByteBuffer
     do {
-        // The same 16 KiB cap the admin body uses. A GitHub token is a few dozen bytes and
+        // The same 16 KiB cap the admin body uses. A device code is a few dozen bytes and
         // this object holds one field; the limit is about what an unauthenticated route is
         // willing to buffer, and this is the most unauthenticated route there is.
         buffer = try await request.body.collect(upTo: maxAdminRequestBytes)
@@ -1364,27 +1489,34 @@ private func readGitHubExchangeRequest(request: Request) async throws -> GitHubE
     } catch {
         throw HTTPError(
             .badRequest,
-            message: #"Expected a JSON object: {"accessToken": "…"}."#
+            message: #"Expected a JSON object: {"deviceCode": "…"}."#
         )
     }
 }
 
-/// The one answer every refused sign-in gets, defined once for the same reason
-/// `BearerTokenMiddleware.rejected` is.
+/// The one answer every refused sign-in gets, on either route, defined once for the same
+/// reason `BearerTokenMiddleware.rejected` is.
 ///
-/// "GitHub rejected that token", "that is a real GitHub account and not an owner of this
-/// deployment" and "this deployment has no owners configured" are three facts, and a caller
-/// learns none of them. The second is the dangerous one: an endpoint that distinguished it
-/// would be an oracle for who owns the deployment — anyone holding a GitHub token of their
-/// own could walk it and read the allowlist off the status codes, and the allowlist is a
-/// list of people whose accounts are worth attacking.
+/// "GitHub never issued that device code", "it expired", "the person declined it", "that is
+/// a real GitHub account and not an owner of this deployment", "this deployment has no
+/// owners configured" and "this deployment has no client ID" are six facts, and a caller
+/// learns none of them. The fourth is the dangerous one: an endpoint that distinguished it
+/// would be an oracle for who owns the deployment — anyone able to complete a device sign-in
+/// with a GitHub account of their own could walk it and read the allowlist off the status
+/// codes, and the allowlist is a list of people whose accounts are worth attacking.
 ///
-/// A computed property with one call site is not ceremony here. The property being defended
+/// The last is why the *start* route throws this too, rather than something that sounds more
+/// like a configuration problem. An unconfigured deployment is declining, not failing, and
+/// the two must be indistinguishable from outside or the pair of routes leaks in aggregate
+/// what neither leaks alone: a start route that answered `503` while the exchange answered
+/// `401` would tell a prober exactly which half of the setup is missing.
+///
+/// A computed property with two call sites is not ceremony here. The property being defended
 /// is that every refusal is byte-identical *including its headers*, which survives exactly
-/// as long as there is one place that constructs it; the version of this route with a
+/// as long as there is one place that constructs it; the version of these routes with a
 /// `throw HTTPError(.unauthorized, …)` at each refusing branch passes every test the day it
 /// is written and drifts the first time somebody improves one message.
-private var githubExchangeRejected: HTTPError {
+private var githubSignInRefused: HTTPError {
     HTTPError(.unauthorized, message: "GitHub sign-in was refused.")
 }
 
@@ -1669,14 +1801,27 @@ public func buildApplication(
             ]
         )
         // The one place an operator is told whether sign-in works, and it has to be here
-        // because every other channel is closed by design: an unconfigured allowlist
-        // refuses with the same bytes as a rejected token, deliberately, so a deployment
-        // that forgot `STELE_GITHUB_OWNERS` would otherwise present as one where nobody
-        // has tried to sign in yet. Whether, and not who: this line goes wherever the logs
-        // go, and the allowlist is the set of people who may publish here.
+        // because every other channel is closed by design: an unconfigured allowlist and an
+        // unconfigured client ID both refuse with the same bytes as a dead device code,
+        // deliberately, so a deployment that forgot `STELE_GITHUB_OWNERS` or
+        // `STELE_GITHUB_CLIENT_ID` would otherwise present as one where nobody has tried to
+        // sign in yet. Whether, and not who: this line goes wherever the logs go, and the
+        // allowlist is the set of people who may publish here.
+        //
+        // Sign-in needs both halves and either can be missing on its own, so the line names
+        // them separately as well as together. `configured` is the answer to "does sign-in
+        // work here"; the other two are the answer to "which variable did I forget", which
+        // is the only question an operator has left once it says false — the routes
+        // themselves refuse both cases with identical bytes, on purpose.
+        let hasClientID = configuration.githubClientID != nil
+        let hasOwners = !configuration.githubOwners.isEmpty
         logger.info(
             "github sign-in",
-            metadata: ["configured": "\(!configuration.githubOwners.isEmpty)"]
+            metadata: [
+                "configured": "\(hasClientID && hasOwners)",
+                "client_id": "\(hasClientID)",
+                "allowlist": "\(hasOwners)",
+            ]
         )
     }
     return app

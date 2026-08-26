@@ -32,10 +32,10 @@ struct NotFoundTests {
         // Malformed (too short), well-formed but never published, published but past its
         // deadline, and five bare segments whose real endpoints are elsewhere: `/pages`
         // (its responders are POST and the `:slug` child), `/assets` (the stylesheet),
-        // `/admin` (the client routes), `/auth` (the GitHub exchange, two segments further
-        // down) and `/static` (attachment bytes, one segment down). Each of those five
-        // needs its own GET responder, because the trie matches the literal node and does
-        // not backtrack to `/:slug`.
+        // `/admin` (the client routes), `/auth` (the two GitHub sign-in routes, two segments
+        // further down) and `/static` (attachment bytes, one segment down). Each of those
+        // five needs its own GET responder, because the trie matches the literal node and
+        // does not backtrack to `/:slug`.
         //
         // `/skill` and `/favicon.ico` are deliberately absent, even though this list
         // otherwise mirrors `ServerRoute.names`: each answers with its own content, not a
@@ -135,6 +135,39 @@ struct NotFoundTests {
             try await client.execute(uri: "/\(ServerRoute.pages)/foo", method: .get) { response in
                 #expect(response.status != .unauthorized)
                 #expect(response.status == .notFound)
+            }
+        }
+    }
+
+    /// The same property under `/auth`, two and three segments down, and the reason neither
+    /// depth gets a uniform-404 stub of its own.
+    ///
+    /// The stub exists on `/auth` because that segment is ambiguous with `/:slug` — the trie
+    /// matches the literal node and does not backtrack, so without a responder a scanner
+    /// would get the framework's plain-text envelope there and the uniform page everywhere
+    /// else. Nothing deeper is ambiguous with anything: a two- or three-segment path can
+    /// never be a slug, so the envelope carries no signal a scanner could use. What *would*
+    /// be signal is a `401` or a `426`, which is what registering either sign-in route inside
+    /// a group would produce — a status reachable only under `/auth/github` says "something
+    /// lives here", which is the leak the bare stub exists to prevent, arriving one segment
+    /// deeper.
+    ///
+    /// Both are `POST`-only, so a `GET` is a miss on the method rather than on the path; the
+    /// assertion is deliberately about what the status is *not*.
+    @Test(
+        "no auth leaks under the sign-in routes",
+        arguments: [
+            "/\(ServerRoute.auth)/\(ServerRoute.authGitHub)",
+            "/\(ServerRoute.auth)/\(ServerRoute.authGitHub)/\(ServerRoute.authDevice)",
+            "/\(ServerRoute.auth)/\(ServerRoute.authGitHub)/\(ServerRoute.authExchange)",
+        ]
+    )
+    func noAuthLeaksUnderTheSignInRoutes(path: String) async throws {
+        try await TestFixture.makeApp().test(.router) { client in
+            try await client.execute(uri: path, method: .get) { response in
+                #expect(response.status != .unauthorized, "\(path)")
+                #expect(response.status != .upgradeRequired, "\(path)")
+                #expect(response.status != .ok, "\(path)")
             }
         }
     }

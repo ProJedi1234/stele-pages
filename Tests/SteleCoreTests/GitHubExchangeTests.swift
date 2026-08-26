@@ -6,40 +6,101 @@ import Testing
 
 @testable import SteleCore
 
-/// HTTP-level tests for `POST /auth/github/exchange`, the one route in this server that is
-/// neither a public read nor behind a credential.
+/// HTTP-level tests for the two sign-in routes, `POST /auth/github/device` and
+/// `POST /auth/github/exchange` — the only routes in this server that are neither a public
+/// read nor behind a credential.
 ///
-/// Two properties carry most of the weight here and neither is about the happy path. The
-/// first is that *every* refusal is one byte-identical `401`, because a route that could
-/// distinguish "not an owner" from "bad token" would let anyone holding a GitHub token of
-/// their own read this deployment's owner list off the status codes. The second is that a
-/// GitHub outage is emphatically **not** a refusal: it is a `500`, because telling a
-/// legitimate owner their sign-in was refused when GitHub is down sends them to
-/// re-authenticate in a loop against something that cannot answer.
+/// Three properties carry most of the weight here and none of them is the happy path. The
+/// first is that *every* refusal, on either route, is one byte-identical `401`: a pair of
+/// routes that could distinguish "not an owner" from "dead device code" from "this
+/// deployment is not set up" would let anyone with a GitHub account of their own read this
+/// deployment's owner list off the status codes. The second is that a GitHub outage is
+/// emphatically **not** a refusal: it is a `500`, because telling a legitimate owner their
+/// sign-in was refused when GitHub is down sends them to re-authenticate in a loop against
+/// something that cannot answer. The third is new with the device flow and is the reason for
+/// it: the GitHub access token never leaves this server, so no response on any route may
+/// carry one.
 ///
-/// Nothing here reaches the network. `InMemoryGitHub` answers the seam's one primitive from
-/// a dictionary, so what these exercise is the real shared policy in `GitHubIdentifying`'s
-/// extension and the real route around it.
+/// Waiting is the fourth and it is not a refusal either. A person typing a code into a
+/// browser takes as long as they take, and for all of it the poll answers `202` with the
+/// interval to wait — the one outcome that must never collapse into the `401`.
+///
+/// Nothing here reaches the network. `InMemoryGitHub` answers the seam's three primitives
+/// from stored values, so what these exercise is the real shared policy in
+/// `GitHubIdentifying`'s extension and the real routes around it.
 @Suite("GitHub sign-in exchange")
 struct GitHubExchangeTests {
     static let path =
         "/\(ServerRoute.auth)/\(ServerRoute.authGitHub)/\(ServerRoute.authExchange)"
+    static let startPath =
+        "/\(ServerRoute.auth)/\(ServerRoute.authGitHub)/\(ServerRoute.authDevice)"
 
-    /// The access token the fake recognises, and the login it reports for it — in GitHub's
-    /// canonical casing, which is *not* the casing the allowlist below is written in. Every
-    /// test that mints here therefore crosses the case fold at least once, so a comparison
-    /// that quietly became case-sensitive fails the whole suite rather than one test.
+    /// The access token the fake redeems a code into, and the login it reports for it — in
+    /// GitHub's canonical casing, which is *not* the casing the allowlist below is written
+    /// in. Every test that mints here therefore crosses the case fold at least once, so a
+    /// comparison that quietly became case-sensitive fails the whole suite rather than one
+    /// test.
+    ///
+    /// It is a fixture rather than a value any test sends: no caller can present an access
+    /// token any more, which is the whole point of the device flow. It stays here so
+    /// `theGitHubAccessTokenNeverLeavesTheServer` has a needle to search bodies for.
     static let ownerToken = "gho_owner"
     static let ownerLogin = "ProJedi1234"
     static let ownerName = "projedi1234"
 
     /// A GitHub account that exists and is nobody's owner — the case that must be
-    /// indistinguishable from a junk token.
+    /// indistinguishable from a device code GitHub never issued.
     static let strangerToken = "gho_stranger"
     static let strangerLogin = "passing-stranger"
 
+    /// A device code the owner has already authorised: redeeming it yields their access
+    /// token, which the route spends and discards inside the same request.
+    static let ownerDeviceCode = "dev_owner_authorised"
+    /// The same, for the account that is not an owner here.
+    static let strangerDeviceCode = "dev_stranger_authorised"
+    /// Issued, alive, and nobody has finished authorising it — the state the flow spends
+    /// almost all of its wall-clock time in.
+    static let pendingDeviceCode = "dev_waiting"
+    /// Pending too, but with GitHub asking for a slower poll. A separate code rather than a
+    /// second answer for the same one, because the property under test is that a larger
+    /// interval is *the same shape* — a fake that changed its answer between polls would be
+    /// proving something else.
+    static let slowedDeviceCode = "dev_slow_down"
+    /// Expired, declined, or never issued: three things GitHub spells differently and this
+    /// server does not.
+    static let deadDeviceCode = "dev_expired"
+
+    static let pollSeconds = 5
+    static let slowedPollSeconds = 27
+
+    /// What the start route hands back, and what `aStartedSignInPassesGitHubsAnswerThrough`
+    /// expects to read out of the JSON field for field. The user code is GitHub's documented
+    /// example shape, which is worth keeping: it carries a hyphen, so a client that assumed
+    /// the code was alphanumeric fails here rather than in somebody's terminal.
+    static let issued = GitHubDeviceCode(
+        userCode: "WDJB-MJHT",
+        verificationURI: "https://github.com/login/device",
+        deviceCode: ownerDeviceCode,
+        interval: pollSeconds,
+        expiresIn: 900
+    )
+
+    /// A GitHub that has issued one device code and holds an opinion about five.
+    ///
+    /// An unscripted code is `.refused`, which is what GitHub says about one it never
+    /// issued, so the junk-code leg of the refusal test needs no arrangement at all.
     static var identifiedTokens: InMemoryGitHub {
-        InMemoryGitHub([ownerToken: ownerLogin, strangerToken: strangerLogin])
+        InMemoryGitHub(
+            [ownerToken: ownerLogin, strangerToken: strangerLogin],
+            issuing: issued,
+            redeeming: [
+                ownerDeviceCode: .token(ownerToken),
+                strangerDeviceCode: .token(strangerToken),
+                pendingDeviceCode: .pending(retryAfterSeconds: pollSeconds),
+                slowedDeviceCode: .pending(retryAfterSeconds: slowedPollSeconds),
+                deadDeviceCode: .refused,
+            ]
+        )
     }
 
     /// An application whose credential store starts empty, so a listing shows exactly what
@@ -47,7 +108,11 @@ struct GitHubExchangeTests {
     ///
     /// The allowlist arrives as an environment variable rather than as a constructed
     /// `GitHubOwnerAllowlist`, so what these tests exercise is the real parse-then-permit
-    /// path an operator's `STELE_GITHUB_OWNERS` takes.
+    /// path an operator's `STELE_GITHUB_OWNERS` takes. `STELE_GITHUB_CLIENT_ID` has no
+    /// counterpart here on purpose: the client ID belongs to the conformer, so "this
+    /// deployment has no client ID" is arranged by handing over a `GitHubIdentifying` that
+    /// issues nothing — which is exactly the shape `GitHubAPI` takes when the variable is
+    /// unset.
     static func makeApp(
         clients: InMemoryClientStore = InMemoryClientStore(),
         github: some GitHubIdentifying = identifiedTokens,
@@ -60,18 +125,18 @@ struct GitHubExchangeTests {
         )
     }
 
-    /// Exchanges `token`, returning the status and the decoded body.
+    /// Polls `code`, returning the status and the decoded body.
     ///
-    /// No `Authorization` header anywhere in this file, and its absence is the point: the
-    /// route *is* the authentication, so a test that quietly presented a stele credential
+    /// No `Authorization` header anywhere in this file, and its absence is the point: these
+    /// routes *are* the authentication, so a test that quietly presented a stele credential
     /// would be proving that some other middleware let it through.
     @discardableResult
     static func exchange(
         _ client: some TestClientProtocol,
-        token: String,
+        code: String,
         headers: HTTPFields = [.contentType: "application/json"]
     ) async throws -> (status: HTTPResponse.Status, raw: String, json: [String: Any]) {
-        try await post(client, body: #"{"accessToken":"\#(token)"}"#, headers: headers)
+        try await post(client, body: #"{"deviceCode":"\#(code)"}"#, headers: headers)
     }
 
     /// The same, for the tests that need to send a body the request type cannot express.
@@ -83,12 +148,26 @@ struct GitHubExchangeTests {
     ) async throws -> (status: HTTPResponse.Status, raw: String, json: [String: Any]) {
         try await client.execute(
             uri: path, method: .post, headers: headers, body: ByteBuffer(string: body)
-        ) { response in
-            let raw = String(buffer: response.body)
-            let json = (try? JSONSerialization.jsonObject(with: Data(buffer: response.body)))
-                as? [String: Any] ?? [:]
-            return (response.status, raw, json)
-        }
+        ) { decoded($0) }
+    }
+
+    /// Starts a sign-in. No body at all, not even an empty JSON object: the route reads none,
+    /// and sending one here would hide a handler that had quietly started requiring it.
+    @discardableResult
+    static func start(
+        _ client: some TestClientProtocol,
+        headers: HTTPFields = [:]
+    ) async throws -> (status: HTTPResponse.Status, raw: String, json: [String: Any]) {
+        try await client.execute(uri: startPath, method: .post, headers: headers) { decoded($0) }
+    }
+
+    static func decoded(
+        _ response: TestResponse
+    ) -> (status: HTTPResponse.Status, raw: String, json: [String: Any]) {
+        let raw = String(buffer: response.body)
+        let json = (try? JSONSerialization.jsonObject(with: Data(buffer: response.body)))
+            as? [String: Any] ?? [:]
+        return (response.status, raw, json)
     }
 
     static func publish(
@@ -103,15 +182,72 @@ struct GitHubExchangeTests {
         ) { $0.status }
     }
 
+    // MARK: - Starting
+
+    /// The start route is a pass-through, and this is the assertion that it passes
+    /// *everything* through. Five fields, each read by somebody: two a person reads off a
+    /// terminal, two the CLI obeys, and the one that comes back in every poll.
+    ///
+    /// Field by field against the bundle the fake issued rather than "is a string": a
+    /// handler that swapped `userCode` and `deviceCode` would print the polling secret to a
+    /// terminal and poll with the code the person is meant to type, and every shape check
+    /// would pass.
+    @Test func aStartedSignInPassesGitHubsAnswerThrough() async throws {
+        try await Self.makeApp().test(.router) { client in
+            let started = try await Self.start(client)
+            #expect(started.status == .ok)
+            #expect(started.json["userCode"] as? String == Self.issued.userCode)
+            #expect(started.json["verificationURI"] as? String == Self.issued.verificationURI)
+            #expect(started.json["deviceCode"] as? String == Self.issued.deviceCode)
+            #expect(started.json["interval"] as? Int == Self.issued.interval)
+            #expect(started.json["expiresIn"] as? Int == Self.issued.expiresIn)
+        }
+    }
+
+    /// The code that came out of the start route is the code the exchange accepts, asserted
+    /// as one flow rather than as two tests sharing a constant. What it rules out is a start
+    /// route that reshaped the device code on the way out — a trim, a case fold, a URL escape
+    /// — which no field-by-field check above would catch if the fixture happened to be
+    /// invariant under it.
+    @Test func theCodeTheStartRouteHandsOutIsTheCodeTheExchangeRedeems() async throws {
+        try await Self.makeApp().test(.router) { client in
+            let started = try await Self.start(client)
+            let code = try #require(started.json["deviceCode"] as? String)
+            let created = try await Self.exchange(client, code: code)
+            #expect(created.status == .created)
+        }
+    }
+
+    /// A deployment with no `STELE_GITHUB_CLIENT_ID` cannot start a sign-in, and says so with
+    /// the same refusal everything else says nothing with.
+    ///
+    /// The temptation is a `503`, or a message naming the variable, and both are refused: the
+    /// operator has the boot log, which names exactly which half is missing, and the prober
+    /// has nothing. A start route that answered distinguishably while the exchange answered
+    /// `401` would leak in aggregate what neither leaks alone — which half of the setup is
+    /// missing, and therefore that a deployment has the other half.
+    @Test func aDeploymentWithNoClientIDCannotStartASignIn() async throws {
+        let unconfigured = InMemoryGitHub([Self.ownerToken: Self.ownerLogin])
+        try await Self.makeApp(github: unconfigured).test(.router) { client in
+            let refused = try await Self.start(client)
+            #expect(refused.status == .unauthorized)
+            #expect(refused.json["deviceCode"] == nil)
+            // Nothing about configuration, in either direction: the message must not name
+            // the variable, and it must not name GitHub's app either.
+            #expect(!refused.raw.lowercased().contains("client"))
+            #expect(!refused.raw.lowercased().contains("configur"))
+        }
+    }
+
     // MARK: - Minting
 
-    /// The happy path. A GitHub identity on the allowlist buys a credential with exactly the
-    /// shape `POST /admin/clients` hands out — same body, same `201`, same one-time token —
-    /// because the CLI decodes both with one type and a second shape here would be a second
-    /// decoder to keep in agreement.
+    /// The happy path. An authorised device code belonging to somebody on the allowlist buys
+    /// a credential with exactly the shape `POST /admin/clients` hands out — same body, same
+    /// `201`, same one-time token — because the CLI decodes both with one type and a second
+    /// shape here would be a second decoder to keep in agreement.
     @Test func anAllowlistedIdentityMintsAPublishScopedCredential() async throws {
         try await Self.makeApp().test(.router) { client in
-            let created = try await Self.exchange(client, token: Self.ownerToken)
+            let created = try await Self.exchange(client, code: Self.ownerDeviceCode)
             #expect(created.status == .created)
 
             let token = try #require(created.json["token"] as? String)
@@ -143,7 +279,7 @@ struct GitHubExchangeTests {
     /// through the ordinary write route, with no operator in the loop at any point.
     @Test func theMintedCredentialCanImmediatelyPublish() async throws {
         try await Self.makeApp().test(.router) { client in
-            let created = try await Self.exchange(client, token: Self.ownerToken)
+            let created = try await Self.exchange(client, code: Self.ownerDeviceCode)
             let token = try #require(created.json["token"] as? String)
             #expect(try await Self.publish(client, with: token) == .created)
         }
@@ -161,58 +297,130 @@ struct GitHubExchangeTests {
     ])
     func allowlistMatchingIsCaseInsensitive(allowlist: String, login: String) async throws {
         let app = try Self.makeApp(
-            github: InMemoryGitHub([Self.ownerToken: login]), owners: allowlist
+            github: InMemoryGitHub(
+                [Self.ownerToken: login],
+                redeeming: [Self.ownerDeviceCode: .token(Self.ownerToken)]
+            ),
+            owners: allowlist
         )
         try await app.test(.router) { client in
-            let created = try await Self.exchange(client, token: Self.ownerToken)
+            let created = try await Self.exchange(client, code: Self.ownerDeviceCode)
             #expect(created.status == .created, "\(allowlist) vs \(login)")
             let credential = try #require(created.json["client"] as? [String: Any])
             #expect(credential["name"] as? String == Self.ownerName)
         }
     }
 
+    // MARK: - Waiting
+
+    /// The outcome that is neither a credential nor a refusal, and the one this flow spends
+    /// nearly all of its time in. A `202` carrying the interval to wait, and — asserted
+    /// explicitly — not a `401`, because a client told "refused" while the person is still
+    /// typing gives up on a sign-in that was about to succeed.
+    ///
+    /// No credential comes with it, which is the other half: a handler that answered `202`
+    /// *and* minted would hand out a credential for a code nobody had authorised.
+    @Test func aPendingSignInIsA202CarryingTheInterval() async throws {
+        try await Self.makeApp().test(.router) { client in
+            let pending = try await Self.exchange(client, code: Self.pendingDeviceCode)
+            #expect(pending.status == .accepted)
+            #expect(pending.status != .unauthorized)
+            #expect(pending.json["interval"] as? Int == Self.pollSeconds)
+            #expect(pending.json["token"] == nil)
+            #expect(pending.json["client"] == nil)
+        }
+    }
+
+    /// `slow_down` is a bigger number and not a new shape, which is the decision the seam's
+    /// `.pending(retryAfterSeconds:)` records and this is where the route is held to it.
+    /// GitHub spells the two cases differently; a client only ever needs to know how long to
+    /// wait, and a distinct status or an extra field here would be a branch every client had
+    /// to write and none could do anything useful with.
+    ///
+    /// Compared as whole responses minus `content-length`, so a `Retry-After` appearing on
+    /// one and not the other would fail here — the two differ by a number in the body and by
+    /// nothing else.
+    @Test func slowDownIsABiggerIntervalRatherThanANewShape() async throws {
+        try await Self.makeApp().test(.router) { client in
+            let ordinary = try await client.execute(
+                uri: Self.path,
+                method: .post,
+                headers: [.contentType: "application/json"],
+                body: ByteBuffer(string: #"{"deviceCode":"\#(Self.pendingDeviceCode)"}"#)
+            ) { Rejection($0) }
+            let slowed = try await client.execute(
+                uri: Self.path,
+                method: .post,
+                headers: [.contentType: "application/json"],
+                body: ByteBuffer(string: #"{"deviceCode":"\#(Self.slowedDeviceCode)"}"#)
+            ) { Rejection($0) }
+
+            #expect(ordinary.status == slowed.status)
+            #expect(
+                ordinary.headers.filter { !$0.hasPrefix("content-length") }
+                    == slowed.headers.filter { !$0.hasPrefix("content-length") }
+            )
+
+            let decoded = try await Self.exchange(client, code: Self.slowedDeviceCode)
+            #expect(decoded.json["interval"] as? Int == Self.slowedPollSeconds)
+            #expect(Self.slowedPollSeconds > Self.pollSeconds)
+        }
+    }
+
     // MARK: - Refusing
 
-    /// The property the whole route rests on: five different reasons to refuse produce one
-    /// response, byte for byte, headers included.
+    /// The property the whole pair of routes rests on: seven different reasons to refuse
+    /// produce one response, byte for byte, headers included — and one of them comes from the
+    /// *other route*, which is what keeps the pair from leaking in aggregate what neither
+    /// leaks alone.
     ///
-    /// The comparison is whole-response rather than five `== .unauthorized` checks, because
+    /// The comparison is whole-response rather than seven `== .unauthorized` checks, because
     /// a shared status was never the part in doubt. What would leak is a `content-length` a
     /// few bytes apart, a header one branch sets and another does not, or a message that
     /// names which check failed — and the one that must never be nameable is "that is a real
-    /// GitHub account, just not an owner here", which turns this route into a directory of
+    /// GitHub account, just not an owner here", which turns these routes into a directory of
     /// who owns the deployment.
     ///
-    /// The last shape is a *valid owner* against an application with no allowlist, which is
-    /// the fail-closed configuration seen from outside: an unconfigured deployment must not
-    /// be distinguishable from one that simply does not want you.
+    /// The last two shapes are the fail-closed configuration seen from outside: a valid
+    /// owner's authorised code against an application with no allowlist, and a start against
+    /// an application with no client ID. An unconfigured deployment must not be
+    /// distinguishable from one that simply does not want you.
     @Test func everyRefusalIsOneByteIdentical401() async throws {
         let refusals = try await Self.makeApp().test(.router) { client -> [Rejection] in
             var collected: [Rejection] = []
-            // A token GitHub does not know; a token GitHub knows, belonging to nobody on the
-            // allowlist; a token carrying a byte no header can hold; and an empty one. The
-            // last two never reach GitHub at all.
-            for token in ["gho_junk", Self.strangerToken, #"gho_x\ny"#, ""] {
+            // A code GitHub never issued; one it issued and will not redeem, which is expired
+            // and declined both; one belonging to an account on nobody's allowlist; one
+            // carrying a byte no header can hold; and an empty one. The last two never reach
+            // GitHub at all.
+            for code in [
+                "dev_junk", Self.deadDeviceCode, Self.strangerDeviceCode, #"dev_x\ny"#, "",
+            ] {
                 collected.append(try await client.execute(
                     uri: Self.path,
                     method: .post,
                     headers: [.contentType: "application/json"],
-                    body: ByteBuffer(string: #"{"accessToken":"\#(token)"}"#)
+                    body: ByteBuffer(string: #"{"deviceCode":"\#(code)"}"#)
                 ) { Rejection($0) })
             }
             return collected
         }
 
-        let unconfigured = try await Self.makeApp(owners: nil).test(.router) { client in
+        let unallowlisted = try await Self.makeApp(owners: nil).test(.router) { client in
             try await client.execute(
                 uri: Self.path,
                 method: .post,
                 headers: [.contentType: "application/json"],
-                body: ByteBuffer(string: #"{"accessToken":"\#(Self.ownerToken)"}"#)
+                body: ByteBuffer(string: #"{"deviceCode":"\#(Self.ownerDeviceCode)"}"#)
             ) { Rejection($0) }
         }
 
-        let all = refusals + [unconfigured]
+        let unconfigured = try await Self
+            .makeApp(github: InMemoryGitHub([Self.ownerToken: Self.ownerLogin]))
+            .test(.router) { client in
+                try await client.execute(uri: Self.startPath, method: .post) { Rejection($0) }
+            }
+
+        let all = refusals + [unallowlisted, unconfigured]
         for rejection in all {
             #expect(rejection.status == .unauthorized)
         }
@@ -221,8 +429,8 @@ struct GitHubExchangeTests {
         }
 
         let first = try #require(all.first)
-        // Not four copies of some *other* uniform answer: a route that threw the same 500
-        // for all four would satisfy every comparison above.
+        // Not seven copies of some *other* uniform answer: routes that threw the same 500 for
+        // all of them would satisfy every comparison above.
         #expect(String(decoding: first.body, as: UTF8.self).contains("GitHub sign-in was refused"))
         // And the header half of the comparison is not vacuous. If these responses ever
         // carried no headers at all, "identical headers" would stay true for free — and go
@@ -232,14 +440,32 @@ struct GitHubExchangeTests {
 
     /// The fail-closed acceptance, spelled at the level an operator would feel it. Unset,
     /// blank and nothing-but-commas are the three ways `STELE_GITHUB_OWNERS` ends up
-    /// permitting nobody, and a token the fake *would* identify is refused under each — so
-    /// the refusal is the allowlist's and not the fake's.
+    /// permitting nobody, and a device code the fake *would* redeem into an identified
+    /// account is refused under each — so the refusal is the allowlist's and not the fake's.
     @Test(arguments: [nil, "", "   ", " , ,"])
     func anAbsentOrBlankAllowlistRefusesEveryExchange(owners: String?) async throws {
         try await Self.makeApp(owners: owners).test(.router) { client in
-            let refused = try await Self.exchange(client, token: Self.ownerToken)
+            let refused = try await Self.exchange(client, code: Self.ownerDeviceCode)
             #expect(refused.status == .unauthorized, "\(owners ?? "<unset>")")
             #expect(refused.json["token"] == nil)
+        }
+    }
+
+    /// A missing allowlist stops the *exchange* and deliberately does not stop the *start*.
+    ///
+    /// It reads like a bug and is the same fail-closed reasoning taken the other way round:
+    /// the start route knows nothing about who is asking — nobody has authorised anything
+    /// yet, and there is no identity to check against a list. Refusing there on the strength
+    /// of the allowlist would tell a prober that `STELE_GITHUB_OWNERS` is unset, which is
+    /// precisely the fact `everyRefusalIsOneByteIdentical401` spends seven shapes hiding. The
+    /// sign-in still fails; it fails at the poll, indistinguishably from every other way it
+    /// can.
+    @Test func aStartSucceedsWithNoAllowlistAndThePollStillRefuses() async throws {
+        try await Self.makeApp(owners: nil).test(.router) { client in
+            let started = try await Self.start(client)
+            #expect(started.status == .ok)
+            let code = try #require(started.json["deviceCode"] as? String)
+            #expect(try await Self.exchange(client, code: code).status == .unauthorized)
         }
     }
 
@@ -250,77 +476,132 @@ struct GitHubExchangeTests {
     /// fixable rather than indistinguishable.
     @Test func aMalformedBodyIs400AndNamesTheShapeExpected() async throws {
         try await Self.makeApp().test(.router) { client in
-            for body in ["", "not json", #"{"token":"gho_owner"}"#, #"{"access_token":"x"}"#] {
+            for body in ["", "not json", #"{"code":"dev_x"}"#, #"{"device_code":"dev_x"}"#] {
                 let response = try await Self.post(client, body: body)
                 #expect(response.status == .badRequest, "\(body)")
-                #expect(response.raw.contains("accessToken"), "\(body)")
+                #expect(response.raw.contains("deviceCode"), "\(body)")
                 #expect(response.json["token"] == nil, "\(body)")
             }
         }
     }
 
-    /// A string that could never be presented to GitHub is refused without asking GitHub, and
-    /// `UnreachableGitHub` is what makes that assertion mean something: it throws for every
-    /// token it is handed, so a `401` here proves it was never handed this one — and
-    /// `gitHubBeingUnreachableIsA500NotA401` below is the positive control, the same
-    /// conformer producing its `500` for a token that *is* presentable.
+    /// The body this route used to take was a GitHub access token, and a client still sending
+    /// one gets a `400` naming the shape rather than a `401`.
     ///
-    /// The shape matters because of where the value goes. `accessToken` is unauthenticated
-    /// input interpolated into an `Authorization` header, and `AsyncHTTPClient` throws on a
-    /// header value carrying a control character rather than sending it — which the seam
-    /// reads as "the question could not be asked", so a token with a stray newline in it
-    /// would answer `500`, the one status on this route that means GitHub is down. Anyone
-    /// could then manufacture that signal at will, and a token pasted with a trailing newline
-    /// would be told the server broke rather than that its token was no good.
-    ///
-    /// The first two are raw strings, so their backslashes reach the wire as JSON escapes
-    /// and arrive at the handler as a real newline and a real NUL. The third is a plain
-    /// space, which a header would in fact carry — the rule is "printable, and no spaces",
-    /// because a bearer token with a space in it is not a token either.
-    @Test(arguments: [#"gho_x\ny"#, #"gho_x\u0000y"#, "gho_x y", ""])
-    func aTokenThatCouldNotBePresentedIsRefusedWithoutAskingGitHub(token: String) async throws {
-        try await Self.makeApp(github: UnreachableGitHub()).test(.router) { client in
-            let refused = try await Self.exchange(client, token: token)
-            #expect(refused.status == .unauthorized, "\(token)")
-            #expect(refused.status != .internalServerError, "\(token)")
-        }
-    }
-
-    /// An outage is not a refusal. `UnreachableGitHub` throws where the real conformer would
-    /// have thrown on a 5xx or a dead connection, and the answer has to be a `500`: a `401`
-    /// would tell every legitimate owner that their sign-in was refused, which reads as "my
-    /// account is no longer allowed" and sends them round a re-authentication loop against a
-    /// dependency that cannot answer. The bearer routes make the same call about a database
-    /// that is down.
-    @Test func gitHubBeingUnreachableIsA500NotA401() async throws {
-        try await Self.makeApp(github: UnreachableGitHub()).test(.router) { client in
-            let response = try await Self.exchange(client, token: Self.ownerToken)
-            #expect(response.status == .internalServerError)
+    /// Pinned separately from the malformed bodies above because it is the only one anybody
+    /// will actually send, and because the wrong answer here is expensive in a specific way:
+    /// a `401` would tell somebody running an older CLI that their GitHub account was
+    /// refused, and send them to check their allowlist, their token and their organisation
+    /// membership for a problem that is an upgrade. The old field name is named in the
+    /// assertion so that a future request type which quietly re-added `accessToken` — as an
+    /// optional, as a fallback, as a kindness — fails here.
+    @Test func theOldAccessTokenBodyIsA400NotARefusal() async throws {
+        try await Self.makeApp().test(.router) { client in
+            let response = try await Self.post(
+                client, body: #"{"accessToken":"\#(Self.ownerToken)"}"#
+            )
+            #expect(response.status == .badRequest)
             #expect(response.status != .unauthorized)
+            #expect(response.status != .created)
+            #expect(response.raw.contains("deviceCode"))
             #expect(response.json["token"] == nil)
         }
     }
 
-    /// The version gate is deliberately absent here, and this is what would notice it coming
-    /// back. It sits after authentication everywhere else so it never answers an
-    /// unauthenticated prober; this route has no authentication in front of it, and gating it
-    /// would refuse the credential to exactly the user whose CLI is too old to have one —
-    /// bootstrapping blocked by the thing being bootstrapped.
-    @Test func theExchangeIsNotVersionGated() async throws {
+    /// A string that could never be presented to GitHub is refused without asking GitHub, and
+    /// `UnreachableGitHub` is what makes that assertion mean something: it throws for every
+    /// code it is handed, so a `401` here proves it was never handed this one — and
+    /// `gitHubBeingUnreachableIsA500NotA401` below is the positive control, the same
+    /// conformer producing its `500` for a code that *is* presentable.
+    ///
+    /// The shape matters less than it did when this field was an access token bound for an
+    /// `Authorization` header, and the check is kept for the reasons the seam records: a
+    /// round trip not taken on a value GitHub cannot have issued, and one refusal shape
+    /// rather than two.
+    ///
+    /// The first two are raw strings, so their backslashes reach the wire as JSON escapes
+    /// and arrive at the handler as a real newline and a real NUL. The third is a plain
+    /// space, which a header would in fact carry — the rule is "printable, and no spaces",
+    /// because a device code with a space in it is not a device code either.
+    @Test(arguments: [#"dev_x\ny"#, #"dev_x\u0000y"#, "dev_x y", ""])
+    func aDeviceCodeThatCouldNotBePresentedIsRefusedWithoutAskingGitHub(
+        code: String
+    ) async throws {
+        try await Self.makeApp(github: UnreachableGitHub()).test(.router) { client in
+            let refused = try await Self.exchange(client, code: code)
+            #expect(refused.status == .unauthorized, "\(code)")
+            #expect(refused.status != .internalServerError, "\(code)")
+        }
+    }
+
+    /// An outage is not a refusal, on either route. `UnreachableGitHub` throws where the real
+    /// conformer would have thrown on a 5xx or a dead connection, and the answer has to be a
+    /// `500`: a `401` would tell every legitimate owner that their sign-in was refused, which
+    /// reads as "my account is no longer allowed" and sends them round a re-authentication
+    /// loop against a dependency that cannot answer. The bearer routes make the same call
+    /// about a database that is down.
+    ///
+    /// Both routes, because the start is where an outage is met first and it is the one whose
+    /// refusal — an unconfigured deployment — is a nil rather than a throw. A conformer that
+    /// collapsed the two would make a GitHub outage look like a server nobody had set up.
+    @Test func gitHubBeingUnreachableIsA500NotA401() async throws {
+        try await Self.makeApp(github: UnreachableGitHub()).test(.router) { client in
+            let polled = try await Self.exchange(client, code: Self.ownerDeviceCode)
+            #expect(polled.status == .internalServerError)
+            #expect(polled.status != .unauthorized)
+            #expect(polled.json["token"] == nil)
+
+            let started = try await Self.start(client)
+            #expect(started.status == .internalServerError)
+            #expect(started.status != .unauthorized)
+            #expect(started.json["deviceCode"] == nil)
+        }
+    }
+
+    /// An `error` string GitHub has never documented is GitHub behaving unexpectedly, and it
+    /// stays a `500` rather than a refusal all the way out to the wire.
+    ///
+    /// The decision is `GitHubAPI.verdict(forOAuthError:)`'s and `GitHubAPITests` pins it
+    /// there; this is the route half, and it is worth having separately because the route is
+    /// where the wrong answer would be felt. An unknown string is not the caller's fault and
+    /// cannot be — they sent a device code, and every fact about a device code has a
+    /// documented spelling — so blaming them for it would send a person round the sign-in
+    /// loop over a GitHub change only the operator can act on.
+    @Test func anUnrecognisedOAuthErrorIsA500NotARefusal() async throws {
+        try await Self.makeApp(github: ConfusedGitHub()).test(.router) { client in
+            let response = try await Self.exchange(client, code: Self.ownerDeviceCode)
+            #expect(response.status == .internalServerError)
+            #expect(response.status != .unauthorized)
+            #expect(response.status != .accepted)
+        }
+    }
+
+    /// The version gate is deliberately absent on both routes, and this is what would notice
+    /// it coming back. It sits after authentication everywhere else so it never answers an
+    /// unauthenticated prober; these routes have no authentication in front of them, and
+    /// gating them would refuse the credential to exactly the user whose CLI is too old to
+    /// have one — bootstrapping blocked by the thing being bootstrapped.
+    @Test func neitherSignInRouteIsVersionGated() async throws {
         let ancient: HTTPFields = [
             .contentType: "application/json",
             .userAgent: "\(SteleCLI.userAgentProduct)/0.0.1",
         ]
         try await Self.makeApp().test(.router) { client in
+            let started = try await Self.start(
+                client, headers: [.userAgent: "\(SteleCLI.userAgentProduct)/0.0.1"]
+            )
+            #expect(started.status == .ok)
+            #expect(started.status != .upgradeRequired)
+
             let created = try await Self.exchange(
-                client, token: Self.ownerToken, headers: ancient
+                client, code: Self.ownerDeviceCode, headers: ancient
             )
             #expect(created.status == .created)
 
             // And a refusal under the same header is still the uniform 401 rather than a
             // 426 — a gate that fired only on the failing branch would be just as wrong and
             // much harder to see.
-            let refused = try await Self.exchange(client, token: "gho_junk", headers: ancient)
+            let refused = try await Self.exchange(client, code: "dev_junk", headers: ancient)
             #expect(refused.status == .unauthorized)
             #expect(refused.status != .upgradeRequired)
         }
@@ -334,11 +615,11 @@ struct GitHubExchangeTests {
     /// live-only name index that makes revoke-then-mint legal.
     @Test func aRepeatLoginRotatesTheCredentialUnderItsName() async throws {
         try await Self.makeApp().test(.router) { client in
-            let first = try await Self.exchange(client, token: Self.ownerToken)
+            let first = try await Self.exchange(client, code: Self.ownerDeviceCode)
             #expect(first.status == .created)
             let firstToken = try #require(first.json["token"] as? String)
 
-            let second = try await Self.exchange(client, token: Self.ownerToken)
+            let second = try await Self.exchange(client, code: Self.ownerDeviceCode)
             #expect(second.status == .created)
             let secondToken = try #require(second.json["token"] as? String)
             #expect(secondToken != firstToken)
@@ -378,27 +659,31 @@ struct GitHubExchangeTests {
 
         let app = try Self.makeApp(
             clients: clients,
-            github: InMemoryGitHub([
-                Self.ownerToken: Self.ownerLogin, Self.strangerToken: Self.strangerLogin,
-            ]),
-            // Both logins are owners here, so the stranger's token is a *second* owner
-            // rather than a refusal.
+            github: InMemoryGitHub(
+                [Self.ownerToken: Self.ownerLogin, Self.strangerToken: Self.strangerLogin],
+                redeeming: [
+                    Self.ownerDeviceCode: .token(Self.ownerToken),
+                    Self.strangerDeviceCode: .token(Self.strangerToken),
+                ]
+            ),
+            // Both logins are owners here, so the stranger's code redeems into a *second*
+            // owner rather than a refusal.
             owners: "\(Self.ownerName), \(Self.strangerLogin)"
         )
 
         try await app.test(.router) { client in
-            _ = try await Self.exchange(client, token: Self.ownerToken)
-            let otherOwner = try await Self.exchange(client, token: Self.strangerToken)
+            _ = try await Self.exchange(client, code: Self.ownerDeviceCode)
+            let otherOwner = try await Self.exchange(client, code: Self.strangerDeviceCode)
             let otherOwnerToken = try #require(otherOwner.json["token"] as? String)
 
-            let secondSignIn = try await Self.exchange(client, token: Self.ownerToken)
+            let secondSignIn = try await Self.exchange(client, code: Self.ownerDeviceCode)
             #expect(secondSignIn.status == .created)
             let retirement = try #require(
                 try await Self.listClients(client)
                     .first { $0["name"] as? String == Self.ownerName }?["revokedAt"] as? String
             )
 
-            let thirdSignIn = try await Self.exchange(client, token: Self.ownerToken)
+            let thirdSignIn = try await Self.exchange(client, code: Self.ownerDeviceCode)
             #expect(thirdSignIn.status == .created)
 
             // The other owner's credential and the hand-minted one both still publish: a
@@ -444,7 +729,7 @@ struct GitHubExchangeTests {
             // Live and `admin`-scoped before the sign-in: it can read the listing.
             #expect(try await Self.listingStatus(client, with: operatorToken) == .ok)
 
-            let created = try await Self.exchange(client, token: Self.ownerToken)
+            let created = try await Self.exchange(client, code: Self.ownerDeviceCode)
             #expect(created.status == .created)
 
             // Revoked by the sign-in — refused at the door, not merely superseded.
@@ -508,7 +793,7 @@ struct GitHubExchangeTests {
                     || handMintedCredential["githubLogin"] is NSNull
             )
 
-            let created = try await Self.exchange(client, token: Self.ownerToken)
+            let created = try await Self.exchange(client, code: Self.ownerDeviceCode)
             #expect(created.status == .created)
             let credential = try #require(created.json["client"] as? [String: Any])
             #expect(credential["githubLogin"] as? String == Self.ownerLogin)
@@ -547,7 +832,8 @@ struct GitHubExchangeTests {
     /// admin listing, not in the credential's own `whoami`, not in a refusal.
     @Test func theTokenAppearsInThe201AndInNoOtherResponse() async throws {
         try await Self.makeApp().test(.router) { client in
-            let created = try await Self.exchange(client, token: Self.ownerToken)
+            let started = try await Self.start(client).raw
+            let created = try await Self.exchange(client, code: Self.ownerDeviceCode)
             let token = try #require(created.json["token"] as? String)
             #expect(created.raw.contains(token))
 
@@ -578,12 +864,42 @@ struct GitHubExchangeTests {
                 return String(buffer: response.body)
             }
 
-            let refusal = try await Self.exchange(client, token: "gho_junk").raw
+            let refusal = try await Self.exchange(client, code: "dev_junk").raw
 
             for body in [listing, whoami, refusal] {
                 #expect(!body.contains(token))
                 #expect(!body.lowercased().contains("token"))
                 #expect(!body.lowercased().contains("hash"))
+            }
+            // The start response is scanned on its own terms. It legitimately carries two
+            // codes, so the vocabulary check does not apply to it; what does apply is that a
+            // route which has minted nothing carries no credential and no digest.
+            #expect(!started.contains(token))
+            #expect(!started.lowercased().contains("hash"))
+        }
+    }
+
+    /// The reason the flow was reshaped at all: the GitHub access token is born and dies
+    /// inside one handler, so it appears in no response on either route.
+    ///
+    /// Asserted on raw bytes across every response a sign-in produces — the start, a pending
+    /// poll, the `201`, and the refusal a non-owner gets *after* GitHub minted a token for
+    /// them, which is the one leg where the value genuinely passed through the handler.
+    /// The failure this guards against is a convenience: a handler that returned what GitHub
+    /// gave it, or an error message that quoted the value it could not use. Either would put
+    /// a live credential for somebody's entire GitHub account into a terminal, which is
+    /// precisely what the client no longer holding one was for.
+    @Test func theGitHubAccessTokenNeverLeavesTheServer() async throws {
+        try await Self.makeApp().test(.router) { client in
+            let bodies = try await [
+                Self.start(client).raw,
+                Self.exchange(client, code: Self.pendingDeviceCode).raw,
+                Self.exchange(client, code: Self.ownerDeviceCode).raw,
+                Self.exchange(client, code: Self.strangerDeviceCode).raw,
+            ]
+            for body in bodies {
+                #expect(!body.contains(Self.ownerToken))
+                #expect(!body.contains(Self.strangerToken))
             }
         }
     }
@@ -621,9 +937,9 @@ struct GitHubExchangeTests {
 /// GitHub, unreachable. Stands in for everything on the far side of the seam that is not an
 /// answer: a connection that never opened, a 5xx, a body that did not decode.
 ///
-/// It throws where `InMemoryGitHub` returns nil, and that difference is the entire point of
-/// the type — the seam's contract is that nil is GitHub's *verdict* and a thrown error is the
-/// absence of one, and this is what proves the route keeps them apart.
+/// It throws where `InMemoryGitHub` returns nil or `.refused`, and that difference is the
+/// entire point of the type — the seam's contract is that nil is GitHub's *verdict* and a
+/// thrown error is the absence of one, and this is what proves the routes keep them apart.
 private struct UnreachableGitHub: GitHubIdentifying {
     struct Outage: Error {}
 
@@ -637,5 +953,27 @@ private struct UnreachableGitHub: GitHubIdentifying {
 
     func redeemDeviceCode(_ deviceCode: String) async throws -> GitHubDeviceRedemption {
         throw Outage()
+    }
+}
+
+/// GitHub, reachable and saying something nobody has documented.
+///
+/// Distinct from `UnreachableGitHub` because the failure it stands for is different in kind:
+/// the request completed, the body decoded, and the `error` string inside it matched none of
+/// the spellings RFC 8628 and GitHub between them define. `GitHubAPI` turns that into a throw
+/// — see `verdict(forOAuthError:)` — and this conformer is that decision arriving at the
+/// route, so the route's job of not blaming the caller for it can be asserted without a
+/// socket.
+private struct ConfusedGitHub: GitHubIdentifying {
+    func login(forAccessToken token: String) async throws -> String? {
+        nil
+    }
+
+    func requestDeviceCode() async throws -> GitHubDeviceCode? {
+        GitHubExchangeTests.issued
+    }
+
+    func redeemDeviceCode(_ deviceCode: String) async throws -> GitHubDeviceRedemption {
+        throw GitHubAPIError.unexpectedOAuthError("the_moon_is_in_gemini")
     }
 }

@@ -162,28 +162,43 @@ public struct Configuration: Sendable {
     /// whether it has a client secret are facts about one host: they belong in the
     /// gitignored `docs/homelab.local.md`, and this repository stays free of them.
     ///
-    /// **The callback URL GitHub's registration form insists on is never used.** Sign-in
-    /// is RFC 8628's device authorization grant, which has no redirect in it at all — the
-    /// client polls GitHub directly and this server never sees a browser come back from
-    /// one. A reader who goes looking for the handler behind that URL will not find one,
-    /// and should not write one to "finish" it.
+    /// **The app must have "Enable Device Flow" ticked, and the callback URL GitHub's
+    /// registration form insists on is never used.** Sign-in is RFC 8628's device
+    /// authorization grant, which has no redirect in it at all — the person authorises at
+    /// `github.com` and this server never sees a browser come back from one. A reader who
+    /// goes looking for the handler behind that URL will not find one, and should not write
+    /// one to "finish" it. The README's Deploying section says the same to whoever registers
+    /// the app.
     ///
-    /// Read from the environment rather than compiled in as a constant, so a deployment
-    /// can point at its own app without a rebuild. The honest consequence: the client runs
-    /// the device flow itself and carries its own copy of the ID inside its binary, so
-    /// setting this variable does not hand the client anything. What it does is record, on
-    /// the server side, which app this deployment trusts — beside the allowlist of the
-    /// people that app is allowed to identify. Serving the value from an endpoint so the
-    /// client could discover it was considered and rejected: another unauthenticated route
-    /// to keep honest, to spare the client a constant it already has.
+    /// Read from the environment rather than compiled in as a constant, so a deployment can
+    /// point at its own app without a rebuild.
     ///
-    /// Nothing on the server reads it yet. Its consumer is the token-provenance check
-    /// (`POST /applications/{client_id}/token`, which asks GitHub whether an access token
-    /// was issued to *this* app rather than to some other one), and that call needs the
-    /// app's client secret — which this server has no variable to hold and no code path to
-    /// spend, so the check is deliberately not built rather than half-built. Whether the
-    /// registered app happens to have a secret is a fact about one host and stays with the
-    /// others, in `docs/homelab.local.md`.
+    /// **This server is the only holder of the value, and that is the design rather than an
+    /// accident of where it was put.** The client does not run the device flow itself: it
+    /// asks `POST /auth/github/device`, and this server makes both calls to GitHub with the
+    /// ID below. So the client ships no copy, a deployment can be repointed at a different
+    /// OAuth app without reissuing anything, and the GitHub access token the flow ultimately
+    /// produces is born and dies inside one request here. Serving the value from an endpoint
+    /// so the client could run the flow itself was the earlier shape and is deliberately
+    /// gone: it put an app credential in every user's binary to save this server two
+    /// outbound requests.
+    ///
+    /// Optional, and fail-closed at the routes rather than at boot — the
+    /// `STELE_GITHUB_OWNERS` arrangement exactly. A deployment that does not use GitHub
+    /// sign-in boots fine and refuses it, with the same bytes an unconfigured allowlist
+    /// refuses with; demanding the variable would fail the next boot of every deployment
+    /// that never turned the feature on. `GitHubAPI` holds it from there, so there is one
+    /// place in the process it enters and no signature anywhere inviting a caller to supply
+    /// their own.
+    ///
+    /// The one thing this value cannot do on its own is the token-provenance check
+    /// (`POST /applications/{client_id}/token`, which asks GitHub whether an access token was
+    /// issued to *this* app rather than to
+    /// some other one): that call needs the app's client secret, which this server has no
+    /// variable to hold and no code path to spend, so the check is deliberately not built
+    /// rather than half-built. It also matters much less than it did — with the device flow
+    /// the token is one this server obtained itself, from the app this ID names, rather than
+    /// one a caller pasted in.
     public var githubClientID: String?
 
     /// - Parameter environment: injectable so tests don't have to mutate the process
