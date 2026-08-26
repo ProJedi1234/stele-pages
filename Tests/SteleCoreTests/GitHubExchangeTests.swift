@@ -630,4 +630,12 @@ private struct UnreachableGitHub: GitHubIdentifying {
     func login(forAccessToken token: String) async throws -> String? {
         throw Outage()
     }
+
+    func requestDeviceCode() async throws -> GitHubDeviceCode? {
+        throw Outage()
+    }
+
+    func redeemDeviceCode(_ deviceCode: String) async throws -> GitHubDeviceRedemption {
+        throw Outage()
+    }
 }
