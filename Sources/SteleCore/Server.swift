@@ -1632,14 +1632,15 @@ public func buildApplication(
     // separate seams — `PageStore` is still the only file that touches the `pages` table —
     // and one migration list, owned by `PageStore`, creates the schema for both.
     let clients = ClientStore(client: postgresClient, logger: logger)
-    // The only place a real `GitHubAPI` is constructed. It holds nothing — no connection
-    // pool, no lifetime — because it makes its requests through `HTTPClient.shared`, so
-    // unlike `postgresClient` there is no service to register and nothing to shut down.
+    // The only place a real `GitHubAPI` is constructed, and the only place the OAuth client
+    // ID enters the process. Beyond that value it holds nothing — no connection pool, no
+    // lifetime — because it makes its requests through `HTTPClient.shared`, so unlike
+    // `postgresClient` there is no service to register and nothing to shut down.
     let router = buildRouter(
         configuration: configuration,
         store: store,
         clients: clients,
-        github: GitHubAPI()
+        github: GitHubAPI(clientID: configuration.githubClientID)
     )
 
     var app = Application(

@@ -29,6 +29,35 @@ public protocol GitHubIdentifying: Sendable {
     /// database that is down is a 500, not a 401) and this one inherits it.
     func login(forAccessToken token: String) async throws -> String?
 
+    /// Starts a device sign-in, or nil if this deployment cannot start one.
+    ///
+    /// The client ID belongs to the conformer, not to this call. That is the only placement
+    /// that keeps the value where the design put it: the server holds the client ID and the
+    /// CLI never sees it, so a parameter here would be an invitation for some future caller
+    /// to source it from somewhere else — and it would force every fake to carry a dummy
+    /// string it has no use for.
+    ///
+    /// **nil means this deployment declines to start a sign-in**, which today means no
+    /// `STELE_GITHUB_CLIENT_ID` is set, and it is a refusal for exactly the reason the empty
+    /// allowlist is one. An unconfigured deployment is not a broken deployment — the route
+    /// answers it with the same refusal every other terminal refusal gets, so a prober
+    /// cannot tell "not set up here" from "set up and not for you". A thrown error keeps its
+    /// usual meaning: GitHub could not be asked.
+    func requestDeviceCode() async throws -> GitHubDeviceCode?
+
+    /// Asks GitHub whether a device code has been authorised yet.
+    ///
+    /// The polled half of the flow, and the one call this server makes on a schedule
+    /// somebody else sets. Throwing still means GitHub could not be asked; every answer
+    /// GitHub *did* give is one of the three cases, including the ones GitHub reports as an
+    /// `error` string inside a `200` — see `GitHubAPI.verdict(forOAuthError:)` for which
+    /// string is which case and why two of them are outages rather than refusals.
+    ///
+    /// A conformer with no client ID answers `.refused` here rather than throwing, for the
+    /// same reason `requestDeviceCode()` answers nil: an unconfigured deployment declines,
+    /// it does not fail.
+    func redeemDeviceCode(_ deviceCode: String) async throws -> GitHubDeviceRedemption
+
     // The provenance check would be the second requirement here, and it is deliberately not
     // built. `POST /applications/{client_id}/token` asks GitHub whether an access token was
     // issued to *this* OAuth app rather than to some other one, which would close the gap
@@ -113,6 +142,78 @@ extension GitHubIdentifying {
         }
         return login
     }
+
+    /// Carries a device sign-in as far as it will go this poll: still waiting, an owner's
+    /// login, or nil.
+    ///
+    /// The second policy method, and it earns its place in the extension the same way the
+    /// first one does — it is *the* definition of what a device code buys, so the fake and
+    /// the live conformer cannot reach different verdicts about who walks away with a
+    /// credential. What the route gets is one of three shapes and no reasons attached.
+    ///
+    /// The nil is the whole of the security argument and it is wide on purpose. A code
+    /// GitHub never issued, a code that expired, a code the person declined, a token GitHub
+    /// minted for an account that is not an owner here, a deployment with no allowlist, a
+    /// deployment with no client ID: six facts, one nil, decided here rather than in a
+    /// handler that would then be one edit away from reporting which. The route is
+    /// unauthenticated — reporting any of them turns it into an oracle for who owns the
+    /// deployment, walkable by a stranger with a GitHub account of their own.
+    ///
+    /// `.pending` is the one answer that must *not* collapse into that nil. It is the normal
+    /// state of this flow for as long as the person takes to type a code into a browser, and
+    /// a client told "refused" at second three of a ninety-second sign-in gives up on one
+    /// that was going to succeed.
+    ///
+    /// The presentability guard is here for a weaker reason than it is on the token path and
+    /// is worth keeping anyway. A device code travels in a form body rather than in a
+    /// header, so nothing downstream *throws* on a byte it dislikes — the `500`-on-demand
+    /// this check prevents for tokens is not reachable here. What it still buys is a round
+    /// trip not taken on a value GitHub cannot have issued, and one refusal shape rather
+    /// than two.
+    ///
+    /// The logging split mirrors the token path exactly: refusals are debug, because this
+    /// route is unauthenticated and an info line per probe is a log a stranger can fill,
+    /// while an outage is error and rethrown so that a GitHub that is down leaves a trace
+    /// distinguishable from a sign-in that simply has not happened yet.
+    public func owner(
+        redeeming deviceCode: String,
+        allowedBy allowlist: GitHubOwnerAllowlist,
+        logger: Logger? = nil
+    ) async throws -> GitHubDeviceSignIn? {
+        guard isPresentableAsAToken(deviceCode) else {
+            logger?.debug("refused a device code that could not be presented to github")
+            return nil
+        }
+        let redemption: GitHubDeviceRedemption
+        do {
+            redemption = try await redeemDeviceCode(deviceCode)
+        } catch {
+            logger?.error(
+                "could not ask github whether a device code was authorised",
+                metadata: ["error": "\(error)"]
+            )
+            throw error
+        }
+        switch redemption {
+        case .pending(let retryAfterSeconds):
+            return .pending(retryAfterSeconds: retryAfterSeconds)
+        case .refused:
+            logger?.debug("github will not redeem a presented device code")
+            return nil
+        case .token(let accessToken):
+            // Straight into the existing policy, which is the point of the whole
+            // arrangement: the allowlist check, the casing of the login and the collapse of
+            // a non-owner into nil are the code that was already there and already tested,
+            // not a second opinion written for this flow. The access token dies at the end
+            // of this expression — it is never returned, never logged and never stored.
+            guard let login = try await owner(
+                presenting: accessToken, allowedBy: allowlist, logger: logger
+            ) else {
+                return nil
+            }
+            return .identified(login: login)
+        }
+    }
 }
 
 /// Whether a string could be presented to GitHub as a bearer token at all.
@@ -137,4 +238,86 @@ extension GitHubIdentifying {
 /// way.
 private func isPresentableAsAToken(_ token: String) -> Bool {
     !token.isEmpty && token.utf8.allSatisfy { (0x21...0x7E).contains($0) }
+}
+
+/// What GitHub hands back when a device sign-in is started.
+///
+/// A named struct rather than the tuple it started as, because every field of it is copied
+/// into the start route's JSON and a tuple's labels are not checked against anything. The
+/// two the person sees are `userCode` and `verificationURI`; the two the CLI obeys are
+/// `interval` and `expiresIn`; `deviceCode` is the whole of the server's state, which it
+/// keeps by not keeping it — it goes out in this response and comes back in every poll.
+///
+/// `verificationURI` is a `String` rather than a `URL` on purpose. It is GitHub's to choose,
+/// it is printed for a person to read or paste, and nothing here dereferences it — parsing
+/// it would only add a failure mode to a value this server never resolves.
+public struct GitHubDeviceCode: Sendable, Equatable {
+    public let userCode: String
+    public let verificationURI: String
+    public let deviceCode: String
+    /// Seconds the client must wait between polls, as GitHub set it.
+    public let interval: Int
+    /// Seconds until the device code is dead and the sign-in has to be started again.
+    public let expiresIn: Int
+
+    public init(
+        userCode: String,
+        verificationURI: String,
+        deviceCode: String,
+        interval: Int,
+        expiresIn: Int
+    ) {
+        self.userCode = userCode
+        self.verificationURI = verificationURI
+        self.deviceCode = deviceCode
+        self.interval = interval
+        self.expiresIn = expiresIn
+    }
+}
+
+/// What GitHub says when a device code is redeemed.
+///
+/// Three answers rather than an optional, because this is the one place in the seam where
+/// "no" has two genuinely different meanings and the caller must act differently on each.
+/// `.pending` is *not yet* — the person has not finished at `verificationURI`, and the right
+/// response is to wait and ask again. `.refused` is *no, and asking again will not help*.
+/// Folding them together in either direction is a real failure: a `.pending` read as a
+/// refusal ends a sign-in the person is halfway through, and a `.refused` read as pending
+/// leaves a CLI polling a dead code until it times out.
+///
+/// The third answer, "GitHub could not be asked", is a thrown error and not a case here —
+/// the same nil-versus-throw contract `login(forAccessToken:)` documents at length, said
+/// once more in an enum's shape.
+public enum GitHubDeviceRedemption: Sendable, Equatable {
+    /// The person has not finished authorising yet; ask again in this many seconds.
+    ///
+    /// GitHub spells this two ways — `authorization_pending`, meaning keep to the interval
+    /// you were given, and `slow_down`, meaning you polled too fast and the interval has
+    /// grown. They are the same instruction with a different number, so this carries the
+    /// number and not the distinction: a conformer that made `slow_down` its own case would
+    /// hand the route a shape to branch on and nothing useful to do with it.
+    case pending(retryAfterSeconds: Int)
+    /// GitHub minted an access token for the person who authorised the code.
+    case token(String)
+    /// The code will never be redeemed: expired, declined, never issued — or this deployment
+    /// has no client ID with which to ask.
+    case refused
+}
+
+/// The outcome of a device sign-in that got far enough to have one.
+///
+/// Two cases and an optional wrapper rather than three cases, because the nil is the same
+/// nil `owner(presenting:allowedBy:)` returns and it has to stay that way. Every terminal
+/// refusal in this flow — a dead device code, a declined one, a real GitHub account that is
+/// not an owner here, a deployment with no allowlist, a deployment with no client ID —
+/// collapses into it inside the extension, so the route never holds the distinction and
+/// cannot leak it. A third case named `.refused` would be the same value with a place to
+/// hang a reason off, which is how the leak gets built.
+public enum GitHubDeviceSignIn: Sendable, Equatable {
+    /// Nobody has authorised the code yet; the client should ask again after this many
+    /// seconds.
+    case pending(retryAfterSeconds: Int)
+    /// An owner authorised the code, and this is the login GitHub reports for them — in
+    /// GitHub's casing, since that is what the minted credential is named after.
+    case identified(login: String)
 }
