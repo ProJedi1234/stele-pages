@@ -191,7 +191,8 @@ happens to run the app, which is rarely the machine you chose for durable storag
 | `PUT /pages/:slug` | `publish` | Replaces a stored page's body and content type, returns `{slug, url, expires}` as `200` |
 | `PATCH /pages/:slug` | `publish` | Renames a page with `?slug=` and retimes it with `?ttl=`, leaving its contents alone, returns `{slug, url, expires}` as `200` |
 | `DELETE /pages/:slug` | `publish` | Removes a stored page and frees the slug, returns `204` |
-| `POST /auth/github/exchange` | none — it *is* the authentication | Trades a GitHub access token for a stele credential, returns `{token, client}` as `201`. The token is shown once |
+| `POST /auth/github/device` | none — it *is* the authentication | Starts a GitHub sign-in, returns GitHub's device code and user code as `200` |
+| `POST /auth/github/exchange` | none — it *is* the authentication | Polls a device sign-in with `{deviceCode}`; `202` while it's pending, `201` with `{token, client}` once an owner has authorised it. The token is shown once |
 | `GET /admin/whoami` | any credential | Reports the credential presented — name, scopes, expiry, last use, the GitHub login that minted it — and never a token |
 | `POST /admin/clients` | `admin` | Mints a credential, returns `{token, client}` as `201`. The token is shown once and never again |
 | `GET /admin/clients` | `admin` | Lists credentials — names, scopes, last use, revocation, the GitHub login that minted each — and never a token |
@@ -202,10 +203,11 @@ The auth column names the *scope* a bearer token has to carry; see "Credentials"
 public read surface advertises that the credential routes are there, and `GET /auth` does
 the same.
 
-`POST /auth/github/exchange` is the one route with no credential in front of it that is not
-a public read. It is where a credential comes *from*, so requiring one would be circular —
-what it verifies instead is a GitHub identity, against the operator's allowlist. It is
-argued out under "Credentials" below.
+`POST /auth/github/device` and `POST /auth/github/exchange` are the two routes with no
+credential in front of them that are not a public read. Together they *are* the
+authentication — a credential comes *from* them, so requiring one in front would be
+circular — and what the second one verifies instead is a GitHub identity, against the
+operator's allowlist. Both are argued out under "Credentials" below.
 
 `GET /admin/whoami` is the one route under `/admin` that requires no scope, only a valid
 credential. It is what `stele auth status` asks and what `stele auth login` checks before
@@ -359,33 +361,38 @@ always takes the live one.
 
 **Signing in with GitHub mints a credential without an operator in the loop.** An owner
 gets their own publishing credential without holding `STELE_UPLOAD_TOKEN` at all, and
-without anybody having to hand them one over a channel that keeps it. The client runs
+without anybody having to hand them one over a channel that keeps it. The server proxies
 GitHub's device authorization grant
-([RFC 8628](https://datatracker.ietf.org/doc/html/rfc8628)) itself — asks GitHub for a code,
-the person types it into a browser, the client polls until GitHub hands over an access
-token — and then POSTs that token once to `POST /auth/github/exchange` and discards it. The
-server asks GitHub who the token belongs to, checks the login against `STELE_GITHUB_OWNERS`,
-and answers with a `publish`-scoped credential named after the login: the same
-`{token, client}` body `POST /admin/clients` returns, and the same token shown once and
-never again. The device flow and the command that drives it belong to
-[stele-cli](https://github.com/ProJedi1234/stele-cli) and land there with
-`stele auth login`; what this repository holds today is the exchange, so until that command
-ships the GitHub token has to be obtained by hand.
+([RFC 8628](https://datatracker.ietf.org/doc/html/rfc8628)) itself, and it is the only
+party that ever holds `STELE_GITHUB_CLIENT_ID` — the client never sees it and never sees the
+access token the flow produces. `POST /auth/github/device` asks GitHub for a device code and
+passes the answer straight through: a user code and a verification URL for the person to
+type into a browser, and a device code the client polls with. `POST /auth/github/exchange`
+takes that device code in a `{deviceCode}` body and asks GitHub whether it has been
+authorised yet. While the person hasn't finished, the answer is `202` with an interval to
+wait before asking again — not a refusal, because for as long as somebody is midway through
+typing a code into a browser that is the sign-in working normally, and telling a client
+"refused" at second three would abandon one that was about to succeed. Once GitHub hands
+back an access token, the server asks GitHub who it belongs to, checks the login against
+`STELE_GITHUB_OWNERS`, and answers with a `publish`-scoped credential named after the login:
+the same `{token, client}` body `POST /admin/clients` returns, and the same token shown once
+and never again. The access token itself is born and dies inside that one request — it is
+never written down and never returned to the client. The command that drives both routes is
+[stele-cli](https://github.com/ProJedi1234/stele-cli)'s `stele auth login`.
 
-**The server checks *who* a token identifies, not *which app issued it*.** The exchange
-presents whatever access token it is handed to GitHub's `GET /user` and reads the login off
-the answer, so a classic PAT, a fine-grained PAT and a token minted by some entirely
-different OAuth app all mint a credential provided they identify an owner. The practical
-consequence is worth being plain about: any leaked GitHub credential belonging to a listed
-owner is also a stele publishing credential until that owner revokes it at GitHub. The half
-of that which is easy to miss is that it cuts the other way too — because a sign-in retires
-the live credential holding that login's name, whoever holds the leaked GitHub token can
-sign in repeatedly and kick the owner's own agent off each time. It is a remote stop button
-as much as it is a spare key. Closing
-that gap means asking GitHub whether a token was issued to *this* app
-(`POST /applications/{client_id}/token`), which needs the OAuth app's client secret — this
-deployment has nowhere to hold one, so the check is deliberately not built, and
-`STELE_GITHUB_CLIENT_ID` records the trusted app without yet enforcing it.
+**The server obtains the access token itself, rather than trusting whatever a caller hands
+it, and that closes a gap the earlier exchange left open.** The old shape took a raw GitHub
+access token as its request body and asked GitHub who it belonged to — which meant a
+classic PAT, a fine-grained PAT, or a token minted by some entirely different OAuth app all
+minted a stele credential provided they identified an owner, and any leaked GitHub
+credential belonging to a listed owner was also a leaked stele one until its owner revoked
+it at GitHub. The device flow doesn't accept a token from the caller at all: this server
+requests the token from GitHub itself, using `STELE_GITHUB_CLIENT_ID`, so the token it acts
+on was always issued to the app that ID names. The provenance check the old design was
+missing (`POST /applications/{client_id}/token`, which needs the OAuth app's client secret
+this deployment has nowhere to hold) is no longer needed to close that gap — the server is
+the one requesting the token, not the one trusting an unverified claim about where it came
+from.
 
 **GitHub is in the login path and out of the publish path.** Everything after a sign-in is
 an ordinary stele bearer token, so a GitHub outage cannot stop anybody publishing. It also
@@ -394,14 +401,44 @@ must not be able to *refuse* anybody: an outage is a `500` on the exchange and n
 response to that is to re-authenticate — in a loop, against the one endpoint that cannot
 answer.
 
-**Every refusal is one byte-identical `401`.** A token GitHub rejected, a real GitHub
-account that is not an owner here, and a deployment with no allowlist configured are three
-facts the caller learns none of. The middle one is why: an endpoint that distinguished it
-would be a directory of who owns this deployment, walkable by anyone holding a GitHub token
-of their own — and the README's licence to return distinguishing errors applies to callers
-already behind a credential, which on this route is nobody by construction. A malformed body
-is still its own `400` naming the shape expected, on the same reasoning that keeps a missing
+**Every refusal is one byte-identical `401`, from either route.** A device code GitHub never
+issued, one it will no longer redeem (expired, or the person declined it), a token that
+turned out to belong to a real GitHub account that is not an owner here, a deployment with
+no allowlist configured, and a deployment with no client ID configured are five facts the
+caller learns none of — and it is the same bytes whichever of the two routes produced them,
+because a start route that failed differently from the exchange it feeds would tell a
+prober which half of the setup was missing. The middle two are why the collapse matters: an
+endpoint that distinguished "not an owner" from "no allowlist" would be a directory of who
+owns this deployment, walkable by anyone holding a GitHub account of their own — and the
+README's licence to return distinguishing errors applies to callers already behind a
+credential, which on these routes is nobody by construction. A malformed exchange body is
+still its own `400` naming the shape expected, on the same reasoning that keeps a missing
 `Authorization` header distinguishable: a caller who presented nothing has learned nothing.
+A GitHub outage — unreachable, a `5xx`, or an answer that doesn't parse — is a `500` on
+either route rather than folded into the `401`: an outage read as a refusal sends a
+legitimate owner into a re-authentication loop against the one endpoint that cannot answer
+them.
+
+**The device-code start route is unauthenticated by design, and it can be used to burn
+GitHub's per-app quota on device codes.** Nothing stands between a stranger and
+`POST /auth/github/device` — it has to be that way, since a caller with no credential is
+exactly who this flow exists for — so nothing stops one from calling it repeatedly and
+exhausting the OAuth app's rate limit for minting device codes. The cost of that is a denial
+of sign-in, not a leak: nobody mints a credential they weren't allowed to, and the read and
+write surfaces this route sits beside stay entirely unaffected. It's accepted rather than
+mitigated because this deployment is LAN- and VPN-scoped — see "Before this faces the
+internet" — and worth revisiting the day that stops being true.
+
+**The old exchange — a raw GitHub access token in the request body — is gone, not kept
+alongside the new one.** `POST /auth/github/exchange` reads `{deviceCode}` now; the same
+route with the old `{accessToken}` shape is a `400`, not a `401` — a caller sending it isn't
+being refused a sign-in, they're speaking a body this route no longer parses. That's a
+breaking change for exactly one thing: an older `stele auth login` that still tries the old
+exchange. It doesn't touch anything already minted — a credential signed in under the old
+flow keeps working exactly as it did, because what changed is how the token reaches this
+server, not what the token is once it exists. It also earns no `minimumCLIVersion` bump: that
+gate fires on the write routes an agent's credential actually uses, and this flow is a step
+that happens once, by a person, before any of those requests are made.
 
 **Signing in again rotates.** The live credential under that login's name is revoked and a
 fresh one minted under the same name, which is the only recovery there can be for a lost
@@ -755,16 +792,20 @@ credential that login already holds — credentials are cut off by revoking them
 boot by what the Postgres backend can serve — see "Attachments".
 
 `STELE_GITHUB_CLIENT_ID` records which GitHub OAuth app the deployment trusts (GitHub →
-Settings → Developer settings → OAuth Apps). It is not a secret either. Two things about
-it are worth knowing before reading any further into it: the sign-in is a device flow,
-which has no redirect in it, so **the callback URL GitHub's registration form insists on is
-never used** and there is no handler behind it to go looking for; and the client runs that
-flow itself with its own compiled-in copy of the ID, so setting this variable does not hand
-the client anything. What it records is which app the deployment *intends* to trust — a
-note, not yet a boundary: nothing in the exchange reads it, and until the provenance check
-described under "Credentials" exists, a token from any app identifying an allowlisted owner
-mints a credential. There is deliberately no endpoint that serves the value — one more
-unauthenticated route, to spare the client a constant it already has, is a bad trade.
+Settings → Developer settings → OAuth Apps), and **the app must have "Enable Device Flow"
+ticked** — the sign-in is RFC 8628's device authorization grant, which the app does not
+speak until that box is checked. It is not a secret either. Two more things about it are
+worth knowing before reading any further: the device flow has no redirect in it at all, so
+**the callback URL GitHub's registration form insists on is never used**, and there is no
+handler behind it to go looking for; and this server is the *only* holder of the value —
+`POST /auth/github/device` runs the flow on the client's behalf, so the client ships no copy
+of the ID and setting this variable does not hand the client anything. That is a deliberate
+change from serving the value off an endpoint for the client to use itself, which was the
+earlier shape and put an app credential in every user's binary to save this server two
+outbound requests. Because the server now obtains the access token itself rather than
+trusting a token a caller hands it, this ID is closer to a boundary than it used to be: see
+"Credentials" for what changed and why the provenance check that value's doc comment used
+to gesture at is no longer the gap it was.
 
 ## Deploying
 
@@ -794,6 +835,10 @@ normally with an allowlist that permits nobody. Both compose stacks name them ex
 which is what makes setting them work: Compose interpolates `.env` into the compose file
 rather than handing it to the container, so a variable the compose file does not name never
 reaches the process however plainly it is set.
+
+If you set `STELE_GITHUB_CLIENT_ID`, tick **"Enable Device Flow"** on that OAuth app's
+settings page first — GitHub does not speak RFC 8628 to an app that hasn't opted in, and a
+device sign-in against one that hasn't will fail at GitHub rather than at this server.
 
 Nothing else changes — any unapplied migrations run on boot, exactly as they do locally.
 An existing deployment needs no dump and restore: version 1 describes the schema it
