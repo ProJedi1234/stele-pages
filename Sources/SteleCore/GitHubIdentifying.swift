@@ -223,16 +223,22 @@ extension GitHubIdentifying {
 /// underscores, so this refuses nothing GitHub could have issued.
 ///
 /// It is here, in the shared policy, rather than in the route or in `GitHubAPI`, and that
-/// placement is the whole point. The value arrives from an unauthenticated caller and ends
-/// up interpolated into an `Authorization` header; `AsyncHTTPClient` validates header values
+/// placement is the whole point. The value ends up interpolated into an `Authorization`
+/// header; `AsyncHTTPClient` validates header values
 /// before it opens a socket and *throws* on a control character, which the seam's contract
-/// then reads as "the question could not be asked" — so `{"accessToken": "gho_x\ny"}` would
-/// answer `500`, the one status on this route reserved for a GitHub outage, to anyone who
+/// then reads as "the question could not be asked" — so a token carrying a stray newline
+/// would answer `500`, the status reserved for a GitHub outage, to anyone who
 /// cared to ask for it. A token that cannot legally go in a header is definitionally one
 /// GitHub never issued, so the honest answer is the same refusal every other unusable token
 /// gets. Checking it in the extension means no conformer can be handed a value it cannot
 /// carry, and the refusal collapses into the single nil rather than becoming a second shape
 /// the handler has to keep byte-identical.
+///
+/// Since the device flow, no unauthenticated caller supplies a token at all — the one this
+/// guards reaches it from `redeemDeviceCode`, which is to say from GitHub. The check stays
+/// because the reasoning does not depend on where the value came from, and because
+/// `owner(redeeming:allowedBy:)` runs it over the *device code*, which is once again a value
+/// a stranger chose.
 ///
 /// The empty token folds in here for the same reason and saves a pointless round trip on the
 /// way.

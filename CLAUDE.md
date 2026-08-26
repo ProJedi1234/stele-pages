@@ -146,37 +146,68 @@ the raw bytes rather than on a decoded shape, so a field a future `Encodable` co
 adds by accident is caught. `ScopeEnforcementTests` covers the other half — which valid
 credentials are refused, and with which status code.
 
-`GitHubIdentifyingTests` covers the seam's shared policy — `owner(presenting:allowedBy:)` —
+`GitHubIdentifyingTests` covers the seam's two shared policies — `owner(presenting:allowedBy:)`
+and its device-flow sibling `owner(redeeming:allowedBy:)` —
 directly rather than through a route, and the route tests below do not make it redundant.
-What a caller observes is one `401`, so a test at that level can only prove four paths *look*
+What a caller observes is one `401`, so a test at that level can only prove the paths *look*
 alike; there each path is named and pinned to nil individually, so an edit that reintroduces a
 distinction fails with a message saying which one came back.
 `aTokenThatCouldNotBePresentedIsRefusedWithoutAskingGitHub` is the one to read twice: it
 asserts nil against a conformer that *throws*, which is the only way to say "the primitive was
-never called".
+never called". The device half adds the one case that must **not** collapse: `.pending` is
+kept out of the nil deliberately, and a `slow_down` is pinned as a bigger number rather than a
+new shape — a client told "refused" while somebody is still typing a code into a browser
+abandons a sign-in that was going to succeed.
 
-`GitHubExchangeTests` covers the sign-in route, and its centre of gravity is the refusals
+`GitHubExchangeTests` covers **both** sign-in routes — `POST /auth/github/device` and
+`POST /auth/github/exchange` — and its centre of gravity is the refusals
 rather than the mint. `everyRefusalIsOneByteIdentical401` compares whole `Rejection`s across
-five shapes — a token GitHub does not know, a real account that is not an owner, a token
-that could not be presented to GitHub at all, an empty token, and a valid owner against a
-deployment with no allowlist — and the last is the fail-closed acceptance seen from outside. `Rejection` itself moved out of `ClientAuthTests`
+seven shapes — a device code GitHub never issued, one it will not redeem, one belonging to a
+real account that is not an owner, one that could not be presented to GitHub at all, an empty
+one, a valid owner's code against a deployment with no allowlist, and a *start* against a
+deployment with no client ID. The last two are the fail-closed acceptance seen from outside,
+and the last one is why the two routes are asserted in one comparison rather than two:
+separately each is uniform, and a start route answering `503` beside an exchange answering
+`401` would tell a prober which half of the setup was missing. `Rejection` itself moved out of `ClientAuthTests`
 into `TestFixture` for that test: two surfaces now defend byte-identity, and two copies of a
 drift detector is its own drift — the copy that quietly stops comparing headers is the one
 nobody notices. `gitHubBeingUnreachableIsA500NotA401` is the counterweight and asserts the
-inequality explicitly, because "it is a 401" is what a well-meaning simplification of the
-seam's nil-versus-throw contract would produce. `InMemoryGitHub` implements the seam's one
-primitive and nothing else, so what these exercise is the shared policy rather than a
-reimplementation of it, and a second file-private conformer that throws stands in for the
-outage. That throwing conformer does double duty in
-`aTokenThatCouldNotBePresentedIsRefusedWithoutAskingGitHub`, where a `401` for a token
-carrying a newline proves the seam was never asked — the guard that produces it is the
-reason such a token is not a `500`, and a `500` there would be an unauthenticated caller
-manufacturing the one signal that means GitHub is down. Nothing here reaches the network,
+inequality explicitly on both routes, because "it is a 401" is what a well-meaning
+simplification of the
+seam's nil-versus-throw contract would produce — and the start route is where that
+simplification is likeliest, since its refusal is a nil and its outage a throw from the same
+call. `InMemoryGitHub` implements the seam's three
+primitives and nothing else, so what these exercise is the shared policy rather than a
+reimplementation of it, and two file-private conformers stand in for what is not an answer: one
+that throws everywhere, for the outage, and `ConfusedGitHub`, which throws
+`unexpectedOAuthError` so the route half of "an undocumented `error` string is a 500, not a
+refusal" is pinned where an operator would feel it. The throwing conformer does double duty in
+`aDeviceCodeThatCouldNotBePresentedIsRefusedWithoutAskingGitHub`, where a `401` for a code
+carrying a newline proves the seam was never asked. Nothing here reaches the network,
 which is the property that makes the suite worth having at all.
 
-`GitHubAPITests` is the exception to that arrangement and covers the one decision inside
+Four assertions in it are the ones to leave alone. `theGitHubAccessTokenNeverLeavesTheServer`
+scans the raw bytes of every response a sign-in produces for the token GitHub minted — the
+whole reason the flow was reshaped is that the token is born and dies inside one handler, and
+the failure it guards against is a *convenience*: a handler that returned what GitHub gave it,
+or an error that quoted the value it could not use. `theOldAccessTokenBodyIsA400NotARefusal`
+pins the migration: the body used to be `{"accessToken": …}`, and a `401` for it would tell
+somebody running an older CLI that their GitHub account was refused and send them auditing an
+allowlist over what is an upgrade. `aPendingSignInIsA202CarryingTheInterval` and
+`slowDownIsABiggerIntervalRatherThanANewShape` are the waiting half, and the second compares
+whole responses minus `content-length` so that a `Retry-After` on one branch only would fail
+there. And `aStartSucceedsWithNoAllowlistAndThePollStillRefuses` records the asymmetry that
+reads like a bug: the *start* route does not consult `STELE_GITHUB_OWNERS`, because nobody has
+authorised anything yet and refusing there would announce that the variable is unset.
+
+`GitHubAPITests` is the exception to that arrangement and covers the two decisions inside
 `GitHubAPI`: `verdict(forStatus:)`, which says which of GitHub's answers is a verdict on the
-presented token and which is GitHub declining to answer. That mapping is the load-bearing
+presented token and which is GitHub declining to answer, and `verdict(forOAuthError:)`, which
+does the same over the `error` string GitHub returns *inside a 200* when a device code is
+redeemed — so the status code says nothing there and this function says everything. Its two
+misconfiguration arms are the ones that look wrong: `unsupported_grant_type` and
+`incorrect_client_credentials` are outages rather than refusals, because they mean the
+deployment is wrong and the person signing in cannot act on either. That mapping is the load-bearing
 half of the seam's nil-versus-throw contract and `InMemoryGitHub` is a dictionary standing
 beside it rather than a check on it — the same relationship `InMemoryPageStore.hasExpired`
 has with `PageStore`'s SQL. Widening `rejected` past `401` is the silent edit it exists to
@@ -360,23 +391,34 @@ gap, asserted today only against the in-memory fake.
   authenticated group it would answer `401`, which advertises exactly where the
   credential-minting routes live. Register the stub outside the group. `/auth` is the third
   instance, and the only one whose stub is outside a group because there is no group.
-- **`POST /auth/github/exchange` is the one write that belongs in no group at all, because
-  it *is* the authentication.** The caller is there precisely because they hold no stele
-  credential, so a `BearerTokenMiddleware` in front of it would demand the thing it issues,
+- **`POST /auth/github/device` and `POST /auth/github/exchange` are the two writes that
+  belong in no group at all, because together they *are* the authentication.** The caller is
+  there precisely because they hold no stele
+  credential, so a `BearerTokenMiddleware` in front of either would demand the thing they
+  issue,
   and `RequireScopeMiddleware` would ask about scopes on a request with no credential to
-  have them. What it hands out carries `publish` and only `publish`, so an owner walks away
+  have them. What the exchange hands out carries `publish` and only `publish`, so an owner
+  walks away
   with a credential that can neither mint nor revoke — the route itself does revoke, which is
   a different sentence and is argued out under repeat sign-in below.
-  `MinimumCLIVersionMiddleware` is off it too, and that is the omission
+  `MinimumCLIVersionMiddleware` is off both too, and that is the omission
   most likely to be "fixed": the gate is registered *after* authentication everywhere else
   so it never answers an unauthenticated prober, and here it would also gate the bootstrap
   on the thing being bootstrapped —
-  `GitHubExchangeTests.theExchangeIsNotVersionGated` is what notices it coming back. GitHub
-  goes behind `GitHubIdentifying` on the `PageStoring`/`ClientStoring` pattern: the primitive
-  (`login(forAccessToken:)`) is per-conformer, the policy (`owner(presenting:allowedBy:)`) is
-  in the extension, and `InMemoryGitHub` is what keeps `swift test` off the network. The bare
-  `/auth` segment gets the uniform-404 stub; `/auth/github` deliberately gets none, because a
-  two-segment path can never be a slug — the `noAuthLeaksUnderPages` reasoning.
+  `GitHubExchangeTests.neitherSignInRouteIsVersionGated` is what notices it coming back.
+  **The start route reads no request body at all**, which is a decision and not an omission:
+  the client ID is the server's, the scope is fixed at empty, and every other field GitHub's
+  endpoint takes is one an unauthenticated stranger would then get to choose. GitHub
+  goes behind `GitHubIdentifying` on the `PageStoring`/`ClientStoring` pattern: the primitives
+  (`login(forAccessToken:)`, `requestDeviceCode()`, `redeemDeviceCode(_:)`) are per-conformer,
+  the policies (`owner(presenting:allowedBy:)`, `owner(redeeming:allowedBy:)`) are
+  in the extension, and `InMemoryGitHub` is what keeps `swift test` off the network. The
+  client ID lives on the conformer rather than in a parameter, so there is one place in the
+  process it enters and no signature inviting a caller to supply their own. The bare
+  `/auth` segment gets the uniform-404 stub; `/auth/github` and `/auth/github/device`
+  deliberately get none, because a
+  path of two segments or more can never be a slug — the `noAuthLeaksUnderPages` reasoning,
+  which `NotFoundTests.noAuthLeaksUnderTheSignInRoutes` now asserts at both depths.
 - **A write route belongs in a group whose middleware carries the scope it needs.**
   `RequireScopeMiddleware(.publish)` gates `/pages`; `RequireScopeMiddleware(.admin)` gates
   `/admin`. Both sit *after* `BearerTokenMiddleware` in the group and read the `Client` it
@@ -562,7 +604,7 @@ Don't "fix" these without a reason; the README argues them out in full.
   per-client tokens, resolving to the synthesised `Client.sharedToken` — `admin`-scoped,
   `id` 0, no row in `clients`. That is the bootstrap: minting the first `admin`-scoped
   credential needs a credential you cannot otherwise have yet. A `publish` one has a second
-  way in since the GitHub exchange landed — which mints `publish` and only `publish`, so the
+  way in since the GitHub sign-in landed — which mints `publish` and only `publish`, so the
   shared token is still the only door into the rest. Its `id` is never a
   foreign key; a page it publishes has no owner to record.
 - **`STELE_GITHUB_OWNERS` fails closed and is still optional at boot; those are not in
@@ -574,7 +616,13 @@ Don't "fix" these without a reason; the README argues them out in full.
   bullet above is: demanding it would fail the next boot of every deployment that has not
   adopted GitHub sign-in, over a feature they do not use. It is the sign-in that refuses,
   not the process, and the asymmetry with `STELE_UPLOAD_TOKEN` is the point of it rather
-  than an oversight in it.
+  than an oversight in it. **`STELE_GITHUB_CLIENT_ID` is the same variable twice over**: also
+  optional at boot, also fail-closed at the route, and refusing with the *same bytes* — a
+  deployment missing it cannot start a device sign-in, and says so with the 401 every other
+  terminal refusal uses rather than anything that sounds like configuration. The one place an
+  operator is told which half is missing is the boot log's `github sign-in` line, which now
+  reports `configured` (both halves) beside `client_id` and `allowlist` separately, because
+  once it says false that is the only question left and the routes will not answer it.
 - **Every rejected credential gets one byte-identical 401.** Unknown, revoked, expired and
   a mistyped shared token are four facts the caller learns none of.
   `ClientStoring.authenticate` collapses the first three to nil before the middleware sees
@@ -583,20 +631,40 @@ Don't "fix" these without a reason; the README argues them out in full.
   one is not behind it. A *missing* `Authorization` header keeps its own message — a caller
   who presented nothing has learned nothing.
 - **Every refused GitHub sign-in gets one byte-identical 401; a GitHub outage gets a 500.**
-  "GitHub rejected that token", "that is a real account and not an owner here" and "no
-  allowlist is configured" collapse to one nil inside
-  `GitHubIdentifying.owner(presenting:allowedBy:)` — the same move
+  "GitHub never issued that device code", "it expired", "the person declined it", "that is a
+  real account and not an owner here", "no
+  allowlist is configured" and "no client ID is configured" collapse to one nil inside
+  `GitHubIdentifying.owner(redeeming:allowedBy:)` — the same move
   `ClientStoring.authenticate` makes — so the handler never holds a shape to branch on and
-  there is exactly one `throw` site. Distinguishing the middle case would make the route an
-  oracle for who owns the deployment, walkable by anyone with a GitHub token of their own,
+  there is exactly one `throw` site *per route*, both constructing the same `HTTPError`.
+  Distinguishing the fourth case would make the route an
+  oracle for who owns the deployment, walkable by anyone with a GitHub account of their own,
   and the caller is unauthenticated by construction so the licence to return distinguishing
   errors does not reach here. The outage half is the one that looks wrong and is not: a
   thrown error propagates to a `500` rather than being folded into the refusal, because a
   `401` during a GitHub outage tells a legitimate owner their login was refused and sends
   them round a re-authentication loop. A malformed body keeps its own `400` on the
-  missing-`Authorization`-header rule. `GitHubExchangeTests.everyRefusalIsOneByteIdentical401`
+  missing-`Authorization`-header rule, and so does the *old* `{"accessToken": …}` body — a
+  client that has not been upgraded is not a sign-in that was refused.
+  `GitHubExchangeTests.everyRefusalIsOneByteIdentical401`
   compares whole responses — headers included, since a `content-length` two bytes apart is
-  the same leak.
+  the same leak — and includes the start route's refusal in that comparison, because two
+  uniform routes can still leak in aggregate.
+- **A poll that nobody has authorised yet is a `202`, not a `401` and not a `200`.**
+  `.pending(retryAfterSeconds:)` is deliberately kept out of the collapse above and is the
+  state the flow spends nearly all its wall-clock time in: somebody is typing a code into a
+  browser. The body carries GitHub's interval and nothing else, and `slow_down` is that number
+  getting bigger rather than a case of its own — a distinct status or an extra field would be
+  a branch every client has to write and none can do anything useful with. Reading pending as
+  a refusal ends a sign-in that was going to succeed; reading a refusal as pending leaves a
+  CLI polling a dead code until it times out.
+- **The device flow keeps GitHub's access token inside one request, and the `device_code`
+  outside every one of them.** The server stores nothing between the start and the poll: the
+  device code goes out in the start response and comes back in each poll body, so there is no
+  session table, no sweeper and nothing to expire but GitHub's own code. The access token that
+  decides the sign-in is fetched, spent against `owner(presenting:allowedBy:)` and discarded
+  inside the exchange handler — it is never returned, logged or stored, which is what
+  `theGitHubAccessTokenNeverLeavesTheServer` asserts on raw bytes.
 - **A repeat GitHub sign-in revokes and re-mints under the same name.** It is not a `409`
   and not a no-op: the live credential holding the login's name is revoked, then a fresh one
   minted under it, which is the only recovery available for a lost token because the
