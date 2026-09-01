@@ -13,26 +13,15 @@
 
 name: CI
 
-# Only run when something the build actually consumes changes. The workflow file
-# itself is on the list so edits to the CI still get exercised by the CI. If this
-# check ever becomes required by branch protection, drop the filters — a required
-# check that is skipped by a path filter leaves the PR blocked forever.
+# Runs on every push to main and every pull request, with no path filtering.
+# This check is required by branch protection, and a required check that a path
+# filter skips is never reported at all — which leaves the PR blocked forever,
+# with nothing the author can do to satisfy it. Paying for a few redundant runs
+# on docs-only changes is the cheaper side of that trade.
 on:
   push:
     branches: [main]
-    paths:
-      - 'Sources/**'
-      - 'Tests/**'
-      - 'Package.swift'
-      - 'Package.resolved'
-      - '.github/workflows/ci.yml'
   pull_request:
-    paths:
-      - 'Sources/**'
-      - 'Tests/**'
-      - 'Package.swift'
-      - 'Package.resolved'
-      - '.github/workflows/ci.yml'
 
 # A force-push or rapid follow-up commit obsoletes the running build; finish only the
 # newest one per ref.
