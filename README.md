@@ -876,3 +876,7 @@ has its own scoped, expirable, revocable token, and the shared token has been de
 the operator's bootstrap credential — see "Credentials". The `pages.client_id` column that
 records *which* credential published a page exists and is still unwritten, so attribution
 is the remaining half of that item.
+
+## License
+
+[MIT](LICENSE)
