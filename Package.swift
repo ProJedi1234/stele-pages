@@ -10,6 +10,7 @@ let package = Package(
         .library(name: "SteleCore", targets: ["SteleCore"]),
     ],
     dependencies: [
+        .package(url: "https://github.com/swift-server/swift-service-lifecycle.git", from: "2.11.0"),
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.26.0"),
         .package(url: "https://github.com/vapor/postgres-nio.git", from: "1.33.1"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.6.0"),
@@ -33,6 +34,7 @@ let package = Package(
             name: "SteleCore",
             dependencies: [
                 .product(name: "Hummingbird", package: "hummingbird"),
+                .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
                 .product(name: "PostgresNIO", package: "postgres-nio"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "NIOSSL", package: "swift-nio-ssl"),
