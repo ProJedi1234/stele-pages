@@ -36,6 +36,8 @@ public enum PageContent: Sendable, Equatable {
 
 /// A stored page, as read back from the database.
 public struct Page: Sendable, Equatable {
+    public var id: UUID
+    public var revision: Int64
     public var slug: Slug
     public var content: PageContent
     public var contentType: String
@@ -56,6 +58,20 @@ public struct Page: Sendable, Equatable {
     /// answers with the body and its type, and who published a page is the operator's
     /// question, not the reader's.
     public var clientID: Int64?
+
+    public init(
+        id: UUID = UUID(), revision: Int64 = 1, slug: Slug, content: PageContent,
+        contentType: String, createdAt: Date, expiresAt: Date?, clientID: Int64?
+    ) {
+        self.id = id
+        self.revision = revision
+        self.slug = slug
+        self.content = content
+        self.contentType = contentType
+        self.createdAt = createdAt
+        self.expiresAt = expiresAt
+        self.clientID = clientID
+    }
 }
 
 /// One page as the index reports it: everything the landing page shows about a page, and
@@ -128,7 +144,7 @@ public struct PageStore: Sendable {
         // and it is one an incautious `SELECT b.*` would silently give back.
         let rows = try await client.query(
             """
-            SELECT p.kind, p.body, p.content_type, p.filename, p.created_at,
+            SELECT p.id, p.revision, p.kind, p.body, p.content_type, p.filename, p.created_at,
                    p.expires_at, p.client_id, b.byte_size, b.digest
             FROM pages p LEFT JOIN page_blobs b ON b.slug = p.slug
             WHERE p.slug = \(slug.value)
@@ -150,12 +166,14 @@ public struct PageStore: Sendable {
         // reason: exactly one side of that pair is populated in any row, and which one is
         // what `kind` says. Decoding either as non-optional would compile and then throw on
         // precisely the rows the other kind produces.
-        for try await (kind, body, contentType, filename, createdAt, expiresAt, clientID,
+        for try await (id, revision, kind, body, contentType, filename, createdAt, expiresAt, clientID,
                        byteSize, digest) in rows.decode(
-            (String, String?, String, String?, Date, Date?, Int64?, Int64?, String?).self,
+            (UUID, Int64, String, String?, String, String?, Date, Date?, Int64?, Int64?, String?).self,
             context: .default
         ) {
             return Page(
+                id: id,
+                revision: revision,
                 slug: slug,
                 content: try Self.content(
                     kind: kind, slug: slug, body: body,
@@ -166,6 +184,24 @@ public struct PageStore: Sendable {
                 expiresAt: expiresAt,
                 clientID: clientID
             )
+        }
+        return nil
+    }
+
+    public func fetchLiveState(slug: Slug) async throws -> PageLiveState? {
+        let rows = try await client.query(
+            """
+            SELECT id, revision, expires_at
+            FROM pages
+            WHERE slug = \(slug.value)
+              AND (expires_at IS NULL OR expires_at > now())
+            """,
+            logger: logger
+        )
+        for try await (id, revision, expiresAt) in rows.decode(
+            (UUID, Int64, Date?).self, context: .default
+        ) {
+            return PageLiveState(id: id, revision: revision, expiresAt: expiresAt)
         }
         return nil
     }
@@ -528,7 +564,7 @@ public struct PageStore: Sendable {
         // SQL, so this uses it.
         let query: PostgresQuery = if let length {
             """
-            SELECT p.content_type, p.filename, b.byte_size, b.digest,
+            SELECT p.content_type, p.filename, b.byte_size, b.digest, p.revision,
                    substring(b.bytes FROM \(start) FOR \(length))
             FROM page_blobs b JOIN pages p ON p.slug = b.slug
             WHERE b.slug = \(slug.value)
@@ -536,7 +572,7 @@ public struct PageStore: Sendable {
             """
         } else {
             """
-            SELECT p.content_type, p.filename, b.byte_size, b.digest,
+            SELECT p.content_type, p.filename, b.byte_size, b.digest, p.revision,
                    substring(b.bytes FROM \(start))
             FROM page_blobs b JOIN pages p ON p.slug = b.slug
             WHERE b.slug = \(slug.value)
@@ -546,8 +582,8 @@ public struct PageStore: Sendable {
 
         let rows = try await client.query(query, logger: logger)
 
-        for try await (contentType, filename, byteSize, digest, bytes) in rows.decode(
-            (String, String?, Int64, String, Data).self, context: .default
+        for try await (contentType, filename, byteSize, digest, revision, bytes) in rows.decode(
+            (String, String?, Int64, String, Int64, Data).self, context: .default
         ) {
             return PageBlobSlice(
                 bytes: Array(bytes),
@@ -556,7 +592,8 @@ public struct PageStore: Sendable {
                 // The size of the *whole* attachment, not of the slice — a `206` has to
                 // report both, and only one of them is `bytes.count`.
                 totalSize: Int(byteSize),
-                digest: digest
+                digest: digest,
+                revision: revision
             )
         }
         return nil
@@ -972,6 +1009,68 @@ extension PageStore {
                 // line and a decompress-from-the-start without it. Video and images arrive
                 // compressed anyway, so what EXTENDED would buy on this column is nothing.
                 "ALTER TABLE page_blobs ALTER COLUMN bytes SET STORAGE EXTERNAL",
+            ]
+        ),
+        Migration(
+            version: 7,
+            statements: [
+                "ALTER TABLE pages ADD COLUMN id uuid NOT NULL DEFAULT gen_random_uuid()",
+                "ALTER TABLE pages ADD CONSTRAINT pages_id_key UNIQUE (id)",
+                "ALTER TABLE pages ADD COLUMN revision bigint NOT NULL DEFAULT 1",
+                """
+                CREATE FUNCTION stele_prepare_page_change() RETURNS trigger AS $$
+                BEGIN
+                    IF TG_OP = 'UPDATE' THEN
+                        NEW.id := OLD.id;
+                        NEW.revision := OLD.revision + 1;
+                    END IF;
+                    RETURN NEW;
+                END
+                $$ LANGUAGE plpgsql
+                """,
+                """
+                CREATE TRIGGER pages_prepare_change
+                BEFORE UPDATE ON pages
+                FOR EACH ROW EXECUTE FUNCTION stele_prepare_page_change()
+                """,
+                """
+                CREATE FUNCTION stele_notify_page_change() RETURNS trigger AS $$
+                BEGIN
+                    PERFORM pg_notify('stele_page_changes',
+                        CASE WHEN TG_OP = 'DELETE' THEN OLD.id::text ELSE NEW.id::text END);
+                    RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+                END
+                $$ LANGUAGE plpgsql
+                """,
+                """
+                CREATE TRIGGER pages_notify_change
+                AFTER INSERT OR UPDATE OR DELETE ON pages
+                FOR EACH ROW EXECUTE FUNCTION stele_notify_page_change()
+                """,
+                """
+                CREATE FUNCTION stele_bump_page_for_blob() RETURNS trigger AS $$
+                BEGIN
+                    UPDATE pages SET revision = revision
+                    WHERE slug = CASE WHEN TG_OP = 'DELETE' THEN OLD.slug ELSE NEW.slug END;
+                    RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+                END
+                $$ LANGUAGE plpgsql
+                """,
+                """
+                CREATE TRIGGER page_blobs_bump_page_insert
+                AFTER INSERT ON page_blobs
+                FOR EACH ROW EXECUTE FUNCTION stele_bump_page_for_blob()
+                """,
+                """
+                CREATE TRIGGER page_blobs_bump_page_update
+                AFTER UPDATE OF bytes, byte_size, digest ON page_blobs
+                FOR EACH ROW EXECUTE FUNCTION stele_bump_page_for_blob()
+                """,
+                """
+                CREATE TRIGGER page_blobs_bump_page_delete
+                AFTER DELETE ON page_blobs
+                FOR EACH ROW EXECUTE FUNCTION stele_bump_page_for_blob()
+                """,
             ]
         ),
     ]

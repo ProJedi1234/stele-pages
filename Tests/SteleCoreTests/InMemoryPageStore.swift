@@ -111,6 +111,11 @@ actor InMemoryPageStore: PageStoring {
         return page
     }
 
+    func fetchLiveState(slug: Slug) async throws -> PageLiveState? {
+        guard let page = pages[slug], !hasExpired(page) else { return nil }
+        return PageLiveState(id: page.id, revision: page.revision, expiresAt: page.expiresAt)
+    }
+
     /// Mirrors `PageStore.fetchBlob`, expiry predicate included — an expired attachment is
     /// nil here exactly as it is there, which is what keeps `/static` and `GET /:slug`
     /// agreeing about when a page stops existing.
@@ -142,7 +147,8 @@ actor InMemoryPageStore: PageStoring {
             contentType: page.contentType,
             filename: filename,
             totalSize: bytes.count,
-            digest: digest
+            digest: digest,
+            revision: page.revision
         )
     }
 
@@ -194,6 +200,8 @@ actor InMemoryPageStore: PageStoring {
         }
 
         pages[slug] = Page(
+            id: existing.id,
+            revision: existing.revision + 1,
             slug: slug,
             content: content(of: body),
             contentType: resolvedContentType,
@@ -276,6 +284,8 @@ actor InMemoryPageStore: PageStoring {
         // while `fetch` still described it.
         if let bytes = blobs.removeValue(forKey: slug) { blobs[target] = bytes }
         pages[target] = Page(
+            id: existing.id,
+            revision: existing.revision + 1,
             slug: target,
             content: existing.content,
             contentType: existing.contentType,
