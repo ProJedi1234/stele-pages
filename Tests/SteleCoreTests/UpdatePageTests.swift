@@ -42,7 +42,7 @@ struct UpdatePageTests {
     ) async throws {
         try await client.execute(uri: "/\(slugName)", method: .get) { response in
             #expect(response.status == .ok)
-            #expect(String(buffer: response.body) == original)
+            #expect(TestFixture.uploadedBody(response.body) == original)
             #expect(response.headers[.contentType] == contentType)
             #expect(response.headers[.xContentTypeOptions] == "nosniff")
         }
@@ -284,7 +284,7 @@ struct UpdatePageTests {
 
             try await client.execute(uri: "/\(Self.slugName)", method: .get) { response in
                 #expect(response.status == .ok)
-                #expect(String(buffer: response.body) == replacement)
+                #expect(TestFixture.uploadedBody(response.body) == replacement)
                 #expect(response.headers[.contentType] == "text/markdown; charset=utf-8")
                 #expect(response.headers[.xContentTypeOptions] == "nosniff")
             }
@@ -311,7 +311,7 @@ struct UpdatePageTests {
 
             try await client.execute(uri: "/\(Self.slugName)", method: .get) { response in
                 #expect(response.status == .ok)
-                #expect(String(buffer: response.body) == replacement)
+                #expect(TestFixture.uploadedBody(response.body) == replacement)
                 #expect(response.headers[.contentType] == "text/markdown; charset=utf-8")
             }
         }

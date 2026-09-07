@@ -227,6 +227,17 @@ struct PublishSkill: Sendable {
         </html>
         ```
 
+        ### Automatic reload
+
+        Published HTML and attachment viewers reload automatically when that page changes.
+        Stele adds the client while serving HTML; your stored upload stays unchanged.
+        If the page has forms, playback, or other state that a reload would discard, put
+        `<meta name="stele-live" content="off">` in its head to disable automatic reload.
+        Scroll position is restored where possible. Other interaction state is not saved.
+        Pages with JavaScript disabled or a CSP that blocks the client need manual refresh.
+        Updating a separately published attachment does not reload HTML that embeds it.
+        Revisions detect changes; they do not retain old content or provide undo.
+
         ## 3. Style it with the shared stylesheet
 
         ```html

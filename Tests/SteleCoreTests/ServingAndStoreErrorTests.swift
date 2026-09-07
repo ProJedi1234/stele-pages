@@ -29,7 +29,7 @@ struct ServingAndStoreErrorTests {
         try await TestFixture.makeApp(store: store).test(.router) { client in
             try await client.execute(uri: "/\(slug.value)", method: .get) { response in
                 #expect(response.status == .ok)
-                #expect(String(buffer: response.body) == body)
+                #expect(TestFixture.uploadedBody(response.body) == body)
                 #expect(response.headers[.contentType] == contentType)
                 #expect(response.headers[.xContentTypeOptions] == "nosniff")
                 // Pages are replaceable in place and carry no validator, so the read
@@ -63,7 +63,7 @@ struct ServingAndStoreErrorTests {
             }
 
             try await client.execute(uri: "/\(slug.value)", method: .get) { response in
-                #expect(String(buffer: response.body) == original)
+                #expect(TestFixture.uploadedBody(response.body) == original)
             }
         }
     }

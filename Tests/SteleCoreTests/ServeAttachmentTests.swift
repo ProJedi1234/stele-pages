@@ -214,7 +214,7 @@ struct ServeAttachmentTests {
         }
     }
 
-    /// The ETag is the stored digest, and a matching `If-None-Match` gets a bodyless `304`.
+    /// The ETag includes the stored digest and page revision, and a matching `If-None-Match` gets a bodyless `304`.
     ///
     /// This is what makes an embedded image free to re-request on every page load: the
     /// bytes are mutable, so the response cannot be cached outright, but revalidating a
@@ -226,7 +226,7 @@ struct ServeAttachmentTests {
                 uri: "/static/\(slug.value)", method: .get
             ) { response -> String in
                 let etag = try #require(response.headers[.eTag])
-                #expect(etag == "\"\(PageStore.digest(of: Self.bytes))\"")
+                #expect(etag == "\"\(PageStore.digest(of: Self.bytes))-1\"")
                 return etag
             }
 

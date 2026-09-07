@@ -394,7 +394,8 @@ public func buildRouter(
     configuration: Configuration,
     store: some PageStoring,
     clients: some ClientStoring,
-    github: some GitHubIdentifying
+    github: some GitHubIdentifying,
+    liveEvents: LivePageEvents = LivePageEvents()
 ) -> Router<SteleRequestContext> {
     let generator = SlugGenerator(wordCount: configuration.slugWords)
     // Explicit context type: the routes carry the authenticated `Client` on it, and the
@@ -434,6 +435,22 @@ public func buildRouter(
             status: .ok,
             html: landingPage(baseURL: configuration.baseURL, recent: recent)
         )
+    }
+
+    router.get("/pages/:slug/events") { request, context -> Response in
+        guard let raw = context.parameters.get("slug"),
+              let slug = try? Slug(custom: raw),
+              let rawID = request.uri.queryParameters["id"],
+              let pageID = UUID(uuidString: String(rawID))
+        else { return LivePageResponse.missing() }
+        guard let state = try await store.fetchLiveState(slug: slug), state.id == pageID else {
+            return LivePageResponse.missing()
+        }
+        do {
+            return try await LivePageResponse.response(slug: slug, pageID: pageID, store: store, events: liveEvents)
+        } catch LivePageEvents.SubscriptionError.capacityReached {
+            throw HTTPError(.serviceUnavailable)
+        }
     }
 
     router.group(RouterPath(ServerRoute.pages))
@@ -1130,7 +1147,7 @@ public func buildRouter(
         // The digest quoted into an entity-tag. Strong, because it identifies the bytes
         // exactly — it came from them — and revalidation is what makes an embedded image
         // free to re-request on every page load without re-sending it.
-        let etag = "\"\(slice.digest)\""
+        let etag = "\"\(slice.digest)-\(slice.revision)\""
         if ifNoneMatchHits(request.headers[.ifNoneMatch], etag: etag) {
             return Response(
                 status: .notModified,
@@ -1200,7 +1217,7 @@ public func buildRouter(
         htmlResponse(status: .notFound, html: notFoundPage())
     }
 
-    router.get("/:slug") { _, context -> Response in
+    router.get("/:slug") { request, context -> Response in
         guard let raw = context.parameters.get("slug"),
               let slug = try? Slug(custom: raw),
               let page = try await store.fetch(slug: slug)
@@ -1208,6 +1225,11 @@ public func buildRouter(
             // Anything that isn't a live page gets the same 404, whether the slug was
             // malformed, reserved, or simply absent. Distinguishing them would let a
             // scanner map the namespace faster than guessing.
+            return htmlResponse(status: .notFound, html: notFoundPage())
+        }
+
+        if let expectedID = request.uri.queryParameters["__stele_page"],
+           UUID(uuidString: String(expectedID)) != page.id {
             return htmlResponse(status: .notFound, html: notFoundPage())
         }
 
@@ -1223,7 +1245,7 @@ public func buildRouter(
             }
             return htmlResponse(
                 status: .ok,
-                html: attachmentPage(
+                html: LivePage.inject(html: attachmentPage(
                     slug: slug,
                     contentType: page.contentType,
                     filename: filename,
@@ -1231,7 +1253,7 @@ public func buildRouter(
                     createdAt: page.createdAt,
                     expiresAt: page.expiresAt,
                     baseURL: configuration.baseURL
-                ),
+                ), slug: slug, id: page.id, revision: page.revision),
                 // The same reasoning the text branch below states, and it applies here for
                 // an extra reason: this page is *derived*. A `PUT` changes the size and the
                 // filename it prints and a `PATCH` changes the deadline, all without moving
@@ -1255,7 +1277,11 @@ public func buildRouter(
                 // bytes with nothing for the caller to bust it with.
                 .cacheControl: "no-cache",
             ],
-            body: .init(byteBuffer: ByteBuffer(string: body))
+            body: .init(byteBuffer: ByteBuffer(string:
+                page.contentType.split(separator: ";", maxSplits: 1).first == "text/html"
+                    ? LivePage.inject(html: body, slug: slug, id: page.id, revision: page.revision)
+                    : body
+            ))
         )
     }
 
@@ -1768,11 +1794,13 @@ public func buildApplication(
     // ID enters the process. Beyond that value it holds nothing — no connection pool, no
     // lifetime — because it makes its requests through `HTTPClient.shared`, so unlike
     // `postgresClient` there is no service to register and nothing to shut down.
+    let liveEvents = LivePageEvents()
     let router = buildRouter(
         configuration: configuration,
         store: store,
         clients: clients,
-        github: GitHubAPI(clientID: configuration.githubClientID)
+        github: GitHubAPI(clientID: configuration.githubClientID),
+        liveEvents: liveEvents
     )
 
     var app = Application(
@@ -1786,6 +1814,7 @@ public func buildApplication(
     // Registering the client as a service hands its connection-pool lifetime to the
     // same graceful-shutdown path as the HTTP server, so neither outlives the other.
     app.addServices(postgresClient)
+    app.addServices(PageChangeListener(client: postgresClient, events: liveEvents, logger: logger))
     app.beforeServerStarts {
         logger.info("connecting to postgres", metadata: ["target": "\(configuration.databaseDescription)"])
         // Migrating here, before the server binds, is what keeps "there is no migrate

@@ -75,7 +75,7 @@ struct AmendPageTests {
     ) async throws {
         try await client.execute(uri: "/\(slug)", method: .get) { response in
             #expect(response.status == .ok)
-            #expect(String(buffer: response.body) == body)
+            #expect(TestFixture.uploadedBody(response.body) == body)
             #expect(response.headers[.contentType] == contentType)
         }
     }

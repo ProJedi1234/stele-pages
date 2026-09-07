@@ -177,6 +177,40 @@ happens to run the app, which is rarely the machine you chose for durable storag
 
 ## API
 
+### Live updates
+
+HTML pages and attachment viewers automatically reload when their content or metadata
+changes. Stele injects a small inline client into the served HTML; the stored upload
+is unchanged. The client receives Server-Sent Events from
+`GET /pages/:slug/events?id=<page-id>`. Plain text, Markdown, CSS and raw attachment
+downloads remain unchanged.
+
+For a page with unsaved form input, playback or other state that must survive, disable
+automatic reload by including `<meta name="stele-live" content="off">` in its HTML.
+Scroll position is restored where possible, but other browser state is not preserved.
+JavaScript-disabled pages and pages whose CSP blocks the inline client still work with
+manual refresh. Tabs opened before this feature was deployed need one refresh first.
+
+Each page has a stable UUID and a revision counter. Renaming preserves its identity;
+deleting and publishing at the same slug creates a new identity. An old tab displays
+an unavailable message on deletion, expiry or rename, and never automatically switches
+to a new page reusing the slug. This is change detection, not saved history: overwritten
+content cannot be restored.
+
+Postgres triggers notify every application instance after a committed page or attachment
+write, including direct SQL changes. Each instance holds one database connection for
+LISTEN and distributes invalidations to bounded browser subscriptions. Reconnects read
+the current revision; heartbeat checks reconcile state at least every 15 seconds while
+connected. Expiry checks wake at the current deadline even without a database write.
+Suspended browsers catch up when they resume. An embedded attachment changing does not
+reload an unrelated HTML page that references it, and the landing index is not live.
+
+Reverse proxies must stream `text/event-stream` without buffering and allow long-lived
+responses. Heartbeats keep active streams moving. Verify updates through the deployed
+proxy and sleep/resume on physical Safari before relying on device behavior.
+
+### Routes
+
 | Route              | Auth   | Behaviour                                              |
 | ------------------ | ------ | ------------------------------------------------------ |
 | `GET /`            | none   | Usage page, and an index of recently published pages   |
