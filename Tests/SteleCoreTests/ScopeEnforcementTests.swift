@@ -60,7 +60,7 @@ struct ScopeEnforcementTests {
         // And it really was refused rather than half-applied: the seeded page is untouched.
         try await TestFixture.makeApp(store: store).test(.router) { client in
             try await client.execute(uri: "/quiet-cedar-otter", method: .get) { response in
-                #expect(String(buffer: response.body) == "<h1>original</h1>")
+                #expect(TestFixture.uploadedBody(response.body) == "<h1>original</h1>")
             }
         }
     }
@@ -91,7 +91,7 @@ struct ScopeEnforcementTests {
 
             // And the write really landed, rather than a 200 over an untouched row.
             try await client.execute(uri: "/quiet-cedar-otter", method: .get) { response in
-                #expect(String(buffer: response.body) == "<h1>hi</h1>")
+                #expect(TestFixture.uploadedBody(response.body) == "<h1>hi</h1>")
             }
 
             // A retime rather than a rename, so the page keeps the address the delete below

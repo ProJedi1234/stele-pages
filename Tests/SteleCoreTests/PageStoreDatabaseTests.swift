@@ -178,6 +178,139 @@ enum PostgresFixture {
     .serialized
 )
 struct PageStoreDatabaseTests {
+
+    @Test func pageNotificationsAreDeliveredOnlyAfterCommit() async throws {
+        try await PostgresFixture.withThrowawaySchema(clients: 2) { database in
+            try await database.store.migrate()
+            let rolledBackID = UUID()
+            let committedID = UUID()
+            let (ready, readyContinuation) = AsyncStream.makeStream(of: Void.self)
+            let listener = Task {
+                try await database.clients[0].withConnection { connection in
+                    try await connection.listen(on: "stele_page_changes") { notifications in
+                        readyContinuation.yield()
+                        var iterator = notifications.makeAsyncIterator()
+                        return try await iterator.next()?.payload
+                    }
+                }
+            }
+            var readyIterator = ready.makeAsyncIterator()
+            _ = await readyIterator.next()
+
+            try await database.clients[1].withConnection { connection in
+                try await connection.query("BEGIN", logger: PostgresFixture.logger)
+                try await connection.query(
+                    """
+                    INSERT INTO pages (id, slug, kind, body, content_type, expires_at)
+                    VALUES (\(rolledBackID), 'quiet-cedar-otter', 'text', 'rolled back',
+                            'text/plain', NULL)
+                    """,
+                    logger: PostgresFixture.logger
+                )
+                try await connection.query("ROLLBACK", logger: PostgresFixture.logger)
+                try await connection.query(
+                    """
+                    INSERT INTO pages (id, slug, kind, body, content_type, expires_at)
+                    VALUES (\(committedID), 'amber-willow-heron', 'text', 'committed',
+                            'text/plain', NULL)
+                    """,
+                    logger: PostgresFixture.logger
+                )
+            }
+
+            // If rollback leaked its queued notification it would arrive first.
+            #expect(try await listener.value == committedID.uuidString.lowercased())
+        }
+    }
+
+    @Test func pageIdentitySurvivesWritesAndSlugReuseGetsANewIdentity() async throws {
+        try await PostgresFixture.withThrowawaySchema { database in
+            let store = database.store
+            try await store.migrate()
+
+            let original = Slug(unchecked: "quiet-cedar-otter")
+            let renamed = Slug(unchecked: "amber-willow-heron")
+            #expect(
+                try await store.insert(
+                    slug: original, body: .text("first"), contentType: "text/plain",
+                    expiresAt: nil, clientID: nil
+                )
+            )
+            let first = try #require(try await store.fetchLiveState(slug: original))
+            #expect(first.revision == 1)
+
+            _ = try await store.update(
+                slug: original, body: .text("second"), contentType: nil, clientID: nil
+            )
+            let replaced = try #require(try await store.fetchLiveState(slug: original))
+            #expect(replaced.id == first.id)
+            #expect(replaced.revision > first.revision)
+
+            _ = try await store.applyAmendment(
+                slug: original, newSlug: renamed, newExpiry: nil
+            )
+            #expect(try await store.fetchLiveState(slug: original) == nil)
+            let moved = try #require(try await store.fetchLiveState(slug: renamed))
+            #expect(moved.id == first.id)
+            #expect(moved.revision > replaced.revision)
+
+            #expect(try await store.delete(slug: renamed))
+            #expect(
+                try await store.insert(
+                    slug: renamed, body: .text("new page"), contentType: "text/plain",
+                    expiresAt: nil, clientID: nil
+                )
+            )
+            let reused = try #require(try await store.fetchLiveState(slug: renamed))
+            #expect(reused.id != first.id)
+            #expect(reused.revision == 1)
+        }
+    }
+
+    @Test func blobMutationsAdvanceTheOwningPageRevision() async throws {
+        try await PostgresFixture.withThrowawaySchema { database in
+            let store = database.store
+            try await store.migrate()
+            let slug = Slug(unchecked: "quiet-cedar-otter")
+
+            #expect(
+                try await store.insert(
+                    slug: slug, body: .blob(bytes: [1], filename: "one.bin"),
+                    contentType: "application/octet-stream", expiresAt: nil, clientID: nil
+                )
+            )
+            let inserted = try #require(try await store.fetchLiveState(slug: slug))
+            // The page insert starts at one and the separately stored blob advances it.
+            #expect(inserted.revision > 1)
+
+            try await database.client.query(
+                """
+                UPDATE page_blobs SET bytes = \(Data([2, 3])), byte_size = 2, digest = 'changed'
+                WHERE slug = \(slug.value)
+                """,
+                logger: PostgresFixture.logger
+            )
+            let mutated = try #require(try await store.fetchLiveState(slug: slug))
+            #expect(mutated.id == inserted.id)
+            #expect(mutated.revision > inserted.revision)
+
+            // A parent rename cascades the blob key. The blob trigger ignores a slug-only
+            // update, avoiding a recursive write of the parent row being renamed.
+            let renamed = Slug(unchecked: "amber-willow-heron")
+            _ = try await store.applyAmendment(slug: slug, newSlug: renamed, newExpiry: nil)
+            let moved = try #require(try await store.fetchLiveState(slug: renamed))
+            #expect(moved.id == inserted.id)
+            #expect(moved.revision > mutated.revision)
+            #expect(try await store.delete(slug: renamed))
+            #expect(try await store.fetchLiveState(slug: renamed) == nil)
+            #expect(try await store.fetchBlob(slug: renamed, range: nil) == nil)
+            #expect(
+                try await PostgresFixture.column(
+                    "SELECT slug FROM page_blobs", as: String.self, on: database.client
+                ).isEmpty
+            )
+        }
+    }
     /// What version 1 produces when there was nothing there before. The runner's own
     /// `IF NOT EXISTS` forms mean a wrong shape would never announce itself — this is the
     /// only place the schema's actual columns, constraints and index are pinned.
@@ -1509,8 +1642,11 @@ struct PageStoreDatabaseTests {
 
             // The page that predates attachments is text, says so in the column, and still
             // has its body.
-            let page = try await store.fetch(slug: Slug(unchecked: "quiet-cedar-otter"))
-            #expect(page?.content.text == "<h1>before</h1>")
+            let body = try await PostgresFixture.scalar(
+                "SELECT body FROM pages WHERE slug = 'quiet-cedar-otter'",
+                as: String.self, on: database.client
+            )
+            #expect(body == "<h1>before</h1>")
             let kind = try await PostgresFixture.scalar(
                 "SELECT kind FROM pages WHERE slug = 'quiet-cedar-otter'",
                 as: String.self, on: database.client

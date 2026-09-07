@@ -64,7 +64,7 @@ struct UploadContentTypeTests {
 
             try await client.execute(uri: "/\(slug)", method: .get) { response in
                 #expect(response.status == .ok)
-                #expect(String(buffer: response.body) == uploaded)
+                #expect(TestFixture.uploadedBody(response.body) == uploaded)
                 #expect(response.headers[.contentType] == PageContentType.default)
                 #expect(response.headers[.xContentTypeOptions] == "nosniff")
             }
@@ -93,7 +93,7 @@ struct UploadContentTypeTests {
 
             try await client.execute(uri: "/\(slug)", method: .get) { response in
                 #expect(response.status == .ok)
-                #expect(String(buffer: response.body) == uploaded)
+                #expect(TestFixture.uploadedBody(response.body) == uploaded)
                 #expect(response.headers[.contentType] == servedType)
                 #expect(response.headers[.xContentTypeOptions] == "nosniff")
             }

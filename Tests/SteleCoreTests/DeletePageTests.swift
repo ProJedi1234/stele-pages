@@ -48,7 +48,7 @@ struct DeletePageTests {
     static func expectOriginalIntact(_ client: some TestClientProtocol) async throws {
         try await client.execute(uri: "/\(slugName)", method: .get) { response in
             #expect(response.status == .ok)
-            #expect(String(buffer: response.body) == original)
+            #expect(TestFixture.uploadedBody(response.body) == original)
             #expect(response.headers[.contentType] == PageContentType.default)
             #expect(response.headers[.xContentTypeOptions] == "nosniff")
         }
@@ -242,7 +242,7 @@ struct DeletePageTests {
 
             try await client.execute(uri: "/\(Self.slugName)", method: .get) { response in
                 #expect(response.status == .ok)
-                #expect(String(buffer: response.body) == republished)
+                #expect(TestFixture.uploadedBody(response.body) == republished)
             }
         }
     }

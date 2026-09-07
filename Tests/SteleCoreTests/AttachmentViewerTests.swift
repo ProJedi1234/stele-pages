@@ -158,7 +158,7 @@ struct AttachmentViewerTests {
         await store.seed(slug: slug, body: "<h1>a page</h1>")
         try await TestFixture.makeApp(store: store).test(.router) { client in
             try await client.execute(uri: "/\(slug.value)", method: .get) { response in
-                #expect(String(buffer: response.body) == "<h1>a page</h1>")
+                #expect(TestFixture.uploadedBody(response.body) == "<h1>a page</h1>")
             }
         }
     }

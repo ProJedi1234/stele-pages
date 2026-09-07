@@ -10,6 +10,16 @@ import Testing
 /// values it pins — the token length, the base URL, the parse-only database URL — are
 /// asserted in exactly one place instead of drifting per file.
 enum TestFixture {
+    /// Existing write tests compare the upload independently of the serving-only client.
+    static func uploadedBody(_ buffer: ByteBuffer) -> String {
+        var html = String(buffer: buffer)
+        if let start = html.range(of: "<script data-stele-live>"),
+           let end = html.range(of: "</script>", range: start.upperBound..<html.endIndex) {
+            html.removeSubrange(start.lowerBound..<end.upperBound)
+        }
+        return html
+    }
+
     /// The shared `STELE_UPLOAD_TOKEN`, at exactly the minimum accepted length so the
     /// fixture pins that boundary rather than drifting past it.
     ///
@@ -69,13 +79,15 @@ enum TestFixture {
         store: InMemoryPageStore = InMemoryPageStore(),
         clients: InMemoryClientStore = InMemoryClientStore(holding: publishToken),
         github: some GitHubIdentifying = InMemoryGitHub(),
-        environment: [String: String] = [:]
+        environment: [String: String] = [:],
+        liveEvents: LivePageEvents = LivePageEvents()
     ) throws -> Application<RouterResponder<SteleRequestContext>> {
         Application(router: buildRouter(
             configuration: try configuration(environment: environment),
             store: store,
             clients: clients,
-            github: github
+            github: github,
+            liveEvents: liveEvents
         ))
     }
 

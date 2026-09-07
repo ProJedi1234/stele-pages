@@ -227,7 +227,7 @@ struct PageExpiryTests {
             // And it wrote nothing on the way to saying so.
             try await client.execute(uri: "/\(slug.value)", method: .get) { response in
                 #expect(response.status == .ok, "\(raw)")
-                #expect(String(buffer: response.body) == "<h1>original</h1>", "\(raw)")
+                #expect(TestFixture.uploadedBody(response.body) == "<h1>original</h1>", "\(raw)")
             }
         }
     }
@@ -273,7 +273,7 @@ struct PageExpiryTests {
         try await TestFixture.makeApp(store: store).test(.router) { client in
             try await client.execute(uri: "/\(slug.value)", method: .get) { response in
                 #expect(response.status == .ok)
-                #expect(String(buffer: response.body) == body)
+                #expect(TestFixture.uploadedBody(response.body) == body)
             }
         }
     }
@@ -292,7 +292,7 @@ struct PageExpiryTests {
 
             try await client.execute(uri: "/\(slug)", method: .get) { response in
                 #expect(response.status == .ok)
-                #expect(String(buffer: response.body) == uploaded)
+                #expect(TestFixture.uploadedBody(response.body) == uploaded)
             }
         }
     }
@@ -326,13 +326,13 @@ struct PageExpiryTests {
 
             try await client.execute(uri: "/\(dead.value)", method: .get) { response in
                 #expect(response.status == .ok)
-                #expect(String(buffer: response.body) == "<h1>reclaimed</h1>")
+                #expect(TestFixture.uploadedBody(response.body) == "<h1>reclaimed</h1>")
             }
 
             // The live page was never in scope for the delete.
             try await client.execute(uri: "/\(alive.value)", method: .get) { response in
                 #expect(response.status == .ok)
-                #expect(String(buffer: response.body) == "<h1>alive</h1>")
+                #expect(TestFixture.uploadedBody(response.body) == "<h1>alive</h1>")
             }
         }
 

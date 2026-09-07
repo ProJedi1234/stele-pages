@@ -45,6 +45,19 @@ public enum PageExpiry: Sendable, Equatable {
     }
 }
 
+/// The small piece of page state needed to decide whether an open copy is current.
+public struct PageLiveState: Sendable, Equatable {
+    public var id: UUID
+    public var revision: Int64
+    public var expiresAt: Date?
+
+    public init(id: UUID, revision: Int64, expiresAt: Date?) {
+        self.id = id
+        self.revision = revision
+        self.expiresAt = expiresAt
+    }
+}
+
 /// The bytes a write carries, and which of the two shapes a page can take they make it.
 ///
 /// The counterpart of `PageContent`, which is what a *read* gives back, and the pair is
@@ -79,15 +92,20 @@ public struct PageBlobSlice: Sendable, Equatable {
     /// The stored content digest. Quoted into an entity-tag by the HTTP layer; see
     /// `PageStore.digest(of:)` for why it is a column rather than something recomputed.
     public var digest: String
+    /// The owning page revision, so an HTTP validator changes even when bytes were changed
+    /// directly and the denormalized digest was not updated with them.
+    public var revision: Int64
 
     public init(
-        bytes: [UInt8], contentType: String, filename: String?, totalSize: Int, digest: String
+        bytes: [UInt8], contentType: String, filename: String?, totalSize: Int, digest: String,
+        revision: Int64 = 1
     ) {
         self.bytes = bytes
         self.contentType = contentType
         self.filename = filename
         self.totalSize = totalSize
         self.digest = digest
+        self.revision = revision
     }
 }
 
@@ -134,6 +152,9 @@ public protocol PageStoring: Sendable {
     /// of time; a conformer that returned it and left the filtering to the router would
     /// serve expired pages for as long as nobody happened to publish.
     func fetch(slug: Slug) async throws -> Page?
+
+    /// Fetches identity and revision without reading the page body.
+    func fetchLiveState(slug: Slug) async throws -> PageLiveState?
 
     /// Reads part or all of a live attachment's bytes, or nil if there is no live
     /// attachment at that slug.

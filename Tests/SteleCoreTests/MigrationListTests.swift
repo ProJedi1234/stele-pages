@@ -116,6 +116,21 @@ struct MigrationListTests {
         #expect(!alter.contains("DEFAULT"))
     }
 
+    @Test func versionSevenAddsStableIdentityRevisionsAndNotifications() throws {
+        let sql = try #require(PageStore.migrations.first { $0.version == 7 }).statements
+            .map(\.sql)
+        #expect(sql.contains { $0.contains("ADD COLUMN id uuid NOT NULL DEFAULT gen_random_uuid()") })
+        #expect(sql.contains { $0.contains("ADD COLUMN revision bigint NOT NULL DEFAULT 1") })
+        #expect(sql.contains { $0.contains("NEW.id := OLD.id") && $0.contains("OLD.revision + 1") })
+        #expect(
+            sql.contains {
+                $0.contains("pg_notify('stele_page_changes'")
+                    && $0.contains("OLD.id::text") && $0.contains("NEW.id::text")
+            }
+        )
+        #expect(sql.contains { $0.contains("AFTER UPDATE OF bytes, byte_size, digest") })
+    }
+
     /// Two properties of the statement text, both of which fail confusingly at runtime.
     /// A `\(…)` in a `PostgresQuery` literal becomes a bind parameter rather than SQL
     /// text, and DDL cannot take binds; and PostgresNIO's extended query protocol refuses
@@ -125,9 +140,14 @@ struct MigrationListTests {
             #expect(!migration.statements.isEmpty)
             for statement in migration.statements {
                 #expect(statement.binds.count == 0)
-                // Only an *interior* semicolon is a second command; a trailing one is
-                // legal, so the last character is excluded.
-                #expect(!statement.sql.dropLast().contains(";"))
+                // Only an *interior* semicolon outside a dollar-quoted function body is a
+                // second command. PL/pgSQL statements use semicolons inside `$$ ... $$`
+                // while remaining one command to the extended query protocol.
+                let outsideFunctionBody = statement.sql
+                    .replacingOccurrences(
+                        of: #"\$\$[\s\S]*?\$\$"#, with: "$$", options: .regularExpression
+                    )
+                #expect(!outsideFunctionBody.dropLast().contains(";"))
             }
         }
     }
