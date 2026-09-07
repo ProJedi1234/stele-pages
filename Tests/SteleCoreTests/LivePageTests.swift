@@ -80,6 +80,11 @@ struct LivePageTests {
         }
     }
 
+    @Test(arguments: ["<!-- unfinished comment", "<div class=\"unfinished", "<div", "<"])
+    func truncatedMarkupIsServedUnchanged(_ html: String) {
+        #expect(LivePage.inject(html: html, slug: slug, id: id, revision: 1) == html)
+    }
+
     @Test func leavesRestrictiveContentSecurityPolicyUntouched() {
         let policy = #"<meta http-equiv="Content-Security-Policy" content="default-src 'none'">"#
         let html = "<html><head>\(policy)</head><body>x</body></html>"

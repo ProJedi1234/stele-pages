@@ -48,6 +48,7 @@ let package = Package(
             dependencies: [
                 "SteleCore",
                 .product(name: "HummingbirdTesting", package: "hummingbird"),
+                .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
             ]
         ),
     ]

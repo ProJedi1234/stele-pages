@@ -77,17 +77,18 @@ struct LivePageEventsTests {
     @Test func globalAndPerPageCapacityAreEnforced() async throws {
         let events = LivePageEvents(maximumSubscriptions: 3, maximumSubscriptionsPerPage: 2)
         let pageID = UUID()
-        _ = try await events.subscribe(pageID: pageID)
-        _ = try await events.subscribe(pageID: pageID)
+        let first = try await events.subscribe(pageID: pageID)
+        let second = try await events.subscribe(pageID: pageID)
 
         await #expect(throws: LivePageEvents.SubscriptionError.capacityReached) {
             _ = try await events.subscribe(pageID: pageID)
         }
 
-        _ = try await events.subscribe(pageID: UUID())
+        let third = try await events.subscribe(pageID: UUID())
         await #expect(throws: LivePageEvents.SubscriptionError.capacityReached) {
             _ = try await events.subscribe(pageID: UUID())
         }
+        withExtendedLifetime((first, second, third)) {}
     }
 
     @Test func shutdownFinishesStreamsAndRefusesNewSubscriptions() async throws {

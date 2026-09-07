@@ -96,12 +96,18 @@ private struct HTMLScan {
             }
 
             if html[cursor...].hasPrefix("<!--") {
-                guard let end = html[cursor...].range(of: "-->")?.upperBound else { return }
+                guard let end = html[cursor...].range(of: "-->")?.upperBound else {
+                    canInject = false
+                    return
+                }
                 cursor = end
                 continue
             }
 
-            guard let tagEnd = Self.tagEnd(in: html, from: cursor) else { return }
+            guard let tagEnd = Self.tagEnd(in: html, from: cursor) else {
+                canInject = false
+                return
+            }
             let tagText = String(html[html.index(after: cursor)..<tagEnd])
             let tag = ParsedTag(tagText)
 

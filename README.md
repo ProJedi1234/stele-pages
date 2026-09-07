@@ -843,6 +843,11 @@ to gesture at is no longer the gap it was.
 
 ## Deploying
 
+Stele requires PostgreSQL 13 or newer. Migration 7 uses the built-in
+[`gen_random_uuid()`](https://www.postgresql.org/docs/13/functions-uuid.html)
+function, so no `pgcrypto` extension is needed. Local development and CI use
+PostgreSQL 17.
+
 Create the role and database on your Postgres host first:
 
 ```sql

@@ -283,8 +283,8 @@ struct PublishSkill: Sendable {
         ### Highlighting code
 
         Plain `<pre><code>` already has its surface, border and horizontal scrollbar.
-        Colour is yours to add: this server runs no highlighter and serves no JavaScript —
-        **you are the highlighter**. Wrap tokens in spans as you write the snippet, using
+        This server runs no syntax highlighter. Add colour by wrapping tokens in spans
+        as you write the snippet, using
         exactly these classes:
 
         - `tok-kw` — keywords and reserved words.
